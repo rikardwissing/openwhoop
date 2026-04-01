@@ -12,25 +12,28 @@ use std::{
 };
 
 use anyhow::anyhow;
+#[cfg(target_os = "linux")]
+use btleplug::api::BDAddr;
 use btleplug::{
     api::{Central, Manager as _, Peripheral as _, ScanFilter},
     platform::{Adapter, Manager, Peripheral},
 };
-#[cfg(target_os = "linux")]
-use btleplug::api::BDAddr;
-use chrono::{DateTime, Local, NaiveDateTime, NaiveTime, TimeDelta, Utc};
-use clap::{CommandFactory, Parser, Subcommand};
-use clap_complete::{Shell, generate};
-use btwearable_entities::packets;
-use dotenv::dotenv;
 use btwearable::{
-    BtWearable, WearableDevice,
+    BatteryProbeResult, BtWearable, CommandProbeEntry, WearableDevice,
     algo::{ExerciseMetrics, SleepConsistencyAnalyzer},
     db::DatabaseHandler,
     types::activities::{ActivityType, SearchActivityPeriods},
 };
+use btwearable_codec::{
+    WearablePacket,
+    constants::{PacketType, WEARABLE_SERVICE},
+};
+use btwearable_entities::packets;
+use chrono::{DateTime, Local, NaiveDateTime, NaiveTime, TimeDelta, Utc};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{Shell, generate};
+use dotenv::dotenv;
 use tokio::time::sleep;
-use btwearable_codec::{WearablePacket, constants::WEARABLE_SERVICE};
 
 #[cfg(target_os = "linux")]
 pub type DeviceId = BDAddr;
@@ -109,11 +112,76 @@ pub enum BtWearableCommand {
         wearable: DeviceId,
     },
     ///
+    /// Stream live device events and logs
+    ///
+    StreamEvents {
+        #[arg(long, env)]
+        wearable: DeviceId,
+    },
+    ///
     /// Get current alarm setting from device
     ///
     GetAlarm {
         #[arg(long, env)]
         wearable: DeviceId,
+    },
+    ///
+    /// Read the device advertising name
+    ///
+    GetName {
+        #[arg(long, env)]
+        wearable: DeviceId,
+    },
+    ///
+    /// Set the device advertising name
+    ///
+    #[command(visible_alias = "rename")]
+    SetName {
+        #[arg(long, env)]
+        wearable: DeviceId,
+        name: String,
+    },
+    ///
+    /// Get current battery telemetry from device
+    ///
+    Battery {
+        #[arg(long, env)]
+        wearable: DeviceId,
+    },
+    ///
+    /// Get current body placement/contact status from device
+    ///
+    BodyStatus {
+        #[arg(long, env)]
+        wearable: DeviceId,
+    },
+    ///
+    /// Get extended battery telemetry payload from device
+    ///
+    ExtendedBattery {
+        #[arg(long, env)]
+        wearable: DeviceId,
+    },
+    ///
+    /// Probe battery packets for reverse engineering
+    ///
+    ProbeBattery {
+        #[arg(long, env)]
+        wearable: DeviceId,
+    },
+    ///
+    /// Send an arbitrary command packet and dump returned notifications
+    ///
+    ProbeCommand {
+        #[arg(long, env)]
+        wearable: DeviceId,
+        command: String,
+        #[arg(default_value = "")]
+        payload_hex: String,
+        #[arg(long, default_value_t = 3000)]
+        listen_ms: u64,
+        #[arg(long, default_value_t = false)]
+        with_response: bool,
     },
     ///
     /// Copy packets from one database into another
@@ -197,6 +265,19 @@ async fn scan_command(
 
             let Some(device_id) = device_id.as_ref() else {
                 println!("Address: {}", properties.address);
+                #[cfg(target_os = "macos")]
+                match properties.local_name.as_deref() {
+                    Some(name) => {
+                        let sanitized = sanitize_name(name);
+                        if sanitized != name {
+                            println!("Name: {:?} (sanitized: {:?})", name, sanitized);
+                        } else {
+                            println!("Name: {:?}", properties.local_name);
+                        }
+                    }
+                    None => println!("Name: {:?}", properties.local_name),
+                }
+                #[cfg(not(target_os = "macos"))]
                 println!("Name: {:?}", properties.local_name);
                 println!("RSSI: {:?}", properties.rssi);
                 println!();
@@ -213,7 +294,7 @@ async fn scan_command(
                 let Some(name) = properties.local_name else {
                     continue;
                 };
-                if sanitize_name(&name).starts_with(device_id) {
+                if matches_device_name(&name, device_id) {
                     return Ok(peripheral);
                 }
             }
@@ -310,6 +391,20 @@ pub fn sanitize_name(name: &str) -> String {
         .collect::<String>()
         .trim()
         .to_string()
+}
+
+#[cfg(target_os = "macos")]
+fn matches_device_name(scanned_name: &str, device_id: &str) -> bool {
+    let sanitized = sanitize_name(scanned_name);
+    if sanitized.starts_with(device_id) {
+        return true;
+    }
+
+    let Some((_, suffix)) = sanitized.rsplit_once('[') else {
+        return false;
+    };
+    let suffix = suffix.trim_end_matches(']').trim();
+    suffix == device_id
 }
 
 impl BtWearableCli {
@@ -442,7 +537,10 @@ impl BtWearableCli {
                 let wearable = BtWearable::new(db_handler);
                 wearable.calculate_skin_temp().await?;
             }
-            BtWearableCommand::SetAlarm { wearable, alarm_time } => {
+            BtWearableCommand::SetAlarm {
+                wearable,
+                alarm_time,
+            } => {
                 let peripheral = scan_command(&adapter, Some(wearable)).await?;
                 let mut wearable =
                     WearableDevice::new(peripheral, adapter, db_handler, self.debug_packets);
@@ -478,6 +576,17 @@ impl BtWearableCli {
                 wearable.connect().await?;
                 wearable.stream_hr(should_exit).await?;
             }
+            BtWearableCommand::StreamEvents { wearable } => {
+                let peripheral = scan_command(&adapter, Some(wearable)).await?;
+                let mut wearable = WearableDevice::new(peripheral, adapter, db_handler, false);
+                let should_exit = Arc::new(AtomicBool::new(false));
+                let se = should_exit.clone();
+                ctrlc::set_handler(move || {
+                    se.store(true, Ordering::SeqCst);
+                })?;
+                wearable.connect().await?;
+                wearable.stream_events(should_exit).await?;
+            }
             BtWearableCommand::GetAlarm { wearable } => {
                 let peripheral = scan_command(&adapter, Some(wearable)).await?;
                 let mut wearable = WearableDevice::new(peripheral, adapter, db_handler, false);
@@ -498,6 +607,68 @@ impl BtWearableCli {
                 } else {
                     error!("Unexpected response from device: {:?}", data);
                 }
+            }
+            BtWearableCommand::GetName { wearable } => {
+                let peripheral = scan_command(&adapter, Some(wearable)).await?;
+                let mut wearable = WearableDevice::new(peripheral, adapter, db_handler, false);
+                wearable.connect().await?;
+                let name = wearable.get_name().await?;
+                println!("Advertising name: {name}");
+            }
+            BtWearableCommand::SetName { wearable, name } => {
+                let peripheral = scan_command(&adapter, Some(wearable)).await?;
+                let mut wearable = WearableDevice::new(peripheral, adapter, db_handler, false);
+                wearable.connect().await?;
+                let reported_name = wearable.set_name(&name).await?;
+                println!("Advertising name set to: {reported_name}");
+                #[cfg(target_os = "macos")]
+                println!("Update WEARABLE in .env to the new name before the next scan.");
+            }
+            BtWearableCommand::Battery { wearable } => {
+                let peripheral = scan_command(&adapter, Some(wearable)).await?;
+                let mut wearable = WearableDevice::new(peripheral, adapter, db_handler, false);
+                wearable.connect().await?;
+                print_command_response("Battery", wearable.get_battery().await?);
+            }
+            BtWearableCommand::BodyStatus { wearable } => {
+                let peripheral = scan_command(&adapter, Some(wearable)).await?;
+                let mut wearable = WearableDevice::new(peripheral, adapter, db_handler, false);
+                wearable.connect().await?;
+                print_command_response("Body status", wearable.get_body_status().await?);
+            }
+            BtWearableCommand::ExtendedBattery { wearable } => {
+                let peripheral = scan_command(&adapter, Some(wearable)).await?;
+                let mut wearable = WearableDevice::new(peripheral, adapter, db_handler, false);
+                wearable.connect().await?;
+                print_command_response(
+                    "Extended battery",
+                    wearable.get_extended_battery_info().await?,
+                );
+            }
+            BtWearableCommand::ProbeBattery { wearable } => {
+                let peripheral = scan_command(&adapter, Some(wearable)).await?;
+                let mut wearable = WearableDevice::new(peripheral, adapter, db_handler, false);
+                wearable.connect().await?;
+                print_battery_probe(wearable.probe_battery().await?);
+            }
+            BtWearableCommand::ProbeCommand {
+                wearable,
+                command,
+                payload_hex,
+                listen_ms,
+                with_response,
+            } => {
+                let peripheral = scan_command(&adapter, Some(wearable)).await?;
+                let mut wearable = WearableDevice::new(peripheral, adapter, db_handler, false);
+                wearable.connect().await?;
+
+                let command = parse_u8_arg(&command)?;
+                let payload = parse_hex_payload(&payload_hex)?;
+                let packet = WearablePacket::new(PacketType::Command, 0, command, payload);
+                let entries = wearable
+                    .probe_command(packet, with_response, Duration::from_millis(listen_ms))
+                    .await?;
+                print_command_probe(command, &entries);
             }
             BtWearableCommand::Merge { from } => {
                 let from_db = DatabaseHandler::new(from).await;
@@ -604,4 +775,365 @@ impl BtWearableCli {
             .next()
             .ok_or(anyhow!("No BLE adapters found"))
     }
+}
+
+fn print_command_response(label: &str, data: btwearable_codec::WearableData) {
+    match data {
+        btwearable_codec::WearableData::DeviceEvent {
+            unix,
+            event,
+            payload,
+        } => {
+            let time = DateTime::from_timestamp(i64::from(unix), 0)
+                .map(|t| {
+                    t.with_timezone(&Local)
+                        .format("%Y-%m-%d %H:%M:%S")
+                        .to_string()
+                })
+                .unwrap_or_else(|| unix.to_string());
+            println!(
+                "{label}: {:?} at {time} payload={}",
+                event,
+                hex::encode(payload)
+            );
+        }
+        btwearable_codec::WearableData::RawCommandResponse { command, payload } => match command {
+            btwearable_codec::constants::CommandNumber::GetBatteryLevel => {
+                match payload.get(2).copied() {
+                    Some(raw) => {
+                        let percent = provisional_battery_percent(raw);
+                        println!(
+                            "{label}: ~{percent}% (raw=0x{raw:02x}/{raw}, provisional 0-255 mapping), payload={}",
+                            hex::encode(payload),
+                        );
+                    }
+                    None => println!("{label} ({command:?}): {}", hex::encode(payload)),
+                }
+            }
+            btwearable_codec::constants::CommandNumber::GetBodyLocationAndStatus => {
+                let status = payload.get(2).copied().unwrap_or_default();
+                let status_label = match status {
+                    0 => "off-body/unknown",
+                    1 => "on-body",
+                    _ => "unknown",
+                };
+                println!(
+                    "{label}: {status_label} (status=0x{status:02x}, payload={})",
+                    hex::encode(payload)
+                );
+            }
+            btwearable_codec::constants::CommandNumber::GetExtendedBatteryInfo => {
+                match decode_extended_battery_response_payload(&payload) {
+                    Some(decoded) => {
+                        println!(
+                            "{label}: field1={} field2={} main_mv={} field3={} field4={} field5={} secondary_mv={} flags=0x{:04x} field6={} payload={}",
+                            decoded.field_1,
+                            decoded.field_2,
+                            decoded.main_mv,
+                            decoded.field_3,
+                            decoded.field_4,
+                            decoded.field_5,
+                            decoded.secondary_mv,
+                            decoded.flags,
+                            decoded.field_6,
+                            hex::encode(payload)
+                        );
+                    }
+                    None => println!("{label} ({command:?}): {}", hex::encode(payload)),
+                }
+            }
+            _ => {
+                println!("{label} ({command:?}): {}", hex::encode(payload));
+            }
+        },
+        other => println!("{label}: {other:?}"),
+    }
+}
+
+fn print_battery_probe(probe: BatteryProbeResult) {
+    println!("Battery probe:");
+
+    if let Some(response) = probe.battery_response {
+        print_command_response("  short response", response);
+    } else {
+        println!("  short response: <missing>");
+    }
+
+    if let Some(response) = probe.extended_battery_response {
+        print_command_response("  extended response", response);
+    } else {
+        println!("  extended response: <missing>");
+    }
+
+    if let Some(battery_event) = probe.battery_event {
+        print_battery_device_event("  battery event", battery_event);
+    } else {
+        println!("  battery event: <missing>");
+    }
+
+    if let Some(extended_event) = probe.extended_battery_event {
+        print_extended_battery_device_event("  extended event", extended_event);
+    } else {
+        println!("  extended event: <missing>");
+    }
+}
+
+fn print_command_probe(command: u8, entries: &[CommandProbeEntry]) {
+    let command_name = btwearable_codec::constants::CommandNumber::from_u8(command)
+        .map(|command| format!("{command:?}"))
+        .unwrap_or_else(|| "unknown".to_string());
+    println!("Command probe for 0x{command:02x} ({command_name})");
+
+    if entries.is_empty() {
+        println!("  no notifications received");
+        return;
+    }
+
+    for entry in entries {
+        let packet_type = entry
+            .packet_type
+            .map(|packet_type| format!("{packet_type:?}"))
+            .unwrap_or_else(|| "raw".to_string());
+        let cmd = entry
+            .cmd
+            .map(|cmd| format!("0x{cmd:02x}"))
+            .unwrap_or_else(|| "--".to_string());
+        let decoded = entry.decoded.as_deref().unwrap_or("no decode");
+
+        println!(
+            "  uuid={} type={} cmd={} payload={} decoded={}",
+            entry.uuid,
+            packet_type,
+            cmd,
+            hex::encode(&entry.payload),
+            decoded
+        );
+    }
+}
+
+fn print_battery_device_event(label: &str, data: btwearable_codec::WearableData) {
+    let btwearable_codec::WearableData::DeviceEvent { unix, payload, .. } = data else {
+        println!("{label}: {data:?}");
+        return;
+    };
+
+    let Some(decoded) = decode_battery_event_payload(&payload) else {
+        println!(
+            "{label}: undecoded at {} payload={}",
+            format_local_timestamp(unix),
+            hex::encode(payload)
+        );
+        return;
+    };
+
+    println!(
+        "{label}: at {} sample_ticks={} body_len={} kind=0x{:02x} field1={} main_mv={} state=0x{:04x} secondary_mv={} flags=0x{:04x} payload={}",
+        format_local_timestamp(unix),
+        decoded.sample_ticks,
+        decoded.body_len,
+        decoded.kind,
+        decoded.field_1,
+        decoded.main_mv,
+        decoded.state_word,
+        decoded.secondary_mv,
+        decoded.flags,
+        hex::encode(payload)
+    );
+}
+
+fn print_extended_battery_device_event(label: &str, data: btwearable_codec::WearableData) {
+    let btwearable_codec::WearableData::DeviceEvent { unix, payload, .. } = data else {
+        println!("{label}: {data:?}");
+        return;
+    };
+
+    let Some(decoded) = decode_extended_battery_event_payload(&payload) else {
+        println!(
+            "{label}: undecoded at {} payload={}",
+            format_local_timestamp(unix),
+            hex::encode(payload)
+        );
+        return;
+    };
+
+    println!(
+        "{label}: at {} sample_ticks={} body_len={} kind=0x{:02x} field1={} field2={} main_mv={} field3={} field4={} field5={} secondary_mv={} flags=0x{:04x} field6={} payload={}",
+        format_local_timestamp(unix),
+        decoded.sample_ticks,
+        decoded.body_len,
+        decoded.kind,
+        decoded.field_1,
+        decoded.field_2,
+        decoded.main_mv,
+        decoded.field_3,
+        decoded.field_4,
+        decoded.field_5,
+        decoded.secondary_mv,
+        decoded.flags,
+        decoded.field_6,
+        hex::encode(payload)
+    );
+}
+
+fn format_local_timestamp(unix: u32) -> String {
+    DateTime::from_timestamp(i64::from(unix), 0)
+        .map(|t| {
+            t.with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        })
+        .unwrap_or_else(|| unix.to_string())
+}
+
+fn parse_u8_arg(value: &str) -> anyhow::Result<u8> {
+    if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        return Ok(u8::from_str_radix(hex, 16)?);
+    }
+
+    match value.parse::<u8>() {
+        Ok(value) => Ok(value),
+        Err(decimal_error) => u8::from_str_radix(value, 16).map_err(|hex_error| {
+            anyhow!("invalid command `{value}`: {decimal_error}; {hex_error}")
+        }),
+    }
+}
+
+fn parse_hex_payload(value: &str) -> anyhow::Result<Vec<u8>> {
+    let normalized = value
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace() && *character != '_')
+        .collect::<String>();
+
+    if normalized.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let normalized = normalized
+        .strip_prefix("0x")
+        .or_else(|| normalized.strip_prefix("0X"))
+        .unwrap_or(&normalized);
+
+    if normalized.len() % 2 != 0 {
+        return Err(anyhow!("hex payload must contain an even number of digits"));
+    }
+
+    Ok(hex::decode(normalized)?)
+}
+
+#[derive(Debug)]
+struct BatteryEventDecoded {
+    sample_ticks: u16,
+    body_len: u16,
+    kind: u8,
+    field_1: u16,
+    main_mv: u16,
+    state_word: u16,
+    secondary_mv: u16,
+    flags: u16,
+}
+
+fn decode_battery_event_payload(payload: &[u8]) -> Option<BatteryEventDecoded> {
+    if payload.len() < 24 {
+        return None;
+    }
+
+    let sample_ticks = read_u16_le(payload, 0)?;
+    let body_len = read_u16_le(payload, 2)?;
+    let body = payload.get(4..)?;
+    if usize::from(body_len) != body.len() || body.len() < 20 {
+        return None;
+    }
+
+    Some(BatteryEventDecoded {
+        sample_ticks,
+        body_len,
+        kind: *body.first()?,
+        field_1: read_u16_le(body, 1)?,
+        main_mv: read_u16_le(body, 5)?,
+        state_word: read_u16_le(body, 9)?,
+        secondary_mv: read_u16_le(body, 11)?,
+        flags: read_u16_le(body, 15)?,
+    })
+}
+
+#[derive(Debug)]
+struct ExtendedBatteryEventDecoded {
+    sample_ticks: u16,
+    body_len: u16,
+    kind: u8,
+    field_1: i16,
+    field_2: i16,
+    main_mv: u16,
+    field_3: u16,
+    field_4: u16,
+    field_5: u16,
+    secondary_mv: u16,
+    flags: u16,
+    field_6: u16,
+}
+
+fn decode_extended_battery_event_payload(payload: &[u8]) -> Option<ExtendedBatteryEventDecoded> {
+    if payload.len() < 32 {
+        return None;
+    }
+
+    let sample_ticks = read_u16_le(payload, 0)?;
+    let body_len = read_u16_le(payload, 2)?;
+    let body = payload.get(4..)?;
+    if usize::from(body_len) != body.len() || body.len() < 28 {
+        return None;
+    }
+
+    let mut decoded = decode_extended_battery_words(body.get(1..)?)?;
+    decoded.sample_ticks = sample_ticks;
+    decoded.body_len = body_len;
+    decoded.kind = *body.first()?;
+    Some(decoded)
+}
+
+fn decode_extended_battery_response_payload(payload: &[u8]) -> Option<ExtendedBatteryEventDecoded> {
+    if payload.len() < 29 {
+        return None;
+    }
+
+    decode_extended_battery_words(payload.get(3..)?)
+}
+
+fn decode_extended_battery_words(words: &[u8]) -> Option<ExtendedBatteryEventDecoded> {
+    if words.len() < 26 {
+        return None;
+    }
+
+    Some(ExtendedBatteryEventDecoded {
+        sample_ticks: 0,
+        body_len: 0,
+        kind: 0,
+        field_1: read_i16_le(words, 0)?,
+        field_2: read_i16_le(words, 2)?,
+        main_mv: read_u16_le(words, 4)?,
+        field_3: read_u16_le(words, 6)?,
+        field_4: read_u16_le(words, 10)?,
+        field_5: read_u16_le(words, 12)?,
+        secondary_mv: read_u16_le(words, 14)?,
+        flags: read_u16_le(words, 18)?,
+        field_6: read_u16_le(words, 22)?,
+    })
+}
+
+fn read_u16_le(bytes: &[u8], offset: usize) -> Option<u16> {
+    let bytes = bytes.get(offset..offset + 2)?;
+    Some(u16::from_le_bytes([bytes[0], bytes[1]]))
+}
+
+fn read_i16_le(bytes: &[u8], offset: usize) -> Option<i16> {
+    let bytes = bytes.get(offset..offset + 2)?;
+    Some(i16::from_le_bytes([bytes[0], bytes[1]]))
+}
+
+fn provisional_battery_percent(raw: u8) -> u8 {
+    let percent = (u16::from(raw) * 100 + 127) / 255;
+    u8::try_from(percent).expect("0-255 battery mapping always fits in u8")
 }

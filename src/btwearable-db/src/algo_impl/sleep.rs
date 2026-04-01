@@ -1,6 +1,6 @@
-use chrono::NaiveDateTime;
-use btwearable_entities::sleep_cycles;
 use btwearable_algos::SleepCycle;
+use btwearable_entities::sleep_cycles;
+use chrono::NaiveDateTime;
 use sea_orm::{ColumnTrait, Condition, EntityTrait, QueryFilter, QueryOrder};
 
 use crate::DatabaseHandler;

@@ -1,6 +1,6 @@
 use crate::{
     WearableError, WearablePacket,
-    constants::{CommandNumber, MetadataType, PacketType},
+    constants::{CommandNumber, EventNumber, MetadataType, PacketType},
     helpers::BufferReader,
 };
 
@@ -30,6 +30,11 @@ pub enum WearableData {
         unix: u32,
         event: CommandNumber,
     },
+    DeviceEvent {
+        unix: u32,
+        event: EventNumber,
+        payload: Vec<u8>,
+    },
     UnknownEvent {
         unix: u32,
         event: u8,
@@ -41,6 +46,10 @@ pub enum WearableData {
     AlarmInfo {
         enabled: bool,
         unix: u32,
+    },
+    RawCommandResponse {
+        command: CommandNumber,
+        payload: Vec<u8>,
     },
 }
 
@@ -60,10 +69,11 @@ impl WearableData {
                     CommandNumber::ReportVersionInfo => {
                         Self::parse_report_version_info(packet.data)
                     }
-                    CommandNumber::GetAlarmTime => {
-                        Self::parse_alarm_time_response(packet.data)
-                    }
-                    _ => Err(WearableError::Unimplemented),
+                    CommandNumber::GetAlarmTime => Self::parse_alarm_time_response(packet.data),
+                    _ => Ok(Self::RawCommandResponse {
+                        command,
+                        payload: packet.data,
+                    }),
                 }
             }
             _ => Err(WearableError::Unimplemented),
@@ -82,9 +92,19 @@ impl WearableData {
 
     fn parse_event(mut packet: WearablePacket) -> Result<Self, WearableError> {
         let command = CommandNumber::from_u8(packet.cmd).ok_or(packet.cmd);
+        let event = EventNumber::from_u8(packet.cmd);
 
         let _ = packet.data.pop_front()?;
         let unix = packet.data.read_u32_le()?;
+        let payload = packet.data;
+
+        if let Some(event) = event {
+            return Ok(Self::DeviceEvent {
+                unix,
+                event,
+                payload,
+            });
+        }
 
         match command {
             Ok(CommandNumber::RunAlarm) => Ok(Self::RunAlarm { unix }),
@@ -136,8 +156,8 @@ impl WearableData {
     }
 
     fn parse_metadata(mut packet: WearablePacket) -> Result<Self, WearableError> {
-        let cmd =
-            MetadataType::from_u8(packet.cmd).ok_or(WearableError::InvalidMetadataType(packet.cmd))?;
+        let cmd = MetadataType::from_u8(packet.cmd)
+            .ok_or(WearableError::InvalidMetadataType(packet.cmd))?;
 
         let unix = packet.data.read_u32_le()?;
         let _padding = packet.data.read::<6>()?;

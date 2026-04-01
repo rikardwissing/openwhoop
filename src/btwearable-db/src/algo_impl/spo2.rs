@@ -1,10 +1,10 @@
 use crate::DatabaseHandler;
 use crate::SearchHistory;
 
-use chrono::NaiveDateTime;
 use btwearable_algos::{SpO2Reading, SpO2Score};
 use btwearable_codec::SensorData;
 use btwearable_entities::heart_rate;
+use chrono::NaiveDateTime;
 use sea_orm::{
     ActiveValue::NotSet, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
     SelectColumns, Set, Unchanged,

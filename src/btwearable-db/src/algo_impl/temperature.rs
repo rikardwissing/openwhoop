@@ -1,9 +1,9 @@
 use crate::{DatabaseHandler, SearchHistory};
 
-use chrono::NaiveDateTime;
 use btwearable_algos::SkinTempScore;
 use btwearable_codec::SensorData;
 use btwearable_entities::heart_rate;
+use chrono::NaiveDateTime;
 use sea_orm::{
     ActiveValue::NotSet, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
     SelectColumns, Set, Unchanged,

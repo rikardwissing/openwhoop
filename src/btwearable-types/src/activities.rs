@@ -322,444 +322,152 @@ pub enum ActivityType {
 impl ActivityType {
     pub fn icon_url(&self) -> &'static str {
         match self {
-            ActivityType::Activity => {
-                "icons/activities/unknown.png"
-            }
-            ActivityType::Running => {
-                "icons/activities/running.png"
-            }
-            ActivityType::Cycling => {
-                "icons/activities/cycling.png"
-            }
-            ActivityType::Baseball => {
-                "icons/activities/baseball.png"
-            }
-            ActivityType::Basketball => {
-                "icons/activities/basketball.png"
-            }
-            ActivityType::Rowing => {
-                "icons/activities/crew.png"
-            }
-            ActivityType::Fencing => {
-                "icons/activities/fencing.png"
-            }
-            ActivityType::FieldHockey => {
-                "icons/activities/field_hockey.png"
-            }
-            ActivityType::Football => {
-                "icons/activities/football.png"
-            }
-            ActivityType::Golf => {
-                "icons/activities/golf.png"
-            }
-            ActivityType::IceHockey => {
-                "icons/activities/ice_hockey.png"
-            }
-            ActivityType::Lacrosse => {
-                "icons/activities/lacrosse.png"
-            }
-            ActivityType::Rugby => {
-                "icons/activities/rugby.png"
-            }
-            ActivityType::Sailing => {
-                "icons/activities/sailing.png"
-            }
-            ActivityType::Skiing => {
-                "icons/activities/skiing.png"
-            }
-            ActivityType::Soccer => {
-                "icons/activities/soccer.png"
-            }
-            ActivityType::Softball => {
-                "icons/activities/softball.png"
-            }
-            ActivityType::Squash => {
-                "icons/activities/squash.png"
-            }
-            ActivityType::Swimming => {
-                "icons/activities/swimming_diving.png"
-            }
-            ActivityType::Tennis => {
-                "icons/activities/tennis.png"
-            }
-            ActivityType::TrackField => {
-                "icons/activities/track_and_field.png"
-            }
-            ActivityType::Volleyball => {
-                "icons/activities/volleyball.png"
-            }
-            ActivityType::WaterPolo => {
-                "icons/activities/water_polo.png"
-            }
-            ActivityType::Wrestling => {
-                "icons/activities/wrestling.png"
-            }
-            ActivityType::Boxing => {
-                "icons/activities/boxing.png"
-            }
-            ActivityType::Dance => {
-                "icons/activities/dance.png"
-            }
-            ActivityType::Pilates => {
-                "icons/activities/pilates.png"
-            }
-            ActivityType::Yoga => {
-                "icons/activities/yoga.png"
-            }
-            ActivityType::Weightlifting => {
-                "icons/activities/weightlifting.png"
-            }
-            ActivityType::Canoeing => {
-                "icons/activities/canoeing.png"
-            }
-            ActivityType::CrossCountrySkiing => {
-                "icons/activities/cross_country_skiing.png"
-            }
-            ActivityType::FunctionalFitness => {
-                "icons/activities/functional_fitness.png"
-            }
-            ActivityType::Duathlon => {
-                "icons/activities/duathlon.png"
-            }
-            ActivityType::MachineWorkout => {
-                "icons/activities/machine_workout.png"
-            }
-            ActivityType::Gymnastics => {
-                "icons/activities/gymnastics.png"
-            }
-            ActivityType::HikingRucking => {
-                "icons/activities/hiking.png"
-            }
-            ActivityType::HorsebackRiding => {
-                "icons/activities/horseback_riding.png"
-            }
-            ActivityType::Jogging => {
-                "icons/activities/jogging.png"
-            }
-            ActivityType::Kayaking => {
-                "icons/activities/kayaking.png"
-            }
-            ActivityType::MartialArts => {
-                "icons/activities/martial_arts.png"
-            }
-            ActivityType::MountainBiking => {
-                "icons/activities/mountain_biking.png"
-            }
-            ActivityType::ObstacleRacing => {
-                "icons/activities/obstacle_racing.png"
-            }
-            ActivityType::Powerlifting => {
-                "icons/activities/powerlifting.png"
-            }
-            ActivityType::RockClimbing => {
-                "icons/activities/rock_climbing.png"
-            }
-            ActivityType::Paddleboarding => {
-                "icons/activities/SUP.png"
-            }
-            ActivityType::Triathlon => {
-                "icons/activities/triathlon.png"
-            }
-            ActivityType::Walking => {
-                "icons/activities/walking.png"
-            }
-            ActivityType::Surfing => {
-                "icons/activities/surfing.png"
-            }
-            ActivityType::Elliptical => {
-                "icons/activities/elliptical.png"
-            }
-            ActivityType::Stairmaster => {
-                "icons/activities/stairmaster.png"
-            }
-            ActivityType::Plyometrics => {
-                "icons/activities/plyometrics.png"
-            }
-            ActivityType::Spinning => {
-                "icons/activities/spinning.png"
-            }
-            ActivityType::Sex => {
-                "icons/activities/sex.png"
-            }
-            ActivityType::Meditation => {
-                "icons/activities/meditation.png"
-            }
-            ActivityType::Other => {
-                "icons/activities/other.png"
-            }
-            ActivityType::PitPractice => {
-                "icons/activities/pitstop.png"
-            }
-            ActivityType::Diving => {
-                "icons/activities/diving.png"
-            }
-            ActivityType::OperationsTactical => {
-                "icons/activities/tactical_ops.png"
-            }
-            ActivityType::OperationsMedical => {
-                "icons/activities/medical_ops.png"
-            }
-            ActivityType::OperationsFlying => {
-                "icons/activities/flying_ops.png"
-            }
-            ActivityType::OperationsWater => {
-                "icons/activities/water_ops.png"
-            }
-            ActivityType::Ultimate => {
-                "icons/activities/ultimate_frisbee.png"
-            }
-            ActivityType::Climber => {
-                "icons/activities/climber.png"
-            }
-            ActivityType::JumpingRope => {
-                "icons/activities/jumping_rope.png"
-            }
-            ActivityType::AustralianRulesFootball => {
-                "icons/activities/australian_football.png"
-            }
-            ActivityType::Skateboarding => {
-                "icons/activities/skateboarding.png"
-            }
-            ActivityType::Coaching => {
-                "icons/activities/coaching.png"
-            }
-            ActivityType::IceBath => {
-                "icons/activities/ice_bath.png"
-            }
-            ActivityType::Commuting => {
-                "icons/activities/commuting.png"
-            }
-            ActivityType::Gaming => {
-                "icons/activities/gaming.png"
-            }
-            ActivityType::Snowboarding => {
-                "icons/activities/snowboarding.png"
-            }
-            ActivityType::Motocross => {
-                "icons/activities/motocross.png"
-            }
-            ActivityType::Caddying => {
-                "icons/activities/caddying.png"
-            }
-            ActivityType::ObstacleCourseRacing => {
-                "icons/activities/obstacle-course-racing.png"
-            }
-            ActivityType::MotorRacing => {
-                "icons/activities/motor-racing.png"
-            }
-            ActivityType::Hiit => {
-                "icons/activities/hiit.png"
-            }
-            ActivityType::Spin => {
-                "icons/activities/spin.png"
-            }
-            ActivityType::JiuJitsu => {
-                "icons/activities/jiu-jitsu.png"
-            }
-            ActivityType::ManualLabor => {
-                "icons/activities/manual-labor.png"
-            }
-            ActivityType::Cricket => {
-                "icons/activities/cricket.png"
-            }
-            ActivityType::Pickleball => {
-                "icons/activities/pickleball.png"
-            }
-            ActivityType::InlineSkating => {
-                "icons/activities/rollerblading.png"
-            }
-            ActivityType::BoxFitness => {
-                "icons/activities/crossfit.png"
-            }
-            ActivityType::Spikeball => {
-                "icons/activities/spikeball.png"
-            }
-            ActivityType::WheelchairPushing => {
-                "icons/activities/wheelchair_pushing.png"
-            }
-            ActivityType::PaddleTennis => {
-                "icons/activities/paddle_tennis.png"
-            }
-            ActivityType::Barre => {
-                "icons/activities/barre.png"
-            }
-            ActivityType::StagePerformance => {
-                "icons/activities/stage-performance.png"
-            }
-            ActivityType::HighStressWork => {
-                "icons/activities/high-stress-work.png"
-            }
-            ActivityType::Parkour => {
-                "icons/activities/parkour.png"
-            }
-            ActivityType::GaelicFootball => {
-                "icons/activities/gaelic-football.png"
-            }
-            ActivityType::HurlingCamogie => {
-                "icons/activities/hurling-camogie.png"
-            }
-            ActivityType::CircusArts => {
-                "icons/activities/circus-arts.png"
-            }
-            ActivityType::ResonanceFrequencyBreathing => {
-                "icons/activities/unknown.png"
-            }
-            ActivityType::MassageTherapy => {
-                "icons/activities/massage_therapy.png"
-            }
-            ActivityType::StrengthTrainer => {
-                "icons/activities/weightlifting.png"
-            }
-            ActivityType::WatchingSports => {
-                "icons/activities/spectating.png"
-            }
-            ActivityType::AssaultBike => {
-                "icons/activities/assault_bike.png"
-            }
-            ActivityType::Kickboxing => {
-                "icons/activities/kickboxing.png"
-            }
-            ActivityType::Stretching => {
-                "icons/activities/stretching.png"
-            }
-            ActivityType::OtherRecovery => {
-                "icons/activities/other.png"
-            }
-            ActivityType::TableTennisPingPong => {
-                "icons/activities/ping_pong.png"
-            }
-            ActivityType::Badminton => {
-                "icons/activities/badminton.png"
-            }
-            ActivityType::Netball => {
-                "icons/activities/netball.png"
-            }
-            ActivityType::Sauna => {
-                "icons/activities/sauna.png"
-            }
-            ActivityType::DiscGolf => {
-                "icons/activities/disc_golf.png"
-            }
-            ActivityType::YardWorkGardening => {
-                "icons/activities/yard_work.png"
-            }
-            ActivityType::AirCompression => {
-                "icons/activities/air_compression.png"
-            }
-            ActivityType::PercussiveMassage => {
-                "icons/activities/percussive_massage.png"
-            }
-            ActivityType::Paintball => {
-                "icons/activities/paintball.png"
-            }
-            ActivityType::IceSkating => {
-                "icons/activities/ice_skating.png"
-            }
-            ActivityType::Handball => {
-                "icons/activities/handball.png"
-            }
-            ActivityType::PercussiveMassageHypervolt => {
-                "icons/activities/percussive_massage.png"
-            }
-            ActivityType::AirCompressionNormatec => {
-                "icons/activities/air_compression.png"
-            }
-            ActivityType::IncreaseRelaxation => {
-                "icons/activities/increase_relaxation.png"
-            }
-            ActivityType::IncreaseAlertness => {
-                "icons/activities/increase_alertness.png"
-            }
-            ActivityType::Breathwork => {
-                "icons/activities/breathwork_lungs.png"
-            }
-            ActivityType::NonSleepDeepRest => {
-                "icons/activities/non-sleep-deep-rest.png"
-            }
-            ActivityType::SteamRoom => {
-                "icons/activities/steam-room.png"
-            }
-            ActivityType::F45Training => {
-                "icons/activities/F45.png"
-            }
-            ActivityType::Padel => {
-                "icons/activities/padel.png"
-            }
-            ActivityType::BarryS => {
-                "icons/activities/barrys.png"
-            }
-            ActivityType::DedicatedParenting => {
-                "icons/activities/dedicated_parenting.png"
-            }
-            ActivityType::StrollerWalking => {
-                "icons/activities/stroller_walking.png"
-            }
-            ActivityType::StrollerJogging => {
-                "icons/activities/stroller_jogging.png"
-            }
-            ActivityType::Toddlerwearing => {
-                "icons/activities/toddler_wearing.png"
-            }
-            ActivityType::Babywearing => {
-                "icons/activities/baby_wearing.png"
-            }
-            ActivityType::PlayingWithChild => {
-                "icons/activities/playing_with_child.png"
-            }
-            ActivityType::CuddlingWithChild => {
-                "icons/activities/cuddling_with_child.png"
-            }
-            ActivityType::Barre3 => {
-                "icons/activities/barre3.png"
-            }
-            ActivityType::HotYoga => {
-                "icons/activities/hot_yoga.png"
-            }
-            ActivityType::StadiumSteps => {
-                "icons/activities/stadium-steps.png"
-            }
-            ActivityType::Polo => {
-                "icons/activities/polo.png"
-            }
-            ActivityType::MusicalPerformance => {
-                "icons/activities/musical-performance.png"
-            }
-            ActivityType::KiteBoarding => {
-                "icons/activities/kiteboarding.png"
-            }
-            ActivityType::RestorativeYoga => {
-                "icons/activities/restorative-yoga.png"
-            }
-            ActivityType::DogWalking => {
-                "icons/activities/dog-walking.png"
-            }
-            ActivityType::WaterSkiing => {
-                "icons/activities/water-skiing.png"
-            }
-            ActivityType::Wakeboarding => {
-                "icons/activities/wakeboarding.png"
-            }
-            ActivityType::Cooking => {
-                "icons/activities/cooking.png"
-            }
-            ActivityType::Cleaning => {
-                "icons/activities/cleaning.png"
-            }
-            ActivityType::WarmBath => {
-                "icons/activities/warm-bath.png"
-            }
-            ActivityType::PublicSpeaking => {
-                "icons/activities/public-speaking.png"
-            }
-            ActivityType::RaceWalking => {
-                "icons/activities/race-walking.png"
-            }
-            ActivityType::Driving => {
-                "icons/activities/driving.png"
-            }
-            ActivityType::Nap => {
-                "icons/activities/nap.png"
-            }
+            ActivityType::Activity => "icons/activities/unknown.png",
+            ActivityType::Running => "icons/activities/running.png",
+            ActivityType::Cycling => "icons/activities/cycling.png",
+            ActivityType::Baseball => "icons/activities/baseball.png",
+            ActivityType::Basketball => "icons/activities/basketball.png",
+            ActivityType::Rowing => "icons/activities/crew.png",
+            ActivityType::Fencing => "icons/activities/fencing.png",
+            ActivityType::FieldHockey => "icons/activities/field_hockey.png",
+            ActivityType::Football => "icons/activities/football.png",
+            ActivityType::Golf => "icons/activities/golf.png",
+            ActivityType::IceHockey => "icons/activities/ice_hockey.png",
+            ActivityType::Lacrosse => "icons/activities/lacrosse.png",
+            ActivityType::Rugby => "icons/activities/rugby.png",
+            ActivityType::Sailing => "icons/activities/sailing.png",
+            ActivityType::Skiing => "icons/activities/skiing.png",
+            ActivityType::Soccer => "icons/activities/soccer.png",
+            ActivityType::Softball => "icons/activities/softball.png",
+            ActivityType::Squash => "icons/activities/squash.png",
+            ActivityType::Swimming => "icons/activities/swimming_diving.png",
+            ActivityType::Tennis => "icons/activities/tennis.png",
+            ActivityType::TrackField => "icons/activities/track_and_field.png",
+            ActivityType::Volleyball => "icons/activities/volleyball.png",
+            ActivityType::WaterPolo => "icons/activities/water_polo.png",
+            ActivityType::Wrestling => "icons/activities/wrestling.png",
+            ActivityType::Boxing => "icons/activities/boxing.png",
+            ActivityType::Dance => "icons/activities/dance.png",
+            ActivityType::Pilates => "icons/activities/pilates.png",
+            ActivityType::Yoga => "icons/activities/yoga.png",
+            ActivityType::Weightlifting => "icons/activities/weightlifting.png",
+            ActivityType::Canoeing => "icons/activities/canoeing.png",
+            ActivityType::CrossCountrySkiing => "icons/activities/cross_country_skiing.png",
+            ActivityType::FunctionalFitness => "icons/activities/functional_fitness.png",
+            ActivityType::Duathlon => "icons/activities/duathlon.png",
+            ActivityType::MachineWorkout => "icons/activities/machine_workout.png",
+            ActivityType::Gymnastics => "icons/activities/gymnastics.png",
+            ActivityType::HikingRucking => "icons/activities/hiking.png",
+            ActivityType::HorsebackRiding => "icons/activities/horseback_riding.png",
+            ActivityType::Jogging => "icons/activities/jogging.png",
+            ActivityType::Kayaking => "icons/activities/kayaking.png",
+            ActivityType::MartialArts => "icons/activities/martial_arts.png",
+            ActivityType::MountainBiking => "icons/activities/mountain_biking.png",
+            ActivityType::ObstacleRacing => "icons/activities/obstacle_racing.png",
+            ActivityType::Powerlifting => "icons/activities/powerlifting.png",
+            ActivityType::RockClimbing => "icons/activities/rock_climbing.png",
+            ActivityType::Paddleboarding => "icons/activities/SUP.png",
+            ActivityType::Triathlon => "icons/activities/triathlon.png",
+            ActivityType::Walking => "icons/activities/walking.png",
+            ActivityType::Surfing => "icons/activities/surfing.png",
+            ActivityType::Elliptical => "icons/activities/elliptical.png",
+            ActivityType::Stairmaster => "icons/activities/stairmaster.png",
+            ActivityType::Plyometrics => "icons/activities/plyometrics.png",
+            ActivityType::Spinning => "icons/activities/spinning.png",
+            ActivityType::Sex => "icons/activities/sex.png",
+            ActivityType::Meditation => "icons/activities/meditation.png",
+            ActivityType::Other => "icons/activities/other.png",
+            ActivityType::PitPractice => "icons/activities/pitstop.png",
+            ActivityType::Diving => "icons/activities/diving.png",
+            ActivityType::OperationsTactical => "icons/activities/tactical_ops.png",
+            ActivityType::OperationsMedical => "icons/activities/medical_ops.png",
+            ActivityType::OperationsFlying => "icons/activities/flying_ops.png",
+            ActivityType::OperationsWater => "icons/activities/water_ops.png",
+            ActivityType::Ultimate => "icons/activities/ultimate_frisbee.png",
+            ActivityType::Climber => "icons/activities/climber.png",
+            ActivityType::JumpingRope => "icons/activities/jumping_rope.png",
+            ActivityType::AustralianRulesFootball => "icons/activities/australian_football.png",
+            ActivityType::Skateboarding => "icons/activities/skateboarding.png",
+            ActivityType::Coaching => "icons/activities/coaching.png",
+            ActivityType::IceBath => "icons/activities/ice_bath.png",
+            ActivityType::Commuting => "icons/activities/commuting.png",
+            ActivityType::Gaming => "icons/activities/gaming.png",
+            ActivityType::Snowboarding => "icons/activities/snowboarding.png",
+            ActivityType::Motocross => "icons/activities/motocross.png",
+            ActivityType::Caddying => "icons/activities/caddying.png",
+            ActivityType::ObstacleCourseRacing => "icons/activities/obstacle-course-racing.png",
+            ActivityType::MotorRacing => "icons/activities/motor-racing.png",
+            ActivityType::Hiit => "icons/activities/hiit.png",
+            ActivityType::Spin => "icons/activities/spin.png",
+            ActivityType::JiuJitsu => "icons/activities/jiu-jitsu.png",
+            ActivityType::ManualLabor => "icons/activities/manual-labor.png",
+            ActivityType::Cricket => "icons/activities/cricket.png",
+            ActivityType::Pickleball => "icons/activities/pickleball.png",
+            ActivityType::InlineSkating => "icons/activities/rollerblading.png",
+            ActivityType::BoxFitness => "icons/activities/crossfit.png",
+            ActivityType::Spikeball => "icons/activities/spikeball.png",
+            ActivityType::WheelchairPushing => "icons/activities/wheelchair_pushing.png",
+            ActivityType::PaddleTennis => "icons/activities/paddle_tennis.png",
+            ActivityType::Barre => "icons/activities/barre.png",
+            ActivityType::StagePerformance => "icons/activities/stage-performance.png",
+            ActivityType::HighStressWork => "icons/activities/high-stress-work.png",
+            ActivityType::Parkour => "icons/activities/parkour.png",
+            ActivityType::GaelicFootball => "icons/activities/gaelic-football.png",
+            ActivityType::HurlingCamogie => "icons/activities/hurling-camogie.png",
+            ActivityType::CircusArts => "icons/activities/circus-arts.png",
+            ActivityType::ResonanceFrequencyBreathing => "icons/activities/unknown.png",
+            ActivityType::MassageTherapy => "icons/activities/massage_therapy.png",
+            ActivityType::StrengthTrainer => "icons/activities/weightlifting.png",
+            ActivityType::WatchingSports => "icons/activities/spectating.png",
+            ActivityType::AssaultBike => "icons/activities/assault_bike.png",
+            ActivityType::Kickboxing => "icons/activities/kickboxing.png",
+            ActivityType::Stretching => "icons/activities/stretching.png",
+            ActivityType::OtherRecovery => "icons/activities/other.png",
+            ActivityType::TableTennisPingPong => "icons/activities/ping_pong.png",
+            ActivityType::Badminton => "icons/activities/badminton.png",
+            ActivityType::Netball => "icons/activities/netball.png",
+            ActivityType::Sauna => "icons/activities/sauna.png",
+            ActivityType::DiscGolf => "icons/activities/disc_golf.png",
+            ActivityType::YardWorkGardening => "icons/activities/yard_work.png",
+            ActivityType::AirCompression => "icons/activities/air_compression.png",
+            ActivityType::PercussiveMassage => "icons/activities/percussive_massage.png",
+            ActivityType::Paintball => "icons/activities/paintball.png",
+            ActivityType::IceSkating => "icons/activities/ice_skating.png",
+            ActivityType::Handball => "icons/activities/handball.png",
+            ActivityType::PercussiveMassageHypervolt => "icons/activities/percussive_massage.png",
+            ActivityType::AirCompressionNormatec => "icons/activities/air_compression.png",
+            ActivityType::IncreaseRelaxation => "icons/activities/increase_relaxation.png",
+            ActivityType::IncreaseAlertness => "icons/activities/increase_alertness.png",
+            ActivityType::Breathwork => "icons/activities/breathwork_lungs.png",
+            ActivityType::NonSleepDeepRest => "icons/activities/non-sleep-deep-rest.png",
+            ActivityType::SteamRoom => "icons/activities/steam-room.png",
+            ActivityType::F45Training => "icons/activities/F45.png",
+            ActivityType::Padel => "icons/activities/padel.png",
+            ActivityType::BarryS => "icons/activities/barrys.png",
+            ActivityType::DedicatedParenting => "icons/activities/dedicated_parenting.png",
+            ActivityType::StrollerWalking => "icons/activities/stroller_walking.png",
+            ActivityType::StrollerJogging => "icons/activities/stroller_jogging.png",
+            ActivityType::Toddlerwearing => "icons/activities/toddler_wearing.png",
+            ActivityType::Babywearing => "icons/activities/baby_wearing.png",
+            ActivityType::PlayingWithChild => "icons/activities/playing_with_child.png",
+            ActivityType::CuddlingWithChild => "icons/activities/cuddling_with_child.png",
+            ActivityType::Barre3 => "icons/activities/barre3.png",
+            ActivityType::HotYoga => "icons/activities/hot_yoga.png",
+            ActivityType::StadiumSteps => "icons/activities/stadium-steps.png",
+            ActivityType::Polo => "icons/activities/polo.png",
+            ActivityType::MusicalPerformance => "icons/activities/musical-performance.png",
+            ActivityType::KiteBoarding => "icons/activities/kiteboarding.png",
+            ActivityType::RestorativeYoga => "icons/activities/restorative-yoga.png",
+            ActivityType::DogWalking => "icons/activities/dog-walking.png",
+            ActivityType::WaterSkiing => "icons/activities/water-skiing.png",
+            ActivityType::Wakeboarding => "icons/activities/wakeboarding.png",
+            ActivityType::Cooking => "icons/activities/cooking.png",
+            ActivityType::Cleaning => "icons/activities/cleaning.png",
+            ActivityType::WarmBath => "icons/activities/warm-bath.png",
+            ActivityType::PublicSpeaking => "icons/activities/public-speaking.png",
+            ActivityType::RaceWalking => "icons/activities/race-walking.png",
+            ActivityType::Driving => "icons/activities/driving.png",
+            ActivityType::Nap => "icons/activities/nap.png",
         }
     }
 

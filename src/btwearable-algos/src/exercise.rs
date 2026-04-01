@@ -2,11 +2,11 @@ use std::fmt::Display;
 
 use chrono::TimeDelta;
 
-use btwearable_codec::WearableError;
 use crate::helpers::{
     format_hm::FormatHM,
     time_math::{mean_deltas, std_dev_delta},
 };
+use btwearable_codec::WearableError;
 use btwearable_types::activities::ActivityPeriod;
 
 #[derive(Debug, Default)]
@@ -69,8 +69,8 @@ mod tests {
 
     #[test]
     fn test_metrics_with_exercises() {
-        use chrono::NaiveDate;
         use btwearable_types::activities::{ActivityPeriod, ActivityType};
+        use chrono::NaiveDate;
 
         let base = NaiveDate::from_ymd_opt(2025, 1, 1)
             .unwrap()

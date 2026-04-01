@@ -1,11 +1,11 @@
 use btleplug::api::ValueNotification;
-use chrono::{DateTime, Local, TimeDelta};
-use btwearable_entities::packets;
-use btwearable_db::{DatabaseHandler, SearchHistory};
 use btwearable_codec::{
     Activity, HistoryReading, WearableData, WearablePacket,
     constants::{CMD_FROM_STRAP, DATA_FROM_STRAP, MetadataType},
 };
+use btwearable_db::{DatabaseHandler, SearchHistory};
+use btwearable_entities::packets;
+use chrono::{DateTime, Local, TimeDelta};
 
 use crate::{
     algo::{
@@ -278,8 +278,9 @@ impl BtWearable {
         loop {
             let last = self.database.last_spo2_time().await?;
             let options = SearchHistory {
-                from: last
-                    .map(|t| t - TimeDelta::seconds(i64::try_from(SpO2Calculator::WINDOW_SIZE).unwrap_or(0))),
+                from: last.map(|t| {
+                    t - TimeDelta::seconds(i64::try_from(SpO2Calculator::WINDOW_SIZE).unwrap_or(0))
+                }),
                 to: None,
                 limit: Some(86400),
             };
@@ -331,8 +332,11 @@ impl BtWearable {
         loop {
             let last_stress = self.database.last_stress_time().await?;
             let options = SearchHistory {
-                from: last_stress
-                    .map(|t| t - TimeDelta::seconds(i64::try_from(StressCalculator::MIN_READING_PERIOD).unwrap_or(0))),
+                from: last_stress.map(|t| {
+                    t - TimeDelta::seconds(
+                        i64::try_from(StressCalculator::MIN_READING_PERIOD).unwrap_or(0),
+                    )
+                }),
                 to: None,
                 limit: Some(86400),
             };

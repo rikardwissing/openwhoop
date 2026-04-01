@@ -1,6 +1,6 @@
-use chrono::{Local, NaiveDateTime, TimeZone};
 use btwearable_entities::{packets, sleep_cycles};
 use btwearable_migration::{Migrator, MigratorTrait, OnConflict};
+use chrono::{Local, NaiveDateTime, TimeZone};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::NotSet, ColumnTrait, ConnectOptions, Database,
     DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,

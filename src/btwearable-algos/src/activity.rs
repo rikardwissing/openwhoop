@@ -1,5 +1,5 @@
-use chrono::{Duration, NaiveDateTime, TimeDelta};
 use btwearable_codec::{Activity, ParsedHistoryReading};
+use chrono::{Duration, NaiveDateTime, TimeDelta};
 
 const ACTIVITY_CHANGE_THRESHOLD: Duration = Duration::minutes(15);
 const MIN_SLEEP_DURATION: Duration = Duration::minutes(60);

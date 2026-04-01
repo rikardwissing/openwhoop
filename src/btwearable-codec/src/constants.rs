@@ -34,7 +34,7 @@ pub enum MetadataType {
     HistoryComplete = 3,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum EventNumber {
     Undefined = 0,
@@ -198,6 +198,72 @@ impl PacketType {
     // Convert PacketType to u8
     pub fn as_u8(self) -> u8 {
         u8::from(self)
+    }
+}
+
+impl EventNumber {
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Undefined),
+            1 => Some(Self::Error),
+            2 => Some(Self::ConsoleOutput),
+            3 => Some(Self::BatteryLevel),
+            4 => Some(Self::SystemControl),
+            5 => Some(Self::External5vOn),
+            6 => Some(Self::External5vOff),
+            7 => Some(Self::ChargingOn),
+            8 => Some(Self::ChargingOff),
+            9 => Some(Self::WristOn),
+            10 => Some(Self::WristOff),
+            11 => Some(Self::BleConnectionUp),
+            12 => Some(Self::BleConnectionDown),
+            13 => Some(Self::RtcLost),
+            14 => Some(Self::DoubleTap),
+            15 => Some(Self::Boot),
+            16 => Some(Self::SetRtc),
+            17 => Some(Self::TemperatureLevel),
+            18 => Some(Self::PairingMode),
+            19 => Some(Self::SerialHeadConnected),
+            20 => Some(Self::SerialHeadRemoved),
+            21 => Some(Self::BatteryPackConnected),
+            22 => Some(Self::BatteryPackRemoved),
+            23 => Some(Self::BleBonded),
+            24 => Some(Self::BleHrProfileEnabled),
+            25 => Some(Self::BleHrProfileDisabled),
+            26 => Some(Self::TrimAllData),
+            27 => Some(Self::TrimAllDataEnded),
+            28 => Some(Self::FlashInitComplete),
+            29 => Some(Self::StrapConditionReport),
+            30 => Some(Self::BootReport),
+            31 => Some(Self::ExitVirginMode),
+            32 => Some(Self::CaptouchAutothresholdAction),
+            33 => Some(Self::BleRealtimeHrOn),
+            34 => Some(Self::BleRealtimeHrOff),
+            35 => Some(Self::AccelerometerReset),
+            36 => Some(Self::AfeReset),
+            37 => Some(Self::ShipModeEnabled),
+            38 => Some(Self::ShipModeDisabled),
+            39 => Some(Self::ShipModeBoot),
+            40 => Some(Self::Ch1SaturationDetected),
+            41 => Some(Self::Ch2SaturationDetected),
+            42 => Some(Self::AccelerometerSaturationDetected),
+            43 => Some(Self::BleSystemReset),
+            44 => Some(Self::BleSystemOn),
+            45 => Some(Self::BleSystemInitialized),
+            46 => Some(Self::RawDataCollectionOn),
+            47 => Some(Self::RawDataCollectionOff),
+            56 => Some(Self::StrapDrivenAlarmSet),
+            57 => Some(Self::StrapDrivenAlarmExecuted),
+            58 => Some(Self::AppDrivenAlarmExecuted),
+            59 => Some(Self::StrapDrivenAlarmDisabled),
+            60 => Some(Self::HapticsFired),
+            63 => Some(Self::ExtendedBatteryInformation),
+            96 => Some(Self::HighFreqSyncPrompt),
+            97 => Some(Self::HighFreqSyncEnabled),
+            98 => Some(Self::HighFreqSyncDisabled),
+            100 => Some(Self::HapticsTerminated),
+            _ => None,
+        }
     }
 }
 

@@ -1,8 +1,8 @@
 use crate::DatabaseHandler;
 
-use chrono::NaiveDateTime;
-use btwearable_entities::heart_rate;
 use btwearable_algos::StressScore;
+use btwearable_entities::heart_rate;
+use chrono::NaiveDateTime;
 use sea_orm::{
     ActiveValue::NotSet, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
     SelectColumns, Set, Unchanged,
@@ -77,10 +77,7 @@ mod tests {
             .unwrap();
         let time = history[0].time;
 
-        let stress = StressScore {
-            time,
-            score: 5.5,
-        };
+        let stress = StressScore { time, score: 5.5 };
         db.update_stress_on_reading(stress).await.unwrap();
 
         let last_stress = db.last_stress_time().await.unwrap();

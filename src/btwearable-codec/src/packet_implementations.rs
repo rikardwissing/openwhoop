@@ -52,9 +52,65 @@ impl WearablePacket {
         )
     }
 
+    pub fn get_name_modern() -> WearablePacket {
+        WearablePacket::new(
+            PacketType::Command,
+            0,
+            CommandNumber::GetAdvertisingName.as_u8(),
+            vec![0x00],
+        )
+    }
+
+    pub fn set_name(name: &str) -> Result<WearablePacket, WearableError> {
+        const HARVARD_NAME_BUFFER_LEN: usize = 11;
+
+        let name_bytes = Self::validated_name_bytes(name)?;
+        if name_bytes.len() + 1 > HARVARD_NAME_BUFFER_LEN {
+            return Err(WearableError::InvalidData);
+        }
+
+        let mut payload = vec![0x00, 0x01];
+        payload.extend_from_slice(&name_bytes);
+        payload.push(0x00);
+        payload.resize(2 + HARVARD_NAME_BUFFER_LEN, 0x00);
+
+        Ok(WearablePacket::new(
+            PacketType::Command,
+            0,
+            CommandNumber::SetAdvertisingNameHarvard.as_u8(),
+            payload,
+        ))
+    }
+
+    pub fn set_name_modern(name: &str) -> Result<WearablePacket, WearableError> {
+        let name_bytes = Self::validated_name_bytes(name)?;
+        let mut payload = name_bytes;
+        payload.push(0x00);
+
+        Ok(WearablePacket::new(
+            PacketType::Command,
+            0,
+            CommandNumber::SetAdvertisingName.as_u8(),
+            payload,
+        ))
+    }
+
+    fn validated_name_bytes(name: &str) -> Result<Vec<u8>, WearableError> {
+        if name.is_empty()
+            || name
+                .bytes()
+                .any(|byte| byte == 0 || byte.is_ascii_control())
+        {
+            return Err(WearableError::InvalidData);
+        }
+
+        Ok(name.as_bytes().to_vec())
+    }
+
     pub fn set_time() -> Result<WearablePacket, WearableError> {
         let mut data = vec![];
-        let current_time = u32::try_from(Utc::now().timestamp()).map_err(|_| WearableError::Overflow)?;
+        let current_time =
+            u32::try_from(Utc::now().timestamp()).map_err(|_| WearableError::Overflow)?;
         data.extend_from_slice(&current_time.to_le_bytes());
         data.append(&mut vec![0, 0, 0, 0, 0]); // padding
         Ok(WearablePacket::new(
@@ -162,6 +218,33 @@ impl WearablePacket {
         )
     }
 
+    pub fn get_battery_level() -> WearablePacket {
+        WearablePacket::new(
+            PacketType::Command,
+            0,
+            CommandNumber::GetBatteryLevel.as_u8(),
+            vec![0x00],
+        )
+    }
+
+    pub fn get_body_location_and_status() -> WearablePacket {
+        WearablePacket::new(
+            PacketType::Command,
+            0,
+            CommandNumber::GetBodyLocationAndStatus.as_u8(),
+            vec![0x00],
+        )
+    }
+
+    pub fn get_extended_battery_info() -> WearablePacket {
+        WearablePacket::new(
+            PacketType::Command,
+            0,
+            CommandNumber::GetExtendedBatteryInfo.as_u8(),
+            vec![0x00],
+        )
+    }
+
     pub fn toggle_realtime_hr(enable: bool) -> WearablePacket {
         WearablePacket::new(
             PacketType::Command,
@@ -244,6 +327,21 @@ mod tests {
     }
 
     #[test]
+    fn battery_packets() {
+        let p = WearablePacket::get_battery_level();
+        assert_command_packet(&p, CommandNumber::GetBatteryLevel);
+        assert_roundtrip(&p);
+
+        let p = WearablePacket::get_body_location_and_status();
+        assert_command_packet(&p, CommandNumber::GetBodyLocationAndStatus);
+        assert_roundtrip(&p);
+
+        let p = WearablePacket::get_extended_battery_info();
+        assert_command_packet(&p, CommandNumber::GetExtendedBatteryInfo);
+        assert_roundtrip(&p);
+    }
+
+    #[test]
     fn toggle_imu_mode_on_off() {
         let on = WearablePacket::toggle_imu_mode(true);
         assert_eq!(on.data, vec![1]);
@@ -280,7 +378,10 @@ mod tests {
     fn erase_packet() {
         let p = WearablePacket::erase();
         assert_command_packet(&p, CommandNumber::ForceTrim);
-        assert_eq!(p.data, vec![0xfe, 0xfe, 0xfe, 0xfe, 0xfe, 0xfe, 0xfe, 0xfe, 0x00]);
+        assert_eq!(
+            p.data,
+            vec![0xfe, 0xfe, 0xfe, 0xfe, 0xfe, 0xfe, 0xfe, 0xfe, 0x00]
+        );
         assert_roundtrip(&p);
     }
 
@@ -303,6 +404,37 @@ mod tests {
     fn get_name_packet() {
         let p = WearablePacket::get_name();
         assert_command_packet(&p, CommandNumber::GetAdvertisingNameHarvard);
+        assert_roundtrip(&p);
+    }
+
+    #[test]
+    fn get_name_modern_packet() {
+        let p = WearablePacket::get_name_modern();
+        assert_command_packet(&p, CommandNumber::GetAdvertisingName);
+        assert_roundtrip(&p);
+    }
+
+    #[test]
+    fn set_name_packet() {
+        let p = WearablePacket::set_name("BTWEARABLE").unwrap();
+        assert_command_packet(&p, CommandNumber::SetAdvertisingNameHarvard);
+        assert_eq!(p.data, b"\x00\x01BTWEARABLE\x00");
+        assert_roundtrip(&p);
+    }
+
+    #[test]
+    fn set_name_rejects_invalid_input() {
+        assert!(WearablePacket::set_name("").is_err());
+        assert!(WearablePacket::set_name("bad\0name").is_err());
+        assert!(WearablePacket::set_name("bad\nname").is_err());
+        assert!(WearablePacket::set_name("ABCDEFGHIJK").is_err());
+    }
+
+    #[test]
+    fn set_name_modern_packet() {
+        let p = WearablePacket::set_name_modern("BTWEARABLE").unwrap();
+        assert_command_packet(&p, CommandNumber::SetAdvertisingName);
+        assert_eq!(p.data, b"BTWEARABLE\x00");
         assert_roundtrip(&p);
     }
 

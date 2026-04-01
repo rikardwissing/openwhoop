@@ -165,7 +165,8 @@ mod tests {
 
     #[test]
     fn test_packet_parsing() {
-        let original_packet = WearablePacket::new(PacketType::Command, 1, 5, vec![0x01, 0x02, 0x03]);
+        let original_packet =
+            WearablePacket::new(PacketType::Command, 1, 5, vec![0x01, 0x02, 0x03]);
         let framed = original_packet.framed_packet().unwrap();
         let parsed = WearablePacket::from_data(framed).unwrap();
 
@@ -183,7 +184,8 @@ mod tests {
 
     #[test]
     fn invalid_sof() {
-        let result = WearablePacket::from_data(vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        let result =
+            WearablePacket::from_data(vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
         assert!(matches!(result, Err(WearableError::InvalidSof)));
     }
 
