@@ -1,0 +1,607 @@
+#[macro_use]
+extern crate log;
+
+use std::{
+    io,
+    str::FromStr,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
+
+use anyhow::anyhow;
+use btleplug::{
+    api::{Central, Manager as _, Peripheral as _, ScanFilter},
+    platform::{Adapter, Manager, Peripheral},
+};
+#[cfg(target_os = "linux")]
+use btleplug::api::BDAddr;
+use chrono::{DateTime, Local, NaiveDateTime, NaiveTime, TimeDelta, Utc};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{Shell, generate};
+use btwearable_entities::packets;
+use dotenv::dotenv;
+use btwearable::{
+    BtWearable, WearableDevice,
+    algo::{ExerciseMetrics, SleepConsistencyAnalyzer},
+    db::DatabaseHandler,
+    types::activities::{ActivityType, SearchActivityPeriods},
+};
+use tokio::time::sleep;
+use btwearable_codec::{WearablePacket, constants::WEARABLE_SERVICE};
+
+#[cfg(target_os = "linux")]
+pub type DeviceId = BDAddr;
+
+#[cfg(target_os = "macos")]
+pub type DeviceId = String;
+
+#[derive(Parser)]
+pub struct BtWearableCli {
+    #[arg(env, long)]
+    pub debug_packets: bool,
+    #[arg(env, long)]
+    pub database_url: String,
+    #[cfg(target_os = "linux")]
+    #[arg(env, long)]
+    pub ble_interface: Option<String>,
+    #[clap(subcommand)]
+    pub subcommand: BtWearableCommand,
+}
+
+#[derive(Subcommand)]
+pub enum BtWearableCommand {
+    ///
+    /// Scan for Wearable devices
+    ///
+    Scan,
+    ///
+    /// Download history data from wearable devices
+    ///
+    DownloadHistory {
+        #[arg(long, env)]
+        wearable: DeviceId,
+    },
+    ///
+    /// Reruns the packet processing on stored packets
+    /// This is used after new more of packets get handled
+    ///
+    ReRun,
+    ///
+    /// Detects sleeps and exercises
+    ///
+    DetectEvents,
+    ///
+    /// Print sleep statistics for all time and last week
+    ///
+    SleepStats,
+    ///
+    /// Print activity statistics for all time and last week
+    ///
+    ExerciseStats,
+    ///
+    /// Calculate stress for historical data
+    ///
+    CalculateStress,
+    ///
+    /// Calculate SpO2 from raw sensor data
+    ///
+    CalculateSpo2,
+    ///
+    /// Calculate skin temperature from raw sensor data
+    ///
+    CalculateSkinTemp,
+    ///
+    /// Set alarm
+    ///
+    SetAlarm {
+        #[arg(long, env)]
+        wearable: DeviceId,
+        alarm_time: AlarmTime,
+    },
+    ///
+    /// Stream realtime heart rate
+    ///
+    StreamHr {
+        #[arg(long, env)]
+        wearable: DeviceId,
+    },
+    ///
+    /// Get current alarm setting from device
+    ///
+    GetAlarm {
+        #[arg(long, env)]
+        wearable: DeviceId,
+    },
+    ///
+    /// Copy packets from one database into another
+    ///
+    Merge { from: String },
+    Restart {
+        #[arg(long, env)]
+        wearable: DeviceId,
+    },
+    ///
+    /// Erase all history data from the device
+    ///
+    Erase {
+        #[arg(long, env)]
+        wearable: DeviceId,
+    },
+    ///
+    /// Get device firmware version info
+    ///
+    Version {
+        #[arg(long, env)]
+        wearable: DeviceId,
+    },
+    ///
+    /// Generate Shell completions
+    ///
+    Completions { shell: Shell },
+    ///
+    /// Enable IMU data
+    ///
+    EnableImu {
+        #[arg(long, env)]
+        wearable: DeviceId,
+    },
+    ///
+    /// Sync data between local and remote database
+    ///
+    Sync {
+        #[arg(long, env)]
+        remote: String,
+    },
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    if let Err(error) = dotenv() {
+        println!("{}", error);
+    }
+
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .filter_module("sqlx::query", log::LevelFilter::Off)
+        .filter_module("sea_orm_migration::migrator", log::LevelFilter::Off)
+        .filter_module("bluez_async", log::LevelFilter::Off)
+        .filter_module("sqlx::postgres::notice", log::LevelFilter::Off)
+        .init();
+
+    BtWearableCli::parse().run().await
+}
+
+async fn scan_command(
+    adapter: &Adapter,
+    device_id: Option<DeviceId>,
+) -> anyhow::Result<Peripheral> {
+    adapter
+        .start_scan(ScanFilter {
+            services: vec![WEARABLE_SERVICE],
+        })
+        .await?;
+
+    loop {
+        let peripherals = adapter.peripherals().await?;
+
+        for peripheral in peripherals {
+            let Some(properties) = peripheral.properties().await? else {
+                continue;
+            };
+
+            if !properties.services.contains(&WEARABLE_SERVICE) {
+                continue;
+            }
+
+            let Some(device_id) = device_id.as_ref() else {
+                println!("Address: {}", properties.address);
+                println!("Name: {:?}", properties.local_name);
+                println!("RSSI: {:?}", properties.rssi);
+                println!();
+                continue;
+            };
+
+            #[cfg(target_os = "linux")]
+            if properties.address == *device_id {
+                return Ok(peripheral);
+            }
+
+            #[cfg(target_os = "macos")]
+            {
+                let Some(name) = properties.local_name else {
+                    continue;
+                };
+                if sanitize_name(&name).starts_with(device_id) {
+                    return Ok(peripheral);
+                }
+            }
+        }
+
+        sleep(Duration::from_secs(1)).await;
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum AlarmTime {
+    DateTime(NaiveDateTime),
+    Time(NaiveTime),
+    Minute,
+    Minute5,
+    Minute10,
+    Minute15,
+    Minute30,
+    Hour,
+}
+
+impl FromStr for AlarmTime {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Ok(t) = s.parse() {
+            return Ok(Self::DateTime(t));
+        }
+
+        if let Ok(t) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+            return Ok(Self::DateTime(t));
+        }
+
+        if let Ok(t) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
+            return Ok(Self::DateTime(t));
+        }
+
+        if let Ok(t) = s.parse() {
+            return Ok(Self::Time(t));
+        }
+
+        match s {
+            "minute" | "1min" | "min" => Ok(Self::Minute),
+            "5minute" | "5min" => Ok(Self::Minute5),
+            "10minute" | "10min" => Ok(Self::Minute10),
+            "15minute" | "15min" => Ok(Self::Minute15),
+            "30minute" | "30min" => Ok(Self::Minute30),
+            "hour" | "h" => Ok(Self::Hour),
+            _ => Err(anyhow!("Invalid alarm time")),
+        }
+    }
+}
+
+impl AlarmTime {
+    pub fn unix(self) -> DateTime<Utc> {
+        let mut now = Utc::now();
+        let timezone_df = Local::now().offset().to_owned();
+
+        match self {
+            AlarmTime::DateTime(dt) => dt.and_utc() - timezone_df,
+            AlarmTime::Time(t) => {
+                let current_time = now.time();
+                if current_time > t {
+                    now += TimeDelta::days(1);
+                }
+
+                now.with_time(t).unwrap() - timezone_df
+            }
+            _ => {
+                let offset = self.offset();
+                now + offset
+            }
+        }
+    }
+
+    fn offset(self) -> TimeDelta {
+        match self {
+            AlarmTime::DateTime(_) => todo!(),
+            AlarmTime::Time(_) => todo!(),
+            AlarmTime::Minute => TimeDelta::minutes(1),
+            AlarmTime::Minute5 => TimeDelta::minutes(5),
+            AlarmTime::Minute10 => TimeDelta::minutes(10),
+            AlarmTime::Minute15 => TimeDelta::minutes(15),
+            AlarmTime::Minute30 => TimeDelta::minutes(30),
+            AlarmTime::Hour => TimeDelta::hours(1),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn sanitize_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+impl BtWearableCli {
+    async fn run(self) -> anyhow::Result<()> {
+        let adapter = self.create_ble_adapter().await?;
+        let db_handler = DatabaseHandler::new(self.database_url).await;
+
+        match self.subcommand {
+            BtWearableCommand::Scan => {
+                scan_command(&adapter, None).await?;
+            }
+            BtWearableCommand::DownloadHistory { wearable } => {
+                let peripheral = scan_command(&adapter, Some(wearable)).await?;
+                let mut wearable =
+                    WearableDevice::new(peripheral, adapter, db_handler, self.debug_packets);
+
+                let should_exit = Arc::new(AtomicBool::new(false));
+
+                let se = should_exit.clone();
+                ctrlc::set_handler(move || {
+                    println!("Received CTRL+C!");
+                    se.store(true, Ordering::SeqCst);
+                })?;
+
+                wearable.connect().await?;
+                wearable.initialize().await?;
+
+                let result = wearable.sync_history(should_exit).await;
+
+                info!("Exiting...");
+                if let Err(e) = result {
+                    error!("{}", e);
+                }
+
+                loop {
+                    if let Ok(true) = wearable.is_connected().await {
+                        wearable
+                            .send_command(WearablePacket::exit_high_freq_sync())
+                            .await?;
+                        break;
+                    } else {
+                        wearable.connect().await?;
+                        sleep(Duration::from_secs(1)).await;
+                    }
+                }
+            }
+            BtWearableCommand::ReRun => {
+                let mut wearable = BtWearable::new(db_handler.clone());
+                let mut id = 0;
+                loop {
+                    let packets = db_handler.get_packets(id).await?;
+                    if packets.is_empty() {
+                        break;
+                    }
+
+                    for packet in packets {
+                        id = packet.id;
+                        wearable.handle_packet(packet).await?;
+                    }
+
+                    println!("{}", id);
+                }
+            }
+            BtWearableCommand::DetectEvents => {
+                let wearable = BtWearable::new(db_handler);
+                wearable.detect_sleeps().await?;
+                wearable.detect_events().await?;
+            }
+            BtWearableCommand::SleepStats => {
+                let wearable = BtWearable::new(db_handler);
+                let sleep_records = wearable.database.get_sleep_cycles(None).await?;
+
+                if sleep_records.is_empty() {
+                    println!("No sleep records found, exiting now");
+                    return Ok(());
+                }
+
+                let mut last_week = sleep_records
+                    .iter()
+                    .rev()
+                    .take(7)
+                    .copied()
+                    .collect::<Vec<_>>();
+
+                last_week.reverse();
+                let analyzer = SleepConsistencyAnalyzer::new(sleep_records);
+                let metrics = analyzer.calculate_consistency_metrics()?;
+                println!("All time: \n{}", metrics);
+                let analyzer = SleepConsistencyAnalyzer::new(last_week);
+                let metrics = analyzer.calculate_consistency_metrics()?;
+                println!("\nWeek: \n{}", metrics);
+            }
+            BtWearableCommand::ExerciseStats => {
+                let wearable = BtWearable::new(db_handler);
+                let exercises = wearable
+                    .database
+                    .search_activities(
+                        SearchActivityPeriods::default().with_activity(ActivityType::Activity),
+                    )
+                    .await?;
+
+                if exercises.is_empty() {
+                    println!("No activities found, exiting now");
+                    return Ok(());
+                };
+
+                let last_week = exercises
+                    .iter()
+                    .rev()
+                    .take(7)
+                    .copied()
+                    .rev()
+                    .collect::<Vec<_>>();
+
+                let metrics = ExerciseMetrics::new(exercises)?;
+                let last_week = ExerciseMetrics::new(last_week)?;
+
+                println!("All time: \n{}", metrics);
+                println!("Last week: \n{}", last_week);
+            }
+            BtWearableCommand::CalculateStress => {
+                let wearable = BtWearable::new(db_handler);
+                wearable.calculate_stress().await?;
+            }
+            BtWearableCommand::CalculateSpo2 => {
+                let wearable = BtWearable::new(db_handler);
+                wearable.calculate_spo2().await?;
+            }
+            BtWearableCommand::CalculateSkinTemp => {
+                let wearable = BtWearable::new(db_handler);
+                wearable.calculate_skin_temp().await?;
+            }
+            BtWearableCommand::SetAlarm { wearable, alarm_time } => {
+                let peripheral = scan_command(&adapter, Some(wearable)).await?;
+                let mut wearable =
+                    WearableDevice::new(peripheral, adapter, db_handler, self.debug_packets);
+                wearable.connect().await?;
+
+                let time = alarm_time.unix();
+                let now = Utc::now();
+
+                if time < now {
+                    error!(
+                        "Time {} is in past, current time: {}",
+                        time.format("%Y-%m-%d %H:%M:%S"),
+                        now.format("%Y-%m-%d %H:%M:%S")
+                    );
+                    return Ok(());
+                }
+
+                let packet = WearablePacket::alarm_time(u32::try_from(time.timestamp())?);
+                wearable.send_command(packet).await?;
+                let time = time.with_timezone(&Local);
+
+                println!("Alarm time set for: {}", time.format("%Y-%m-%d %H:%M:%S"));
+            }
+            BtWearableCommand::StreamHr { wearable } => {
+                let peripheral = scan_command(&adapter, Some(wearable)).await?;
+                let mut wearable =
+                    WearableDevice::new(peripheral, adapter, db_handler, self.debug_packets);
+                let should_exit = Arc::new(AtomicBool::new(false));
+                let se = should_exit.clone();
+                ctrlc::set_handler(move || {
+                    se.store(true, Ordering::SeqCst);
+                })?;
+                wearable.connect().await?;
+                wearable.stream_hr(should_exit).await?;
+            }
+            BtWearableCommand::GetAlarm { wearable } => {
+                let peripheral = scan_command(&adapter, Some(wearable)).await?;
+                let mut wearable = WearableDevice::new(peripheral, adapter, db_handler, false);
+                wearable.connect().await?;
+                let data = wearable.get_alarm().await?;
+                if let btwearable_codec::WearableData::AlarmInfo { enabled, unix } = data {
+                    if enabled {
+                        let alarm_time = DateTime::from_timestamp(i64::from(unix), 0)
+                            .ok_or_else(|| anyhow!("Invalid alarm timestamp"))?
+                            .with_timezone(&Local);
+                        println!(
+                            "Alarm is set for: {}",
+                            alarm_time.format("%Y-%m-%d %H:%M:%S")
+                        );
+                    } else {
+                        println!("No alarm is currently set");
+                    }
+                } else {
+                    error!("Unexpected response from device: {:?}", data);
+                }
+            }
+            BtWearableCommand::Merge { from } => {
+                let from_db = DatabaseHandler::new(from).await;
+
+                let mut id = 0;
+                loop {
+                    let packets = from_db.get_packets(id).await?;
+                    if packets.is_empty() {
+                        break;
+                    }
+
+                    for packets::Model {
+                        uuid,
+                        bytes,
+                        id: c_id,
+                    } in packets
+                    {
+                        id = c_id;
+                        db_handler.create_packet(uuid, bytes).await?;
+                    }
+
+                    println!("{}", id);
+                }
+            }
+            BtWearableCommand::Restart { wearable } => {
+                let peripheral = scan_command(&adapter, Some(wearable)).await?;
+                let mut wearable =
+                    WearableDevice::new(peripheral, adapter, db_handler, self.debug_packets);
+                wearable.connect().await?;
+                wearable.send_command(WearablePacket::restart()).await?;
+            }
+            BtWearableCommand::Erase { wearable } => {
+                let peripheral = scan_command(&adapter, Some(wearable)).await?;
+                let mut wearable =
+                    WearableDevice::new(peripheral, adapter, db_handler, self.debug_packets);
+                wearable.connect().await?;
+                wearable.send_command(WearablePacket::erase()).await?;
+                info!("Erase command sent - device will trim all stored history data");
+            }
+            BtWearableCommand::Version { wearable } => {
+                let peripheral = scan_command(&adapter, Some(wearable)).await?;
+                let mut wearable = WearableDevice::new(peripheral, adapter, db_handler, false);
+                wearable.connect().await?;
+                wearable.get_version().await?;
+            }
+            BtWearableCommand::EnableImu { wearable } => {
+                let peripheral = scan_command(&adapter, Some(wearable)).await?;
+                let mut wearable = WearableDevice::new(peripheral, adapter, db_handler, false);
+                wearable.connect().await?;
+                wearable
+                    .send_command(WearablePacket::toggle_r7_data_collection())
+                    .await?;
+            }
+            BtWearableCommand::Sync { remote } => {
+                let remote_db = DatabaseHandler::new(remote).await;
+                let sync = btwearable::db::sync::DatabaseSync::new(
+                    db_handler.connection(),
+                    remote_db.connection(),
+                );
+                sync.run().await?;
+            }
+            BtWearableCommand::Completions { shell } => {
+                let mut command = BtWearableCli::command();
+                let bin_name = command.get_name().to_string();
+                generate(shell, &mut command, bin_name, &mut io::stdout());
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn create_ble_adapter(&self) -> anyhow::Result<Adapter> {
+        let manager = Manager::new().await?;
+
+        #[cfg(target_os = "linux")]
+        match self.ble_interface.as_ref() {
+            Some(interface) => Self::adapter_from_name(&manager, interface).await,
+            None => Self::default_adapter(&manager).await,
+        }
+
+        #[cfg(target_os = "macos")]
+        Self::default_adapter(&manager).await
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn adapter_from_name(manager: &Manager, interface: &str) -> anyhow::Result<Adapter> {
+        let adapters = manager.adapters().await?;
+        let mut c_adapter = Err(anyhow!("Adapter: `{}` not found", interface));
+        for adapter in adapters {
+            let name = adapter.adapter_info().await?;
+            if name.starts_with(interface) {
+                c_adapter = Ok(adapter);
+                break;
+            }
+        }
+
+        c_adapter
+    }
+
+    async fn default_adapter(manager: &Manager) -> anyhow::Result<Adapter> {
+        let adapters = manager.adapters().await?;
+        adapters
+            .into_iter()
+            .next()
+            .ok_or(anyhow!("No BLE adapters found"))
+    }
+}

@@ -1,12 +1,12 @@
-# OpenWhoop
+# BtWearable
 
-OpenWhoop is a project that allows you to download and analyze health data directly from your Whoop 4.0 device without a Whoop subscription or Whoop's servers, making the data your own.
+BtWearable lets you download and analyze data from a Bluetooth health wearable locally.
 
-Features include sleep detection, exercise detection, stress calculation, HRV analysis, SpO2, skin temperature, and strain scoring — all computed locally from raw sensor data.
+Features include pulse tracking, sleep detection, exercise detection, stress calculation, HRV analysis, SpO2, skin temperature, strain scoring, and IMU data collection, all computed locally from raw sensor data.
 
 ## Getting Started
 
-First copy `.env.example` into `.env` and then scan for your Whoop device:
+First copy `.env.example` into `.env` and then scan for your wearable:
 ```sh
 cp .env.example .env
 cargo run -r -- scan
@@ -14,10 +14,10 @@ cargo run -r -- scan
 
 After you find your device:
 
-- On Linux, copy its address to `.env` under `WHOOP`
-- On macOS, copy its name to `.env` under `WHOOP`
+- On Linux, copy its address to `.env` under `WEARABLE`
+- On macOS, copy its name to `.env` under `WEARABLE`
 
-Then download data from your Whoop:
+Then download history from the wearable:
 ```sh
 cargo run -r -- download-history
 ```
@@ -26,7 +26,7 @@ cargo run -r -- download-history
 
 | Command | Description |
 |---------|-------------|
-| `scan` | Scan for available Whoop devices |
+| `scan` | Scan for available Wearable devices |
 | `download-history` | Download historical data from the device |
 | `detect-events` | Detect sleep and exercise events from raw data |
 | `sleep-stats` | Print sleep statistics (all-time and last 7 days) |
@@ -39,7 +39,6 @@ cargo run -r -- download-history
 | `merge <database_url>` | Copy packets from another database into the current one |
 | `rerun` | Reprocess stored packets (useful after adding new packet handlers) |
 | `enable-imu` | Enable IMU (accelerometer/gyroscope) data collection |
-| `download-firmware` | Download firmware from WHOOP API |
 | `version` | Get device firmware version |
 | `restart` | Restart device |
 | `erase` | Erase all history data from device |
@@ -60,14 +59,11 @@ Configuration is done through environment variables or a `.env` file.
 | Variable | Description | Required |
 |----------|-------------|----------|
 | `DATABASE_URL` | Database connection string (SQLite or PostgreSQL) | Yes |
-| `WHOOP` | Device identifier (MAC address on Linux, name on macOS) | For device commands |
+| `WEARABLE` | Device identifier (MAC address on Linux, name on macOS) | For device commands |
 | `REMOTE` | Remote database URL for `sync` command | For sync |
 | `BLE_INTERFACE` | BLE adapter to use, e.g. `"hci1 (usb:Something)"` (Linux only) | No |
 | `DEBUG_PACKETS` | Set to `true` to store raw packets in database | No |
 | `RUST_LOG` | Logging level (default: `info`) | No |
-| `WHOOP_EMAIL` | WHOOP account email for `download-firmware` | For firmware |
-| `WHOOP_PASSWORD` | WHOOP account password for `download-firmware` | For firmware |
-
 ### Database URLs
 
 SQLite:
@@ -77,7 +73,7 @@ DATABASE_URL=sqlite://db.sqlite?mode=rwc
 
 PostgreSQL:
 ```
-DATABASE_URL=postgresql://user:password@localhost:5432/openwhoop
+DATABASE_URL=postgresql://user:password@localhost:5432/btwearable
 ```
 
 ## Importing Data to Python
@@ -100,7 +96,7 @@ df = pd.read_sql(QUERY, DATABASE_URL)
 
 ## Protocol
 
-For the full reverse engineering writeup, see [Reverse Engineering Whoop 4.0 for fun and FREEDOM](https://github.com/bWanShiTong/reverse-engineering-whoop-post).
+The wearable communicates over a custom BLE service, and this repository decodes the packets locally.
 
 ### BLE Service
 
@@ -164,7 +160,7 @@ Each historical reading (96 bytes) contains:
 | Accelerometer | 3-axis gravity vector |
 | Respiratory rate | Derived respiratory rate |
 
-The remaining sensor fields in each packet (which the original blog post marked as unknown) have since been fully decoded and are used to compute SpO2, skin temperature, and stress metrics.
+The remaining sensor fields in each packet are decoded and used to compute SpO2, skin temperature, stress, and related recovery metrics.
 
 ## TODO
 
@@ -176,4 +172,4 @@ The remaining sensor fields in each packet (which the original blog post marked 
 - [x] Strain scoring (Edwards TRIMP)
 - [x] Database sync between SQLite and PostgreSQL
 - [ ] Mobile/Desktop app
-- [ ] Testout Whoop 5.0
+- [ ] Support additional hardware revisions

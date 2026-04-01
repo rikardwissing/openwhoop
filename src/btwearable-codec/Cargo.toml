@@ -1,0 +1,11 @@
+[package]
+name = "btwearable-codec"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chrono.workspace = true
+hex.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+uuid.workspace = true

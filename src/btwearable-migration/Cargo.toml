@@ -1,0 +1,13 @@
+[package]
+name = "btwearable-migration"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "btwearable_migration"
+path = "src/lib.rs"
+
+[dependencies]
+async-std.workspace = true
+sea-orm-migration.workspace = true

@@ -1,0 +1,12 @@
+[package]
+name = "btwearable-algos"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chrono.workspace = true
+btwearable-codec.workspace = true
+btwearable-types.workspace = true
+
+[dev-dependencies]
+rand.workspace = true

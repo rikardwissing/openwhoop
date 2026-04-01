@@ -1,0 +1,28 @@
+[package]
+name = "btwearable"
+version = "0.1.0"
+edition = "2024"
+default-run = "btwearable"
+
+[dependencies]
+anyhow.workspace = true
+btleplug.workspace = true
+chrono.workspace = true
+clap.workspace = true
+clap_complete.workspace = true
+ctrlc.workspace = true
+dotenv.workspace = true
+env_logger.workspace = true
+futures.workspace = true
+hex.workspace = true
+log.workspace = true
+btwearable-algos.workspace = true
+btwearable-codec.workspace = true
+btwearable-db.workspace = true
+btwearable-entities.workspace = true
+btwearable-migration.workspace = true
+btwearable-types.workspace = true
+sea-orm.workspace = true
+strum.workspace = true
+tokio.workspace = true
+uuid.workspace = true
