@@ -127,7 +127,6 @@ pub enum BtWearableCommand {
         #[arg(long, env)]
         wearable: DeviceId,
     },
-    ///
     /// Get current alarm setting from device
     ///
     GetAlarm {

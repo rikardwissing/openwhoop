@@ -271,6 +271,7 @@ impl WearablePacket {
             vec![0x01, u8::from(enable)],
         )
     }
+
 }
 
 #[cfg(test)]
