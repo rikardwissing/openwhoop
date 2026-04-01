@@ -1,7 +1,11 @@
 use btwearable_algos::SleepCycle;
 use btwearable_entities::sleep_cycles;
-use chrono::NaiveDateTime;
-use sea_orm::{ColumnTrait, Condition, EntityTrait, QueryFilter, QueryOrder};
+use btwearable_types::activities::{ActivityType, SearchActivityPeriods};
+use chrono::{NaiveDate, NaiveDateTime, TimeDelta};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, Condition, EntityTrait, IntoActiveModel, QueryFilter,
+    QueryOrder, Set,
+};
 
 use crate::DatabaseHandler;
 
@@ -20,6 +24,62 @@ impl DatabaseHandler {
             .into_iter()
             .map(map_sleep_cycle)
             .collect())
+    }
+
+    pub async fn recalculate_sleep_scores(&self) -> anyhow::Result<()> {
+        let mut sleeps = self.get_sleep_cycles(None).await?;
+        if sleeps.is_empty() {
+            return Ok(());
+        }
+
+        let mut naps = self
+            .search_activities(SearchActivityPeriods::default().with_activity(ActivityType::Nap))
+            .await?;
+        naps.sort_by_key(|nap| (nap.from, nap.to));
+
+        let mut prior_sleeps = Vec::with_capacity(sleeps.len());
+        for sleep in &mut sleeps {
+            let nap_window_start = prior_sleeps
+                .last()
+                .map(|prior: &SleepCycle| prior.end)
+                .unwrap_or_else(|| sleep.start - TimeDelta::hours(24));
+
+            let recent_naps = naps
+                .iter()
+                .copied()
+                .filter(|nap| nap.from >= nap_window_start && nap.to <= sleep.start)
+                .collect::<Vec<_>>();
+
+            let score = SleepCycle::sleep_score_with_context(
+                sleep.start,
+                sleep.end,
+                &prior_sleeps,
+                &recent_naps,
+            );
+
+            self.update_sleep_score(sleep.id, score).await?;
+            sleep.score = score;
+            prior_sleeps.push(*sleep);
+        }
+
+        Ok(())
+    }
+
+    async fn update_sleep_score(&self, sleep_id: NaiveDate, score: f64) -> anyhow::Result<()> {
+        let Some(model) = sleep_cycles::Entity::find()
+            .filter(sleep_cycles::Column::SleepId.eq(sleep_id))
+            .one(&self.db)
+            .await?
+        else {
+            return Ok(());
+        };
+
+        let mut active_model = model.into_active_model();
+        active_model.score = Set(Some(score));
+        active_model.synced = Set(false);
+        active_model.update(&self.db).await?;
+
+        Ok(())
     }
 }
 
@@ -180,5 +240,71 @@ mod tests {
 
         let cycles = db.get_sleep_cycles(Some(filter_start)).await.unwrap();
         assert_eq!(cycles.len(), 1); // Only the Jan 3 sleep
+    }
+
+    #[tokio::test]
+    async fn recalculate_sleep_scores_accounts_for_naps_and_sleep_need() {
+        let db = DatabaseHandler::new("sqlite::memory:").await;
+
+        let sleep_1 = SleepCycle {
+            id: NaiveDate::from_ymd_opt(2025, 1, 2).unwrap(),
+            start: NaiveDate::from_ymd_opt(2025, 1, 1)
+                .unwrap()
+                .and_hms_opt(22, 0, 0)
+                .unwrap(),
+            end: NaiveDate::from_ymd_opt(2025, 1, 2)
+                .unwrap()
+                .and_hms_opt(4, 0, 0)
+                .unwrap(),
+            min_bpm: 50,
+            max_bpm: 70,
+            avg_bpm: 60,
+            min_hrv: 30,
+            max_hrv: 80,
+            avg_hrv: 55,
+            score: 0.0,
+        };
+        let sleep_2 = SleepCycle {
+            id: NaiveDate::from_ymd_opt(2025, 1, 3).unwrap(),
+            start: NaiveDate::from_ymd_opt(2025, 1, 2)
+                .unwrap()
+                .and_hms_opt(22, 0, 0)
+                .unwrap(),
+            end: NaiveDate::from_ymd_opt(2025, 1, 3)
+                .unwrap()
+                .and_hms_opt(5, 0, 0)
+                .unwrap(),
+            min_bpm: 50,
+            max_bpm: 70,
+            avg_bpm: 60,
+            min_hrv: 30,
+            max_hrv: 80,
+            avg_hrv: 55,
+            score: 0.0,
+        };
+
+        db.create_sleep(sleep_1).await.unwrap();
+        db.create_sleep(sleep_2).await.unwrap();
+        db.create_activity(btwearable_types::activities::ActivityPeriod {
+            period_id: sleep_1.id,
+            from: NaiveDate::from_ymd_opt(2025, 1, 2)
+                .unwrap()
+                .and_hms_opt(13, 0, 0)
+                .unwrap(),
+            to: NaiveDate::from_ymd_opt(2025, 1, 2)
+                .unwrap()
+                .and_hms_opt(14, 0, 0)
+                .unwrap(),
+            activity: ActivityType::Nap,
+        })
+        .await
+        .unwrap();
+
+        db.recalculate_sleep_scores().await.unwrap();
+
+        let sleeps = db.get_sleep_cycles(None).await.unwrap();
+        assert_eq!(sleeps.len(), 2);
+        assert!((sleeps[0].score - 75.0).abs() < 0.000_001);
+        assert!((sleeps[1].score - ((7.7 / 9.2) * 100.0)).abs() < 0.000_001);
     }
 }

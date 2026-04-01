@@ -256,6 +256,7 @@ impl DatabaseHandler {
                         sleep_cycles::Column::MinHrv,
                         sleep_cycles::Column::MaxHrv,
                         sleep_cycles::Column::AvgHrv,
+                        sleep_cycles::Column::Score,
                     ])
                     .to_owned(),
             )

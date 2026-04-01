@@ -1,4 +1,5 @@
 use btwearable_codec::ParsedHistoryReading;
+use btwearable_types::activities::ActivityPeriod as LoggedActivityPeriod;
 use chrono::{NaiveDate, NaiveDateTime, TimeDelta};
 
 use btwearable_codec::WearableError;
@@ -20,6 +21,13 @@ pub struct SleepCycle {
 }
 
 impl SleepCycle {
+    pub const BASE_SLEEP_NEED_HOURS: f64 = 8.0;
+    const MAX_ADDITIONAL_SLEEP_NEED_HOURS: f64 = 2.5;
+    const RECENT_SLEEP_DEBT_WEIGHTS: [f64; 3] = [0.6, 0.3, 0.1];
+    const NAP_FULL_CREDIT_MINUTES: f64 = 90.0;
+    const NAP_FULL_CREDIT_FACTOR: f64 = 0.7;
+    const NAP_OVERFLOW_CREDIT_FACTOR: f64 = 0.3;
+
     pub fn from_event(
         event: ActivityPeriod,
         history: &[ParsedHistoryReading],
@@ -72,6 +80,10 @@ impl SleepCycle {
         self.end - self.start
     }
 
+    pub fn duration_hours(&self) -> f64 {
+        Self::duration_hours_between(self.start, self.end)
+    }
+
     fn clean_rr(rr: Vec<Vec<u16>>) -> Vec<u64> {
         rr.into_iter()
             .flatten()
@@ -99,12 +111,58 @@ impl SleepCycle {
     }
 
     pub fn sleep_score(start: NaiveDateTime, end: NaiveDateTime) -> f64 {
-        let duration = (end - start).num_seconds();
-        const IDEAL_DURATION: i64 = 60 * 60 * 8;
+        let duration = Self::duration_hours_between(start, end);
+        let ideal_duration = Self::BASE_SLEEP_NEED_HOURS;
 
-        let score = (duration / IDEAL_DURATION) as f64;
+        let score = duration / ideal_duration;
 
         (score * 100.0).clamp(0.0, 100.0)
+    }
+
+    pub fn sleep_need_hours(previous_sleeps: &[SleepCycle]) -> f64 {
+        let additional_need = previous_sleeps
+            .iter()
+            .rev()
+            .zip(Self::RECENT_SLEEP_DEBT_WEIGHTS.iter().copied())
+            .map(|(sleep, weight)| {
+                let shortfall = (Self::BASE_SLEEP_NEED_HOURS - sleep.duration_hours()).max(0.0);
+                shortfall * weight
+            })
+            .sum::<f64>()
+            .min(Self::MAX_ADDITIONAL_SLEEP_NEED_HOURS);
+
+        Self::BASE_SLEEP_NEED_HOURS + additional_need
+    }
+
+    pub fn nap_credit_hours(recent_naps: &[LoggedActivityPeriod]) -> f64 {
+        recent_naps
+            .iter()
+            .map(|nap| {
+                let minutes = ((nap.to - nap.from).num_minutes()).max(0) as f64;
+                let full_credit = minutes.min(Self::NAP_FULL_CREDIT_MINUTES);
+                let overflow = (minutes - Self::NAP_FULL_CREDIT_MINUTES).max(0.0);
+                (full_credit * Self::NAP_FULL_CREDIT_FACTOR
+                    + overflow * Self::NAP_OVERFLOW_CREDIT_FACTOR)
+                    / 60.0
+            })
+            .sum()
+    }
+
+    pub fn sleep_score_with_context(
+        start: NaiveDateTime,
+        end: NaiveDateTime,
+        previous_sleeps: &[SleepCycle],
+        recent_naps: &[LoggedActivityPeriod],
+    ) -> f64 {
+        let sleep_need = Self::sleep_need_hours(previous_sleeps);
+        let effective_sleep =
+            Self::duration_hours_between(start, end) + Self::nap_credit_hours(recent_naps);
+
+        ((effective_sleep / sleep_need) * 100.0).clamp(0.0, 100.0)
+    }
+
+    fn duration_hours_between(start: NaiveDateTime, end: NaiveDateTime) -> f64 {
+        (end - start).num_seconds().max(0) as f64 / 3600.0
     }
 }
 
@@ -112,6 +170,7 @@ impl SleepCycle {
 mod tests {
     use super::*;
     use chrono::NaiveDate;
+    use btwearable_types::activities::{ActivityPeriod as LoggedActivityPeriod, ActivityType};
 
     fn dt(h: u32, m: u32) -> NaiveDateTime {
         NaiveDate::from_ymd_opt(2025, 1, 1)
@@ -127,16 +186,72 @@ mod tests {
     }
 
     #[test]
-    fn sleep_score_4h_is_0() {
-        // 4h / 8h = 0.5 -> integer division = 0 -> score = 0
+    fn sleep_score_4h_is_50() {
         let score = SleepCycle::sleep_score(dt(22, 0), dt(22, 0) + TimeDelta::hours(4));
-        assert_eq!(score, 0.0);
+        assert_eq!(score, 50.0);
+    }
+
+    #[test]
+    fn sleep_score_6h_is_75() {
+        let score = SleepCycle::sleep_score(dt(22, 0), dt(22, 0) + TimeDelta::hours(6));
+        assert_eq!(score, 75.0);
     }
 
     #[test]
     fn sleep_score_clamped_at_100() {
         let score = SleepCycle::sleep_score(dt(0, 0), dt(0, 0) + TimeDelta::hours(24));
         assert_eq!(score, 100.0);
+    }
+
+    #[test]
+    fn sleep_score_negative_duration_is_0() {
+        let score = SleepCycle::sleep_score(dt(22, 0), dt(21, 0));
+        assert_eq!(score, 0.0);
+    }
+
+    #[test]
+    fn sleep_need_increases_after_recent_short_sleep() {
+        let previous = [SleepCycle {
+            id: NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+            start: dt(22, 0),
+            end: dt(22, 0) + TimeDelta::hours(6),
+            min_bpm: 50,
+            max_bpm: 70,
+            avg_bpm: 60,
+            min_hrv: 30,
+            max_hrv: 80,
+            avg_hrv: 55,
+            score: 75.0,
+        }];
+
+        let need = SleepCycle::sleep_need_hours(&previous);
+        assert!((need - 9.2).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn recent_nap_adds_partial_sleep_credit() {
+        let previous = [SleepCycle {
+            id: NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+            start: dt(22, 0),
+            end: dt(22, 0) + TimeDelta::hours(6),
+            min_bpm: 50,
+            max_bpm: 70,
+            avg_bpm: 60,
+            min_hrv: 30,
+            max_hrv: 80,
+            avg_hrv: 55,
+            score: 75.0,
+        }];
+        let naps = [LoggedActivityPeriod {
+            period_id: NaiveDate::from_ymd_opt(2025, 1, 2).unwrap(),
+            from: dt(13, 0),
+            to: dt(14, 0),
+            activity: ActivityType::Nap,
+        }];
+
+        let score =
+            SleepCycle::sleep_score_with_context(dt(22, 0), dt(22, 0) + TimeDelta::hours(7), &previous, &naps);
+        assert!((score - ((7.7 / 9.2) * 100.0)).abs() < 0.000_001);
     }
 
     #[test]

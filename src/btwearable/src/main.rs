@@ -428,6 +428,14 @@ impl BtWearableCli {
             return Ok(());
         }
 
+        if matches!(self.subcommand, BtWearableCommand::DetectEvents) {
+            let wearable = BtWearable::new(db_handler);
+            wearable.detect_sleeps().await?;
+            wearable.detect_events().await?;
+            wearable.database.recalculate_sleep_scores().await?;
+            return Ok(());
+        }
+
         let adapter = self.create_ble_adapter().await?;
 
         match self.subcommand {
@@ -508,6 +516,7 @@ impl BtWearableCli {
                 let wearable = BtWearable::new(db_handler);
                 wearable.detect_sleeps().await?;
                 wearable.detect_events().await?;
+                wearable.database.recalculate_sleep_scores().await?;
             }
             BtWearableCommand::SleepStats => {
                 let wearable = BtWearable::new(db_handler);
