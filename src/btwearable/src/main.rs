@@ -97,6 +97,15 @@ pub enum BtWearableCommand {
     ///
     CalculateSkinTemp,
     ///
+    /// Show the latest computed skin temperature from local history
+    ///
+    SkinTemp,
+    ///
+    /// Recompute sleeps, activities, and derived health metrics from local history
+    ///
+    #[command(visible_alias = "refresh")]
+    RefreshMetrics,
+    ///
     /// Set alarm
     ///
     SetAlarm {
@@ -428,6 +437,39 @@ impl BtWearableCli {
             return Ok(());
         }
 
+        if matches!(self.subcommand, BtWearableCommand::SkinTemp) {
+            let wearable = BtWearable::new(db_handler.clone());
+            wearable.calculate_skin_temp().await?;
+
+            match db_handler.latest_skin_temp().await? {
+                Some(reading) => {
+                    if let Some(raw) = reading.skin_temp_raw {
+                        println!(
+                            "Skin temp: {:.2} C at {} (raw={raw})",
+                            reading.temp_celsius, reading.time
+                        );
+                    } else {
+                        println!(
+                            "Skin temp: {:.2} C at {}",
+                            reading.temp_celsius, reading.time
+                        );
+                    }
+                }
+                None => {
+                    println!(
+                        "No computed skin temperature found. Run `cargo run -- download-history --wearable <name>` or `cargo run -- refresh-metrics` after collecting more sensor data."
+                    );
+                }
+            }
+            return Ok(());
+        }
+
+        if matches!(self.subcommand, BtWearableCommand::RefreshMetrics) {
+            let wearable = BtWearable::new(db_handler);
+            wearable.refresh_metrics().await?;
+            return Ok(());
+        }
+
         if matches!(self.subcommand, BtWearableCommand::DetectEvents) {
             let wearable = BtWearable::new(db_handler);
             wearable.detect_sleeps().await?;
@@ -494,6 +536,9 @@ impl BtWearableCli {
                     }
                     sleep(Duration::from_secs(1)).await;
                 }
+
+                info!("Running local metric refresh after history sync");
+                wearable.refresh_metrics().await?;
             }
             BtWearableCommand::ReRun => {
                 let mut wearable = BtWearable::new(db_handler.clone());
@@ -581,6 +626,34 @@ impl BtWearableCli {
             BtWearableCommand::CalculateSkinTemp => {
                 let wearable = BtWearable::new(db_handler);
                 wearable.calculate_skin_temp().await?;
+            }
+            BtWearableCommand::SkinTemp => {
+                let wearable = BtWearable::new(db_handler.clone());
+                wearable.calculate_skin_temp().await?;
+                match db_handler.latest_skin_temp().await? {
+                    Some(reading) => {
+                        if let Some(raw) = reading.skin_temp_raw {
+                            println!(
+                                "Skin temp: {:.2} C at {} (raw={raw})",
+                                reading.temp_celsius, reading.time
+                            );
+                        } else {
+                            println!(
+                                "Skin temp: {:.2} C at {}",
+                                reading.temp_celsius, reading.time
+                            );
+                        }
+                    }
+                    None => {
+                        println!(
+                            "No computed skin temperature found. Run `cargo run -- download-history --wearable <name>` or `cargo run -- refresh-metrics` after collecting more sensor data."
+                        );
+                    }
+                }
+            }
+            BtWearableCommand::RefreshMetrics => {
+                let wearable = BtWearable::new(db_handler);
+                wearable.refresh_metrics().await?;
             }
             BtWearableCommand::SetAlarm {
                 wearable,
@@ -832,62 +905,24 @@ fn print_command_response(label: &str, data: btwearable_codec::WearableData) {
             unix,
             event,
             payload,
-        } => {
-            match event {
-                btwearable_codec::constants::EventNumber::BatteryLevel => {
-                    if let Some(decoded) = decode_battery_event_payload(&payload) {
-                        println!(
-                            "{label}: {:?} at {} sample_ticks={} body_len={} kind=0x{:02x} field1={} main_mv={} state=0x{:04x} secondary_mv={} flags=0x{:04x} payload={}",
-                            event,
-                            format_local_timestamp(unix),
-                            decoded.sample_ticks,
-                            decoded.body_len,
-                            decoded.kind,
-                            decoded.field_1,
-                            decoded.main_mv,
-                            decoded.state_word,
-                            decoded.secondary_mv,
-                            decoded.flags,
-                            hex::encode(payload)
-                        );
-                    } else {
-                        println!(
-                            "{label}: {:?} at {} payload={}",
-                            event,
-                            format_local_timestamp(unix),
-                            hex::encode(payload)
-                        );
-                    }
-                }
-                btwearable_codec::constants::EventNumber::ExtendedBatteryInformation => {
-                    if let Some(decoded) = decode_extended_battery_event_payload(&payload) {
-                        println!(
-                            "{label}: field1={} field2={} main_mv={} field3={} field4={} field5={} secondary_mv={} flags=0x{:04x} field6={} at {} sample_ticks={} body_len={} kind=0x{:02x} payload={}",
-                            decoded.field_1,
-                            decoded.field_2,
-                            decoded.main_mv,
-                            decoded.field_3,
-                            decoded.field_4,
-                            decoded.field_5,
-                            decoded.secondary_mv,
-                            decoded.flags,
-                            decoded.field_6,
-                            format_local_timestamp(unix),
-                            decoded.sample_ticks,
-                            decoded.body_len,
-                            decoded.kind,
-                            hex::encode(payload)
-                        );
-                    } else {
-                        println!(
-                            "{label}: {:?} at {} payload={}",
-                            event,
-                            format_local_timestamp(unix),
-                            hex::encode(payload)
-                        );
-                    }
-                }
-                _ => {
+        } => match event {
+            btwearable_codec::constants::EventNumber::BatteryLevel => {
+                if let Some(decoded) = decode_battery_event_payload(&payload) {
+                    let charge = format_tenths_percent(decoded.charge_tenths_percent);
+                    println!(
+                        "{label}: {charge} ({event:?}, inferred 0.1% units) at {} sample_ticks={} body_len={} kind=0x{:02x} charge_raw={} main_mv={} state=0x{:04x} secondary_mv={} flags=0x{:04x} payload={}",
+                        format_local_timestamp(unix),
+                        decoded.sample_ticks,
+                        decoded.body_len,
+                        decoded.kind,
+                        decoded.charge_tenths_percent,
+                        decoded.main_mv,
+                        decoded.state_word,
+                        decoded.secondary_mv,
+                        decoded.flags,
+                        hex::encode(payload)
+                    );
+                } else {
                     println!(
                         "{label}: {:?} at {} payload={}",
                         event,
@@ -896,14 +931,50 @@ fn print_command_response(label: &str, data: btwearable_codec::WearableData) {
                     );
                 }
             }
-        }
+            btwearable_codec::constants::EventNumber::ExtendedBatteryInformation => {
+                if let Some(decoded) = decode_extended_battery_event_payload(&payload) {
+                    println!(
+                        "{label}: field1={} field2={} main_mv={} field3={} field4={} field5={} secondary_mv={} flags=0x{:04x} field6={} at {} sample_ticks={} body_len={} kind=0x{:02x} payload={}",
+                        decoded.field_1,
+                        decoded.field_2,
+                        decoded.main_mv,
+                        decoded.field_3,
+                        decoded.field_4,
+                        decoded.field_5,
+                        decoded.secondary_mv,
+                        decoded.flags,
+                        decoded.field_6,
+                        format_local_timestamp(unix),
+                        decoded.sample_ticks,
+                        decoded.body_len,
+                        decoded.kind,
+                        hex::encode(payload)
+                    );
+                } else {
+                    println!(
+                        "{label}: {:?} at {} payload={}",
+                        event,
+                        format_local_timestamp(unix),
+                        hex::encode(payload)
+                    );
+                }
+            }
+            _ => {
+                println!(
+                    "{label}: {:?} at {} payload={}",
+                    event,
+                    format_local_timestamp(unix),
+                    hex::encode(payload)
+                );
+            }
+        },
         btwearable_codec::WearableData::RawCommandResponse { command, payload } => match command {
             btwearable_codec::constants::CommandNumber::GetBatteryLevel => {
-                match payload.get(2).copied() {
-                    Some(raw) => {
-                        let percent = provisional_battery_percent(raw);
+                match decode_battery_response_payload(&payload) {
+                    Some(raw_tenths_percent) => {
+                        let charge = format_tenths_percent(raw_tenths_percent);
                         println!(
-                            "{label}: ~{percent}% (raw=0x{raw:02x}/{raw}, provisional 0-255 mapping), payload={}",
+                            "{label}: {charge} (raw=0x{raw_tenths_percent:04x}/{raw_tenths_percent}, inferred 0.1% units), payload={}",
                             hex::encode(payload),
                         );
                     }
@@ -1027,12 +1098,13 @@ fn print_battery_device_event(label: &str, data: btwearable_codec::WearableData)
     };
 
     println!(
-        "{label}: at {} sample_ticks={} body_len={} kind=0x{:02x} field1={} main_mv={} state=0x{:04x} secondary_mv={} flags=0x{:04x} payload={}",
+        "{label}: {} (inferred 0.1% units) at {} sample_ticks={} body_len={} kind=0x{:02x} charge_raw={} main_mv={} state=0x{:04x} secondary_mv={} flags=0x{:04x} payload={}",
+        format_tenths_percent(decoded.charge_tenths_percent),
         format_local_timestamp(unix),
         decoded.sample_ticks,
         decoded.body_len,
         decoded.kind,
-        decoded.field_1,
+        decoded.charge_tenths_percent,
         decoded.main_mv,
         decoded.state_word,
         decoded.secondary_mv,
@@ -1128,7 +1200,7 @@ struct BatteryEventDecoded {
     sample_ticks: u16,
     body_len: u16,
     kind: u8,
-    field_1: u16,
+    charge_tenths_percent: u16,
     main_mv: u16,
     state_word: u16,
     secondary_mv: u16,
@@ -1151,7 +1223,7 @@ fn decode_battery_event_payload(payload: &[u8]) -> Option<BatteryEventDecoded> {
         sample_ticks,
         body_len,
         kind: *body.first()?,
-        field_1: read_u16_le(body, 1)?,
+        charge_tenths_percent: read_u16_le(body, 1)?,
         main_mv: read_u16_le(body, 5)?,
         state_word: read_u16_le(body, 9)?,
         secondary_mv: read_u16_le(body, 11)?,
@@ -1248,7 +1320,10 @@ fn read_i16_le(bytes: &[u8], offset: usize) -> Option<i16> {
     Some(i16::from_le_bytes([bytes[0], bytes[1]]))
 }
 
-fn provisional_battery_percent(raw: u8) -> u8 {
-    let percent = (u16::from(raw) * 100 + 127) / 255;
-    u8::try_from(percent).expect("0-255 battery mapping always fits in u8")
+fn decode_battery_response_payload(payload: &[u8]) -> Option<u16> {
+    read_u16_le(payload, 2)
+}
+
+fn format_tenths_percent(tenths_percent: u16) -> String {
+    format!("{}.{}%", tenths_percent / 10, tenths_percent % 10)
 }

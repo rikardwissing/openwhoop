@@ -177,6 +177,31 @@ impl BtWearable {
         Ok(self.database.get_latest_sleep().await?.map(map_sleep_cycle))
     }
 
+    pub async fn refresh_metrics(&self) -> anyhow::Result<()> {
+        info!("Refreshing derived metrics from local history");
+
+        info!("Detecting sleep cycles");
+        self.detect_sleeps().await?;
+
+        info!("Detecting naps and activities");
+        self.detect_events().await?;
+
+        info!("Recalculating sleep scores");
+        self.database.recalculate_sleep_scores().await?;
+
+        info!("Calculating stress");
+        self.calculate_stress().await?;
+
+        info!("Calculating SpO2");
+        self.calculate_spo2().await?;
+
+        info!("Calculating skin temperature");
+        self.calculate_skin_temp().await?;
+
+        info!("Derived metric refresh complete");
+        Ok(())
+    }
+
     pub async fn detect_events(&self) -> anyhow::Result<()> {
         let latest_activity = self.database.get_latest_activity().await?;
         let start_from = latest_activity.map(|a| a.from);

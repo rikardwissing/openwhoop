@@ -199,7 +199,9 @@ impl DatabaseHandler {
             };
 
             match event {
-                EventNumber::ChargingOn | EventNumber::ChargingOff if snapshot.charging.is_none() => {
+                EventNumber::ChargingOn | EventNumber::ChargingOff
+                    if snapshot.charging.is_none() =>
+                {
                     snapshot.charging = Some(LatestDeviceEventState {
                         active: matches!(event, EventNumber::ChargingOn),
                         unix,
@@ -430,7 +432,9 @@ mod tests {
         let off_packet = db.create_packet(uuid, charging_off).await.unwrap();
 
         let snapshot = db.get_latest_charging_status().await.unwrap();
-        let charging = snapshot.charging.expect("charging snapshot should be present");
+        let charging = snapshot
+            .charging
+            .expect("charging snapshot should be present");
 
         assert!(!charging.active);
         assert_eq!(charging.event, EventNumber::ChargingOff);

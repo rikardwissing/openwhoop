@@ -2232,8 +2232,7 @@ mod tests {
             }
         );
 
-        let bytes =
-            hex::decode("aa100057313703cf6dcd69a83b000000452be3d7").expect("invalid bytes");
+        let bytes = hex::decode("aa100057313703cf6dcd69a83b000000452be3d7").expect("invalid bytes");
         let packet = WearablePacket::from_data(bytes).expect("Invalid packet");
         let data = WearableData::from_packet(packet).expect("invalid packet");
         assert_eq!(

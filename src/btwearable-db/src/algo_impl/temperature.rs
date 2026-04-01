@@ -14,6 +14,12 @@ pub struct TempReading {
     pub skin_temp_raw: u16,
 }
 
+pub struct LatestSkinTempReading {
+    pub time: NaiveDateTime,
+    pub temp_celsius: f64,
+    pub skin_temp_raw: Option<u16>,
+}
+
 impl DatabaseHandler {
     pub async fn last_skin_temp_time(&self) -> anyhow::Result<Option<NaiveDateTime>> {
         let reading = heart_rate::Entity::find()
@@ -24,6 +30,30 @@ impl DatabaseHandler {
             .into_tuple()
             .one(&self.db)
             .await?;
+
+        Ok(reading)
+    }
+
+    pub async fn latest_skin_temp(&self) -> anyhow::Result<Option<LatestSkinTempReading>> {
+        let reading = heart_rate::Entity::find()
+            .filter(heart_rate::Column::SkinTemp.is_not_null())
+            .order_by_desc(heart_rate::Column::Time)
+            .one(&self.db)
+            .await?;
+
+        let reading = reading.and_then(|m| {
+            let temp_celsius = m.skin_temp?;
+            let skin_temp_raw = m
+                .sensor_data
+                .and_then(|json| serde_json::from_value::<SensorData>(json).ok())
+                .map(|sd| sd.skin_temp_raw);
+
+            Some(LatestSkinTempReading {
+                time: m.time,
+                temp_celsius,
+                skin_temp_raw,
+            })
+        });
 
         Ok(reading)
     }

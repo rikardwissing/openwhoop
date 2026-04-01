@@ -185,6 +185,10 @@ impl WearableDevice {
         Ok(())
     }
 
+    pub async fn refresh_metrics(&self) -> anyhow::Result<()> {
+        self.wearable.refresh_metrics().await
+    }
+
     pub async fn stream_hr(&mut self, should_exit: Arc<AtomicBool>) -> anyhow::Result<()> {
         self.subscribe(DATA_FROM_STRAP).await?;
         self.subscribe(CMD_FROM_STRAP).await?;
@@ -340,15 +344,14 @@ impl WearableDevice {
                 break;
             }
 
-            let notification = notifications.next();
-            let sleep_ = sleep(Duration::from_secs(30));
-
             tokio::select! {
-                _ = sleep_ => {
-                    warn!("Timed out waiting for device events");
-                    break;
-                },
-                Some(notification) = notification => {
+                _ = sleep(Duration::from_millis(250)) => {},
+                notification = notifications.next() => {
+                    let Some(notification) = notification else {
+                        warn!("Device event stream ended unexpectedly");
+                        break;
+                    };
+
                     let packet = match WearablePacket::from_data(notification.value) {
                         Ok(packet) => packet,
                         Err(_) => continue,

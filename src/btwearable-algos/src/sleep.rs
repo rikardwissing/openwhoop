@@ -169,8 +169,8 @@ impl SleepCycle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::NaiveDate;
     use btwearable_types::activities::{ActivityPeriod as LoggedActivityPeriod, ActivityType};
+    use chrono::NaiveDate;
 
     fn dt(h: u32, m: u32) -> NaiveDateTime {
         NaiveDate::from_ymd_opt(2025, 1, 1)
@@ -249,8 +249,12 @@ mod tests {
             activity: ActivityType::Nap,
         }];
 
-        let score =
-            SleepCycle::sleep_score_with_context(dt(22, 0), dt(22, 0) + TimeDelta::hours(7), &previous, &naps);
+        let score = SleepCycle::sleep_score_with_context(
+            dt(22, 0),
+            dt(22, 0) + TimeDelta::hours(7),
+            &previous,
+            &naps,
+        );
         assert!((score - ((7.7 / 9.2) * 100.0)).abs() < 0.000_001);
     }
 
