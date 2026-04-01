@@ -8,7 +8,24 @@ use sea_orm::{
 use uuid::Uuid;
 
 use btwearable_algos::SleepCycle;
-use btwearable_codec::HistoryReading;
+use btwearable_codec::{
+    HistoryReading, WearableData, WearablePacket,
+    constants::{EventNumber, PacketType},
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LatestDeviceEventState {
+    pub active: bool,
+    pub unix: u32,
+    pub packet_id: i32,
+    pub event: EventNumber,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ChargingStatusSnapshot {
+    pub charging: Option<LatestDeviceEventState>,
+    pub external_power: Option<LatestDeviceEventState>,
+}
 
 #[derive(Clone)]
 pub struct DatabaseHandler {
@@ -154,6 +171,61 @@ impl DatabaseHandler {
             .await?;
 
         Ok(sleep)
+    }
+
+    pub async fn get_latest_charging_status(&self) -> anyhow::Result<ChargingStatusSnapshot> {
+        let packets = packets::Entity::find()
+            .order_by_desc(packets::Column::Id)
+            .limit(10_000)
+            .all(&self.db)
+            .await?;
+
+        let mut snapshot = ChargingStatusSnapshot::default();
+
+        for packet in packets {
+            let packet_id = packet.id;
+            let Ok(packet) = WearablePacket::from_data(packet.bytes) else {
+                continue;
+            };
+
+            if packet.packet_type != PacketType::Event {
+                continue;
+            }
+
+            let Ok(WearableData::DeviceEvent { unix, event, .. }) =
+                WearableData::from_packet(packet)
+            else {
+                continue;
+            };
+
+            match event {
+                EventNumber::ChargingOn | EventNumber::ChargingOff if snapshot.charging.is_none() => {
+                    snapshot.charging = Some(LatestDeviceEventState {
+                        active: matches!(event, EventNumber::ChargingOn),
+                        unix,
+                        packet_id,
+                        event,
+                    });
+                }
+                EventNumber::External5vOn | EventNumber::External5vOff
+                    if snapshot.external_power.is_none() =>
+                {
+                    snapshot.external_power = Some(LatestDeviceEventState {
+                        active: matches!(event, EventNumber::External5vOn),
+                        unix,
+                        packet_id,
+                        event,
+                    });
+                }
+                _ => {}
+            }
+
+            if snapshot.charging.is_some() && snapshot.external_power.is_some() {
+                break;
+            }
+        }
+
+        Ok(snapshot)
     }
 
     pub async fn create_sleep(&self, sleep: SleepCycle) -> anyhow::Result<()> {
@@ -337,5 +409,31 @@ mod tests {
             .unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].bpm, 80);
+    }
+
+    #[tokio::test]
+    async fn get_latest_charging_status_prefers_newest_transition() {
+        let db = DatabaseHandler::new("sqlite::memory:").await;
+        let uuid = Uuid::new_v4();
+
+        let charging_on = vec![
+            0xAA, 0x10, 0x00, 0x57, 0x30, 0xA0, 0x07, 0x00, 0x07, 0x43, 0xCD, 0x69, 0x08, 0x2C,
+            0x00, 0x00, 0x9A, 0xB8, 0xCC, 0xCE,
+        ];
+        let charging_off = vec![
+            0xAA, 0x10, 0x00, 0x57, 0x30, 0xF1, 0x08, 0x00, 0x7E, 0x43, 0xCD, 0x69, 0x88, 0x6F,
+            0x00, 0x00, 0xEA, 0xEE, 0x6D, 0xAA,
+        ];
+
+        db.create_packet(uuid, charging_on).await.unwrap();
+        let off_packet = db.create_packet(uuid, charging_off).await.unwrap();
+
+        let snapshot = db.get_latest_charging_status().await.unwrap();
+        let charging = snapshot.charging.expect("charging snapshot should be present");
+
+        assert!(!charging.active);
+        assert_eq!(charging.event, EventNumber::ChargingOff);
+        assert_eq!(charging.packet_id, off_packet.id);
+        assert!(snapshot.external_power.is_none());
     }
 }

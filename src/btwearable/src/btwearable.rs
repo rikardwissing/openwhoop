@@ -20,6 +20,7 @@ pub struct BtWearable {
     pub packet: Option<WearablePacket>,
     pub last_history_packet: Option<HistoryReading>,
     pub history_packets: Vec<HistoryReading>,
+    pub history_complete: bool,
 }
 
 impl BtWearable {
@@ -29,7 +30,15 @@ impl BtWearable {
             packet: None,
             last_history_packet: None,
             history_packets: Vec::new(),
+            history_complete: false,
         }
+    }
+
+    pub fn reset_history_sync_state(&mut self) {
+        self.packet = None;
+        self.last_history_packet = None;
+        self.history_packets.clear();
+        self.history_complete = false;
     }
 
     pub async fn store_packet(
@@ -119,9 +128,28 @@ impl BtWearable {
                 self.history_packets.push(hr);
             }
             WearableData::HistoryMetadata { data, cmd, .. } => match cmd {
-                MetadataType::HistoryComplete => {}
-                MetadataType::HistoryStart => {}
+                MetadataType::HistoryComplete => {
+                    info!(
+                        "Received HistoryComplete; flushing {} buffered readings",
+                        self.history_packets.len()
+                    );
+                    if !self.history_packets.is_empty() {
+                        self.database
+                            .create_readings(std::mem::take(&mut self.history_packets))
+                            .await?;
+                    }
+                    self.history_complete = true;
+                }
+                MetadataType::HistoryStart => {
+                    info!("Received HistoryStart");
+                    self.history_complete = false;
+                }
                 MetadataType::HistoryEnd => {
+                    info!(
+                        "Received HistoryEnd marker {}; flushing {} readings and requesting next chunk",
+                        data,
+                        self.history_packets.len()
+                    );
                     self.database
                         .create_readings(std::mem::take(&mut self.history_packets))
                         .await?;

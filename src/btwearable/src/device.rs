@@ -130,12 +130,15 @@ impl WearableDevice {
     }
 
     pub async fn sync_history(&mut self, should_exit: Arc<AtomicBool>) -> anyhow::Result<()> {
+        self.wearable.reset_history_sync_state();
         let mut notifications = self.peripheral.notifications().await?;
 
+        info!("Requesting historical data from wearable");
         self.send_command(WearablePacket::history_start()).await?;
 
         'a: loop {
             if should_exit.load(Ordering::SeqCst) {
+                info!("History sync interrupted by user");
                 break;
             }
             let notification = notifications.next();
@@ -145,9 +148,12 @@ impl WearableDevice {
                 _ = sleep_ => {
                     if self.on_sleep().await? {
                         error!("Wearable disconnected");
-                        for _ in 0..5{
+                        for attempt in 1..=5{
+                            info!("Reconnect attempt {attempt}/5 during history sync");
                             if self.connect().await.is_ok() {
+                                info!("Reconnected, reinitializing history sync");
                                 self.initialize().await?;
+                                self.wearable.reset_history_sync_state();
                                 self.send_command(WearablePacket::history_start()).await?;
                                 continue 'a;
                             }
@@ -166,6 +172,11 @@ impl WearableDevice {
 
                     if let Some(packet) = self.wearable.handle_packet(packet).await?{
                         self.send_command(packet).await?;
+                    }
+
+                    if self.wearable.history_complete {
+                        info!("History sync marked complete, exiting sync loop");
+                        break;
                     }
                 }
             }

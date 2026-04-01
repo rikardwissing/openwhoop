@@ -160,8 +160,12 @@ impl WearableData {
             .ok_or(WearableError::InvalidMetadataType(packet.cmd))?;
 
         let unix = packet.data.read_u32_le()?;
-        let _padding = packet.data.read::<6>()?;
-        let data = packet.data.read_u32_le()?;
+        let data = if packet.data.len() >= 10 {
+            let _padding = packet.data.read::<6>()?;
+            packet.data.read_u32_le()?
+        } else {
+            packet.data.read_u32_le()?
+        };
 
         Ok(Self::HistoryMetadata { unix, data, cmd })
     }
@@ -2225,6 +2229,19 @@ mod tests {
                 unix: 1736702790,
                 data: 16,
                 cmd: MetadataType::HistoryStart,
+            }
+        );
+
+        let bytes =
+            hex::decode("aa100057313703cf6dcd69a83b000000452be3d7").expect("invalid bytes");
+        let packet = WearablePacket::from_data(bytes).expect("Invalid packet");
+        let data = WearableData::from_packet(packet).expect("invalid packet");
+        assert_eq!(
+            data,
+            WearableData::HistoryMetadata {
+                unix: 1775070671,
+                data: 15272,
+                cmd: MetadataType::HistoryComplete,
             }
         );
     }

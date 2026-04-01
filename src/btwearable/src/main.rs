@@ -8,7 +8,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::anyhow;
@@ -21,7 +21,7 @@ use btleplug::{
 use btwearable::{
     BatteryProbeResult, BtWearable, CommandProbeEntry, WearableDevice,
     algo::{ExerciseMetrics, SleepConsistencyAnalyzer},
-    db::DatabaseHandler,
+    db::{DatabaseHandler, LatestDeviceEventState},
     types::activities::{ActivityType, SearchActivityPeriods},
 };
 use btwearable_codec::{
@@ -147,6 +147,14 @@ pub enum BtWearableCommand {
     Battery {
         #[arg(long, env)]
         wearable: DeviceId,
+    },
+    ///
+    /// Show the last charging event recorded in local packet history
+    ///
+    #[command(visible_alias = "charging")]
+    ChargingStatus {
+        #[arg(long, env)]
+        wearable: Option<DeviceId>,
     },
     ///
     /// Get current body placement/contact status from device
@@ -409,14 +417,25 @@ fn matches_device_name(scanned_name: &str, device_id: &str) -> bool {
 
 impl BtWearableCli {
     async fn run(self) -> anyhow::Result<()> {
+        let db_handler = DatabaseHandler::new(self.database_url.clone()).await;
+
+        if matches!(
+            self.subcommand,
+            BtWearableCommand::ChargingStatus { wearable: _ }
+        ) {
+            let history = db_handler.get_latest_charging_status().await?;
+            print_latest_device_state("Last charging event", history.charging);
+            return Ok(());
+        }
+
         let adapter = self.create_ble_adapter().await?;
-        let db_handler = DatabaseHandler::new(self.database_url).await;
 
         match self.subcommand {
             BtWearableCommand::Scan => {
                 scan_command(&adapter, None).await?;
             }
             BtWearableCommand::DownloadHistory { wearable } => {
+                info!("Scanning for wearable to start history download");
                 let peripheral = scan_command(&adapter, Some(wearable)).await?;
                 let mut wearable =
                     WearableDevice::new(peripheral, adapter, db_handler, self.debug_packets);
@@ -429,26 +448,43 @@ impl BtWearableCli {
                     se.store(true, Ordering::SeqCst);
                 })?;
 
+                info!("Connecting to wearable");
                 wearable.connect().await?;
+                info!("Initializing wearable session");
                 wearable.initialize().await?;
 
+                info!("Starting history sync");
                 let result = wearable.sync_history(should_exit).await;
 
-                info!("Exiting...");
+                info!("History sync loop exited");
                 if let Err(e) = result {
                     error!("{}", e);
                 }
 
+                info!("Cleaning up high frequency sync state");
+                let cleanup_deadline = Instant::now() + Duration::from_secs(10);
                 loop {
                     if let Ok(true) = wearable.is_connected().await {
+                        info!("Wearable still connected, sending exit_high_freq_sync");
                         wearable
                             .send_command(WearablePacket::exit_high_freq_sync())
                             .await?;
+                        info!("History download cleanup complete");
                         break;
-                    } else {
-                        wearable.connect().await?;
-                        sleep(Duration::from_secs(1)).await;
                     }
+
+                    if Instant::now() >= cleanup_deadline {
+                        warn!(
+                            "Timed out trying to reconnect for exit_high_freq_sync; leaving cleanup early"
+                        );
+                        break;
+                    }
+
+                    info!("Wearable not connected after history sync, retrying reconnect");
+                    if let Err(error) = wearable.connect().await {
+                        warn!("Reconnect during history cleanup failed: {error}");
+                    }
+                    sleep(Duration::from_secs(1)).await;
                 }
             }
             BtWearableCommand::ReRun => {
@@ -630,6 +666,10 @@ impl BtWearableCli {
                 wearable.connect().await?;
                 print_command_response("Battery", wearable.get_battery().await?);
             }
+            BtWearableCommand::ChargingStatus { wearable: _ } => {
+                let history = db_handler.get_latest_charging_status().await?;
+                print_latest_device_state("Last charging event", history.charging);
+            }
             BtWearableCommand::BodyStatus { wearable } => {
                 let peripheral = scan_command(&adapter, Some(wearable)).await?;
                 let mut wearable = WearableDevice::new(peripheral, adapter, db_handler, false);
@@ -784,18 +824,69 @@ fn print_command_response(label: &str, data: btwearable_codec::WearableData) {
             event,
             payload,
         } => {
-            let time = DateTime::from_timestamp(i64::from(unix), 0)
-                .map(|t| {
-                    t.with_timezone(&Local)
-                        .format("%Y-%m-%d %H:%M:%S")
-                        .to_string()
-                })
-                .unwrap_or_else(|| unix.to_string());
-            println!(
-                "{label}: {:?} at {time} payload={}",
-                event,
-                hex::encode(payload)
-            );
+            match event {
+                btwearable_codec::constants::EventNumber::BatteryLevel => {
+                    if let Some(decoded) = decode_battery_event_payload(&payload) {
+                        println!(
+                            "{label}: {:?} at {} sample_ticks={} body_len={} kind=0x{:02x} field1={} main_mv={} state=0x{:04x} secondary_mv={} flags=0x{:04x} payload={}",
+                            event,
+                            format_local_timestamp(unix),
+                            decoded.sample_ticks,
+                            decoded.body_len,
+                            decoded.kind,
+                            decoded.field_1,
+                            decoded.main_mv,
+                            decoded.state_word,
+                            decoded.secondary_mv,
+                            decoded.flags,
+                            hex::encode(payload)
+                        );
+                    } else {
+                        println!(
+                            "{label}: {:?} at {} payload={}",
+                            event,
+                            format_local_timestamp(unix),
+                            hex::encode(payload)
+                        );
+                    }
+                }
+                btwearable_codec::constants::EventNumber::ExtendedBatteryInformation => {
+                    if let Some(decoded) = decode_extended_battery_event_payload(&payload) {
+                        println!(
+                            "{label}: field1={} field2={} main_mv={} field3={} field4={} field5={} secondary_mv={} flags=0x{:04x} field6={} at {} sample_ticks={} body_len={} kind=0x{:02x} payload={}",
+                            decoded.field_1,
+                            decoded.field_2,
+                            decoded.main_mv,
+                            decoded.field_3,
+                            decoded.field_4,
+                            decoded.field_5,
+                            decoded.secondary_mv,
+                            decoded.flags,
+                            decoded.field_6,
+                            format_local_timestamp(unix),
+                            decoded.sample_ticks,
+                            decoded.body_len,
+                            decoded.kind,
+                            hex::encode(payload)
+                        );
+                    } else {
+                        println!(
+                            "{label}: {:?} at {} payload={}",
+                            event,
+                            format_local_timestamp(unix),
+                            hex::encode(payload)
+                        );
+                    }
+                }
+                _ => {
+                    println!(
+                        "{label}: {:?} at {} payload={}",
+                        event,
+                        format_local_timestamp(unix),
+                        hex::encode(payload)
+                    );
+                }
+            }
         }
         btwearable_codec::WearableData::RawCommandResponse { command, payload } => match command {
             btwearable_codec::constants::CommandNumber::GetBatteryLevel => {
@@ -1023,7 +1114,7 @@ fn parse_hex_payload(value: &str) -> anyhow::Result<Vec<u8>> {
     Ok(hex::decode(normalized)?)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct BatteryEventDecoded {
     sample_ticks: u16,
     body_len: u16,
@@ -1059,7 +1150,7 @@ fn decode_battery_event_payload(payload: &[u8]) -> Option<BatteryEventDecoded> {
     })
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct ExtendedBatteryEventDecoded {
     sample_ticks: u16,
     body_len: u16,
@@ -1121,6 +1212,21 @@ fn decode_extended_battery_words(words: &[u8]) -> Option<ExtendedBatteryEventDec
         flags: read_u16_le(words, 18)?,
         field_6: read_u16_le(words, 22)?,
     })
+}
+
+fn print_latest_device_state(label: &str, state: Option<LatestDeviceEventState>) {
+    match state {
+        Some(state) => {
+            let status = if state.active { "on" } else { "off" };
+            println!(
+                "{label}: {status} via {:?} at {} (packet #{})",
+                state.event,
+                format_local_timestamp(state.unix),
+                state.packet_id,
+            );
+        }
+        None => println!("{label}: unknown"),
+    }
 }
 
 fn read_u16_le(bytes: &[u8], offset: usize) -> Option<u16> {
