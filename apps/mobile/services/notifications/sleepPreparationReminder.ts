@@ -1,8 +1,8 @@
 import * as Notifications from 'expo-notifications';
 
 import { brand } from '@/constants/brand';
-import { NOTIFICATION_ROUTE_KEY } from '@/services/background/backgroundSyncNotifications';
-import { syncNotificationPermissionFromSystem } from '@/services/background/backgroundSyncTask';
+import { NOTIFICATION_ROUTE_KEY } from '@/services/notifications/notificationRoutes';
+import { syncNotificationPermissionFromSystem } from '@/services/notifications/notificationPermissions';
 import type { NotificationPermissionState } from '@/types/device';
 import type { SleepPlanSnapshot } from '@/types/health';
 import { nextUpcomingClockDate, normalizeClockMinutes } from '@/utils/sleepPlan';

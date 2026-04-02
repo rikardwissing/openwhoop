@@ -15,8 +15,8 @@ import { navTheme } from '@/constants/theme';
 import { AppDatabaseProvider } from '@/providers/AppDatabaseProvider';
 import { HealthDataProvider } from '@/providers/HealthDataProvider';
 import { WearableSyncProvider } from '@/providers/WearableSyncProvider';
-import { routeFromNotificationData } from '@/services/background/backgroundSyncNotifications';
-import '@/services/background/backgroundSyncTask';
+import { routeFromNotificationData } from '@/services/notifications/notificationRoutes';
+import { registerBackgroundTaskAsync } from '@/services/background/backgroundSyncTask';
 
 export {
   ErrorBoundary,
@@ -56,6 +56,10 @@ export default function RootLayout() {
 
 function RootLayoutNav() {
   const router = useRouter();
+
+  useEffect(() => {
+    void registerBackgroundTaskAsync().catch(() => {});
+  }, []);
 
   useEffect(() => {
     let mounted = true;
