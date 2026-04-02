@@ -35,6 +35,11 @@ export interface VersionInfoPacket {
   boylston: string;
 }
 
+export interface DeviceNamePacket {
+  command: number;
+  name: string;
+}
+
 export interface RawCommandResponsePacket {
   command: number;
   payload: Uint8Array;
@@ -51,6 +56,7 @@ export type ParsedNotification =
   | { type: 'history'; reading: HistoryReadingPacket }
   | { type: 'metadata'; metadata: MetadataPacket }
   | { type: 'version'; version: VersionInfoPacket }
+  | { type: 'deviceName'; device: DeviceNamePacket }
   | { type: 'command'; response: RawCommandResponsePacket }
   | { type: 'unknown' };
 
@@ -155,6 +161,20 @@ export function getNamePacket() {
 
 export function versionInfoPacket() {
   return framePacket(PacketType.Command, 0, CommandNumber.ReportVersionInfo, Uint8Array.from([0x00]));
+}
+
+export function setAlarmPacket(unixSeconds: number) {
+  const payload = new Uint8Array(9);
+  payload[0] = 0x01;
+  payload[1] = unixSeconds & 0xff;
+  payload[2] = (unixSeconds >> 8) & 0xff;
+  payload[3] = (unixSeconds >> 16) & 0xff;
+  payload[4] = (unixSeconds >> 24) & 0xff;
+  return framePacket(PacketType.Command, 0, CommandNumber.SetAlarmTime, payload);
+}
+
+export function disableAlarmPacket() {
+  return framePacket(PacketType.Command, 0, CommandNumber.DisableAlarm, Uint8Array.from([0x00]));
 }
 
 export function enterHighFrequencySyncPacket() {
@@ -304,6 +324,56 @@ function parseVersionResponse(packet: FramedPacket): VersionInfoPacket {
   return { harvard, boylston };
 }
 
+function normalizeDeviceNameBytes(bytes: Uint8Array) {
+  const visibleBytes: number[] = [];
+  for (const byte of bytes) {
+    if (byte === 0) {
+      break;
+    }
+    visibleBytes.push(byte);
+  }
+
+  if (visibleBytes.length === 0) {
+    return null;
+  }
+
+  const name = String.fromCharCode(...visibleBytes).trim();
+  if (!name || [...name].some((character) => character <= '\u001f' || character === '\u007f')) {
+    return null;
+  }
+
+  return name;
+}
+
+export function decodeDeviceNamePayload(payload: Uint8Array) {
+  const direct = normalizeDeviceNameBytes(payload);
+  if (direct) {
+    return direct;
+  }
+
+  if (payload[0] === 0x00) {
+    const withoutPrefix = normalizeDeviceNameBytes(payload.slice(1));
+    if (withoutPrefix) {
+      return withoutPrefix;
+    }
+  }
+
+  const declaredLength = payload[0] ?? 0;
+  if (declaredLength > 0 && payload.length > declaredLength) {
+    const fromLength = normalizeDeviceNameBytes(payload.slice(1, 1 + declaredLength));
+    if (fromLength) {
+      return fromLength;
+    }
+  }
+
+  const firstVisibleIndex = payload.findIndex((byte) => byte !== 0 && byte >= 0x20 && byte !== 0x7f);
+  if (firstVisibleIndex >= 0) {
+    return normalizeDeviceNameBytes(payload.slice(firstVisibleIndex));
+  }
+
+  return null;
+}
+
 export function parseNotification(packet: FramedPacket): ParsedNotification {
   if (packet.packetType === PacketType.HistoricalData) {
     return {
@@ -325,6 +395,22 @@ export function parseNotification(packet: FramedPacket): ParsedNotification {
         type: 'version',
         version: parseVersionResponse(packet),
       };
+    }
+
+    if (
+      packet.cmd === CommandNumber.GetAdvertisingNameHarvard ||
+      packet.cmd === CommandNumber.GetAdvertisingName
+    ) {
+      const name = decodeDeviceNamePayload(packet.data);
+      if (name) {
+        return {
+          type: 'deviceName',
+          device: {
+            command: packet.cmd,
+            name,
+          },
+        };
+      }
     }
 
     return {

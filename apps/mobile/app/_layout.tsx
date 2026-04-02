@@ -7,6 +7,7 @@ import * as SplashScreen from 'expo-splash-screen';
 import { useEffect } from 'react';
 import { StatusBar } from 'expo-status-bar';
 
+import { WearableProgressOverlay } from '@/components/ui/WearableProgressOverlay';
 import { navTheme } from '@/constants/theme';
 import { AppDatabaseProvider } from '@/providers/AppDatabaseProvider';
 import { HealthDataProvider } from '@/providers/HealthDataProvider';
@@ -59,6 +60,7 @@ function RootLayoutNav() {
               <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
               <Stack.Screen name="+not-found" options={{ title: 'Not Found' }} />
             </Stack>
+            <WearableProgressOverlay />
           </WearableSyncProvider>
         </HealthDataProvider>
       </AppDatabaseProvider>

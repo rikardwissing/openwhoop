@@ -16,6 +16,7 @@ const timeFormatter = new Intl.DateTimeFormat('en-US', {
 
 const axisTimeFormatter = new Intl.DateTimeFormat('en-US', {
   hour: 'numeric',
+  minute: '2-digit',
 });
 
 export function parseSqliteDateTime(value: string): Date {
@@ -43,6 +44,13 @@ export function formatLongDate(date: Date): string {
 
 export function formatClock(date: Date): string {
   return timeFormatter.format(date);
+}
+
+export function formatClockMinutes(minutes: number): string {
+  const normalized = ((Math.round(minutes) % (24 * 60)) + (24 * 60)) % (24 * 60);
+  const date = new Date(2000, 0, 1, 0, 0, 0, 0);
+  date.setMinutes(normalized);
+  return formatClock(date);
 }
 
 export function formatAxisTime(date: Date): string {

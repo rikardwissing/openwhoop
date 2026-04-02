@@ -1,3 +1,13 @@
+export type SyncStatus =
+  | 'idle'
+  | 'scanning'
+  | 'connecting'
+  | 'updating'
+  | 'syncing'
+  | 'refreshing'
+  | 'complete'
+  | 'error';
+
 export interface WearableScanResult {
   id: string;
   name: string;
@@ -16,7 +26,7 @@ export interface DeviceState {
 }
 
 export interface SyncProgress {
-  status: 'idle' | 'scanning' | 'connecting' | 'syncing' | 'refreshing' | 'complete' | 'error';
+  status: SyncStatus;
   message: string;
   importedReadings?: number;
 }
@@ -24,4 +34,8 @@ export interface SyncProgress {
 export interface SyncResult {
   importedReadings: number;
   completedAt: string;
+}
+
+export function isBlockingSyncStatus(status: SyncStatus) {
+  return status === 'connecting' || status === 'updating' || status === 'syncing' || status === 'refreshing';
 }

@@ -7,6 +7,7 @@ import { StatChip } from '@/components/ui/StatChip';
 import { appIcon } from '@/constants/assets';
 import { colors, typography } from '@/constants/theme';
 import { useWearableSync } from '@/providers/WearableSyncProvider';
+import { isBlockingSyncStatus } from '@/types/device';
 
 function ActionButton({
   label,
@@ -44,6 +45,7 @@ function ActionButton({
 
 export function SettingsScreen() {
   const { deviceState, progress, scanResults, scan, selectDevice, forgetDevice, syncSelected } = useWearableSync();
+  const deviceBusy = isBlockingSyncStatus(progress.status);
 
   return (
     <ScreenShell>
@@ -96,15 +98,15 @@ export function SettingsScreen() {
               onPress={() => {
                 void scan();
               }}
-              disabled={progress.status === 'scanning' || progress.status === 'syncing' || progress.status === 'refreshing'}
+              disabled={progress.status === 'scanning' || deviceBusy}
               tone="secondary"
             />
             <ActionButton
-              label={progress.status === 'syncing' || progress.status === 'refreshing' ? 'Syncing...' : 'Sync now'}
+              label={deviceBusy ? 'Syncing...' : 'Sync now'}
               onPress={() => {
                 void syncSelected();
               }}
-              disabled={!deviceState.id || progress.status === 'scanning' || progress.status === 'syncing' || progress.status === 'refreshing'}
+              disabled={!deviceState.id || progress.status === 'scanning' || deviceBusy}
             />
           </View>
 

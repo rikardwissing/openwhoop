@@ -8,9 +8,21 @@ export interface TrendPoint {
   value: number;
 }
 
+export interface TrendSelection {
+  index: number;
+  point: TrendPoint;
+}
+
 export interface SleepStageSegment {
   stage: SleepStage;
   minutes: number;
+}
+
+export interface SleepStageSelection {
+  index: number;
+  segment: SleepStageSegment;
+  startMinute: number;
+  endMinute: number;
 }
 
 export interface EstimatedValueMeta {
@@ -89,6 +101,17 @@ export interface SleepSession extends EstimatedValueMeta {
   avgHrv?: number | null;
 }
 
+export interface SleepPlanSnapshot {
+  targetWakeMinutes: number;
+  targetWakeTime: string;
+  optimalBedtimeMinutes: number;
+  optimalBedtime: string;
+  sleepNeedMinutes: number;
+  sleepDebtMinutes: number;
+  napCreditMinutes: number;
+  alarmEnabled: boolean;
+}
+
 export interface SleepHistorySnapshot extends EstimatedValueMeta {
   headlineScore: number | null;
   headlineLabel: string;
@@ -100,6 +123,7 @@ export interface SleepHistorySnapshot extends EstimatedValueMeta {
   scoreTrend: TrendPoint[];
   durationTrend: TrendPoint[];
   sessions: SleepSession[];
+  sleepPlan: SleepPlanSnapshot;
 }
 
 export interface HeartHistorySnapshot extends EstimatedValueMeta {

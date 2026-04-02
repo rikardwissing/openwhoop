@@ -10,7 +10,10 @@ import type {
   TrendPoint,
   WellnessSnapshot,
 } from '@/types/health';
+import { formatAxisTime, formatClockMinutes } from '@/utils/dateTime';
 import { describeRecovery } from '@/utils/formatters';
+import { sustainedPeakBpm } from '@/utils/heartRate';
+import { BASE_SLEEP_NEED_MINUTES, calculateOptimalBedtimeMinutes, calculateSleepDebtMinutes, roundClockMinutes } from '@/utils/sleepPlan';
 
 function delay(ms: number) {
   return new Promise((resolve) => {
@@ -23,6 +26,39 @@ function series(labels: string[], values: number[]): TrendPoint[] {
     label,
     value: values[index] ?? values.at(-1) ?? 0,
   }));
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function gaussian(minuteOfDay: number, center: number, width: number, amplitude: number) {
+  return amplitude * Math.exp(-((minuteOfDay - center) ** 2) / (2 * width ** 2));
+}
+
+function mean(values: number[]) {
+  return values.reduce((sum, value) => sum + value, 0) / Math.max(1, values.length);
+}
+
+function buildIntradayHeartSeries(stepMinutes: number): TrendPoint[] {
+  const baseDate = new Date(2026, 3, 23, 0, 0, 0, 0);
+  const pointCount = (24 * 60) / stepMinutes;
+
+  return Array.from({ length: pointCount }, (_, index) => {
+    const minuteOfDay = index * stepMinutes;
+    const time = new Date(baseDate.getTime() + minuteOfDay * 60000);
+    const circadianBaseline = 68 + Math.sin((minuteOfDay / (24 * 60)) * Math.PI * 2 - Math.PI / 2) * 7;
+    const morningRise = gaussian(minuteOfDay, 420, 70, 18);
+    const middayPush = gaussian(minuteOfDay, 780, 45, 96);
+    const eveningWalk = gaussian(minuteOfDay, 1110, 70, 20);
+    const overnightDip = gaussian(minuteOfDay, 180, 80, 11);
+    const value = Math.round(clamp(circadianBaseline + morningRise + middayPush + eveningWalk - overnightDip, 52, 172));
+
+    return {
+      label: formatAxisTime(time),
+      value,
+    };
+  });
 }
 
 function rangeLength(range: HistoryRange): number {
@@ -42,8 +78,11 @@ function takeTail<T>(items: T[], range: HistoryRange): T[] {
   return items.slice(-rangeLength(range));
 }
 
-const intradayLabels = ['12A', '1A', '2A', '3A', '4A', '5A', '6A', '8A', '10A', '12P', '2P', '4P', '6P', '8P'];
-const intradayValues = [67, 66, 67, 68, 70, 74, 87, 91, 89, 113, 128, 154, 166, 142];
+const intradayHeartSeries = buildIntradayHeartSeries(5);
+const dashboardHeartSeries = intradayHeartSeries;
+const intradayValues = intradayHeartSeries.map((point) => point.value);
+const intradayAverageHr = Math.round(mean(intradayValues));
+const intradayMaxHr = sustainedPeakBpm(intradayValues) ?? Math.max(...intradayValues);
 const strainValues = [4.4, 4.8, 5.2, 6.1, 6.8, 7.2, 7.6, 8.1, 9.4, 10.8, 9.9, 10.1, 10.9, 11];
 const scoreLabels = ['Apr 10', 'Apr 11', 'Apr 12', 'Apr 13', 'Apr 14', 'Apr 15', 'Apr 16', 'Apr 17', 'Apr 18', 'Apr 19', 'Apr 20', 'Apr 21', 'Apr 22', 'Apr 23'];
 const sleepScores = [71, 76, 74, 79, 82, 77, 81, 84, 80, 83, 78, 82, 86, 82];
@@ -176,7 +215,14 @@ const activities: ActivitySummary[] = [
 ];
 
 export class MockHealthRepository implements HealthRepository {
+  private targetWakeMinutes = 7 * 60 + 45;
+  private alarmEnabled = true;
+
   constructor(private readonly options: { delayMs?: number } = {}) {}
+
+  async warmCaches(): Promise<void> {}
+
+  invalidateCaches(): void {}
 
   private async wait() {
     await delay(this.options.delayMs ?? 180);
@@ -200,17 +246,17 @@ export class MockHealthRepository implements HealthRepository {
       ],
       heartCard: {
         restingHr: 48,
-        averageHr: 132,
-        maxHr: 172,
-        series: series(intradayLabels, intradayValues),
+        averageHr: intradayAverageHr,
+        maxHr: intradayMaxHr,
+        series: dashboardHeartSeries,
       },
       sleepCard: {
         score: 82,
         durationMinutes: 465,
         stages: sessions[0].stages,
-        startLabel: '7:45',
-        middleLabel: '3 AM',
-        endLabel: '8 AM',
+        startLabel: '11:07 PM',
+        middleLabel: '3:26 AM',
+        endLabel: '7:45 AM',
       },
       strainCard: {
         score: 11,
@@ -226,6 +272,13 @@ export class MockHealthRepository implements HealthRepository {
   async getSleepHistory(range: HistoryRange): Promise<SleepHistorySnapshot> {
     await this.wait();
 
+    const chronologicalSessions = [...sessions].reverse();
+    const sleepDebtMinutes = calculateSleepDebtMinutes(
+      chronologicalSessions.map((session) => session.durationMinutes),
+    );
+    const sleepNeedMinutes = BASE_SLEEP_NEED_MINUTES + sleepDebtMinutes;
+    const optimalBedtimeMinutes = calculateOptimalBedtimeMinutes(this.targetWakeMinutes, sleepNeedMinutes);
+
     return {
       headlineScore: 82,
       headlineLabel: 'Good sleep',
@@ -237,6 +290,16 @@ export class MockHealthRepository implements HealthRepository {
       scoreTrend: takeTail(series(scoreLabels, sleepScores), range),
       durationTrend: takeTail(series(scoreLabels, sleepDurations), range),
       sessions: sessions.slice(0, 3),
+      sleepPlan: {
+        targetWakeMinutes: this.targetWakeMinutes,
+        targetWakeTime: formatClockMinutes(this.targetWakeMinutes),
+        optimalBedtimeMinutes,
+        optimalBedtime: formatClockMinutes(optimalBedtimeMinutes),
+        sleepNeedMinutes,
+        sleepDebtMinutes,
+        napCreditMinutes: 0,
+        alarmEnabled: this.alarmEnabled,
+      },
     };
   }
 
@@ -245,9 +308,9 @@ export class MockHealthRepository implements HealthRepository {
 
     return {
       restingHr: 48,
-      averageHr: 132,
-      maxHr: 172,
-      intraday: takeTail(series(intradayLabels, intradayValues), range === '24h' ? '24h' : '24h'),
+      averageHr: intradayAverageHr,
+      maxHr: intradayMaxHr,
+      intraday: intradayHeartSeries,
       weeklyResting: takeTail(series(scoreLabels, restingHrTrend), range),
       recoveryShift: -4,
     };
@@ -369,5 +432,23 @@ export class MockHealthRepository implements HealthRepository {
       },
       activities,
     };
+  }
+
+  async setTargetWakeMinutes(minutes: number): Promise<void> {
+    await this.wait();
+    this.targetWakeMinutes = roundClockMinutes(minutes);
+    this.alarmEnabled = false;
+  }
+
+  async enableAlarm(targetWakeMinutes: number): Promise<void> {
+    await this.wait();
+    this.targetWakeMinutes = roundClockMinutes(targetWakeMinutes);
+    this.alarmEnabled = true;
+  }
+
+  async disableAlarm(targetWakeMinutes: number): Promise<void> {
+    await this.wait();
+    this.targetWakeMinutes = roundClockMinutes(targetWakeMinutes);
+    this.alarmEnabled = false;
   }
 }

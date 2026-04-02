@@ -3,7 +3,9 @@ import { BleManager, type Device, type Subscription } from 'react-native-ble-plx
 
 import { refreshDerivedData } from '@/data/sqlite/SQLiteHealthRepository';
 import { CMD_FROM_STRAP_UUID, CMD_TO_STRAP_UUID, DATA_FROM_STRAP_UUID, EVENTS_FROM_STRAP_UUID, MEMFAULT_UUID, WEARABLE_SERVICE_UUID } from '@/services/ble/constants';
-import { PacketAssembler, base64ToBytes, bytesToBase64, enterHighFrequencySyncPacket, exitHighFrequencySyncPacket, getNamePacket, helloHarvardPacket, historyEndPacket, historyStartPacket, parseNotification, setClockPacket, type SensorDataPacket, versionInfoPacket } from '@/services/ble/codec';
+import { resolveScanDeviceName } from '@/services/ble/deviceNaming';
+import { PacketAssembler, base64ToBytes, bytesToBase64, disableAlarmPacket, enterHighFrequencySyncPacket, exitHighFrequencySyncPacket, getNamePacket, helloHarvardPacket, historyEndPacket, historyStartPacket, parseNotification, setAlarmPacket, setClockPacket, type SensorDataPacket, versionInfoPacket } from '@/services/ble/codec';
+import { HistorySyncWatchdog } from '@/services/ble/syncWatchdog';
 import type { DeviceState, SyncProgress, SyncResult, WearableScanResult } from '@/types/device';
 import { formatSqliteDateTime } from '@/utils/dateTime';
 
@@ -20,6 +22,9 @@ const SELECTED_DEVICE_SQL = `
     sync_error = excluded.sync_error
 `;
 
+const CONNECT_TIMEOUT_MS = 15_000;
+const CONNECT_SCAN_TIMEOUT_MS = 8_000;
+
 function delay(ms: number) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
@@ -32,6 +37,44 @@ function serializeSensorData(value: SensorDataPacket | null) {
 
 function rrToString(rr: number[]) {
   return rr.join(',');
+}
+
+function formatBleError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return 'Sync failed.';
+  }
+
+  const details: string[] = [];
+  const candidate = error as Error & {
+    errorCode?: number | null;
+    iosErrorCode?: number | null;
+    androidErrorCode?: number | null;
+    attErrorCode?: number | null;
+    reason?: string | null;
+  };
+
+  if (candidate.errorCode != null) {
+    details.push(`ble=${candidate.errorCode}`);
+  }
+
+  if (candidate.iosErrorCode != null) {
+    details.push(`ios=${candidate.iosErrorCode}`);
+  }
+
+  if (candidate.attErrorCode != null) {
+    details.push(`att=${candidate.attErrorCode}`);
+  }
+
+  if (candidate.androidErrorCode != null) {
+    details.push(`android=${candidate.androidErrorCode}`);
+  }
+
+  const reason = candidate.reason?.trim();
+  if (reason && reason !== error.message) {
+    details.push(reason);
+  }
+
+  return details.length > 0 ? `${error.message} (${details.join(', ')})` : error.message;
 }
 
 export class WearableSyncService {
@@ -107,7 +150,7 @@ export class WearableSyncService {
 
         found.set(device.id, {
           id: device.id,
-          name: device.name ?? device.localName ?? 'Unnamed wearable',
+          name: resolveScanDeviceName(device),
           rssi: device.rssi ?? null,
         });
       });
@@ -134,6 +177,32 @@ export class WearableSyncService {
     await this.db.execAsync('DELETE FROM device_state;');
   }
 
+  async setAlarm(unixSeconds: number, onProgress?: (progress: SyncProgress) => void) {
+    const alarmAt = new Date(unixSeconds * 1000);
+    await this.runDeviceCommand(onProgress, `Setting alarm for ${formatSqliteDateTime(alarmAt)}...`, async (device) => {
+      await this.sendCommand(device, helloHarvardPacket());
+      await this.sendCommand(device, setClockPacket(Math.floor(Date.now() / 1000)));
+      await this.sendCommand(device, setAlarmPacket(unixSeconds));
+    });
+
+    onProgress?.({
+      status: 'complete',
+      message: `Alarm set for ${formatSqliteDateTime(alarmAt)}.`,
+    });
+  }
+
+  async disableAlarm(onProgress?: (progress: SyncProgress) => void) {
+    await this.runDeviceCommand(onProgress, 'Disabling alarm on the wearable...', async (device) => {
+      await this.sendCommand(device, helloHarvardPacket());
+      await this.sendCommand(device, disableAlarmPacket());
+    });
+
+    onProgress?.({
+      status: 'complete',
+      message: 'Alarm disabled.',
+    });
+  }
+
   async syncSelected(onProgress?: (progress: SyncProgress) => void): Promise<SyncResult> {
     const selected = await this.getDeviceState();
     if (!selected.id) {
@@ -147,7 +216,10 @@ export class WearableSyncService {
     let firmware: string | null = null;
     let importedReadings = 0;
     let lastHistoryCursor = 0;
+    let resolvedDeviceId = selected.id;
+    let resolvedDeviceName = selected.name;
     let writeQueue = Promise.resolve();
+    let commandQueue = Promise.resolve();
     const dataAssembler = new PacketAssembler();
     const responseAssembler = new PacketAssembler();
     const subscriptions: Subscription[] = [];
@@ -157,15 +229,85 @@ export class WearableSyncService {
       return writeQueue;
     };
 
+    const queueCommand = (task: () => Promise<void>) => {
+      commandQueue = commandQueue.then(task);
+      return commandQueue;
+    };
+
     try {
-      device = await this.manager.connectToDevice(selected.id, { timeout: 10000 });
+      let candidate = await this.findConnectionCandidate(selected, onProgress);
+      resolvedDeviceId = candidate.id;
+      resolvedDeviceName = resolveScanDeviceName(candidate) ?? resolvedDeviceName;
+
+      try {
+        device = await this.connectWithRetry(candidate.id, resolvedDeviceName ?? 'wearable');
+      } catch (error) {
+        onProgress?.({
+          status: 'connecting',
+          message: `Direct connect failed. Re-scanning for ${resolvedDeviceName ?? 'wearable'}...`,
+        });
+
+        const rescanned = await this.scanForMatchingDevice({
+          ...selected,
+          id: resolvedDeviceId,
+          name: resolvedDeviceName,
+        });
+
+        if (!rescanned) {
+          throw error;
+        }
+
+        candidate = rescanned;
+        resolvedDeviceId = rescanned.id;
+        resolvedDeviceName = resolveScanDeviceName(rescanned) ?? resolvedDeviceName;
+        device = await this.connectWithRetry(rescanned.id, resolvedDeviceName ?? 'wearable');
+      }
+
       device = await device.discoverAllServicesAndCharacteristics();
+      resolvedDeviceName = resolveScanDeviceName(device) ?? resolvedDeviceName;
 
       const completion = new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const watchdog = new HistorySyncWatchdog();
+
+        const clearTimers = () => {
+          clearInterval(watchdogTimer);
+        };
+
+        const succeed = () => {
+          if (settled) {
+            return;
+          }
+
+          settled = true;
+          clearTimers();
+          resolve();
+        };
+
+        const fail = (error: Error) => {
+          if (settled) {
+            return;
+          }
+
+          settled = true;
+          clearTimers();
+          reject(error);
+        };
+
+        const watchdogTimer = setInterval(() => {
+          const timeoutError = watchdog.getTimeoutError({
+            importedReadings,
+            lastHistoryCursor,
+          });
+          if (timeoutError) {
+            fail(timeoutError);
+          }
+        }, 1000);
+
         const monitor = (characteristic: string, assembler: PacketAssembler) =>
           device!.monitorCharacteristicForService(WEARABLE_SERVICE_UUID, characteristic, (error, value) => {
             if (error) {
-              reject(error);
+              fail(error);
               return;
             }
 
@@ -173,6 +315,7 @@ export class WearableSyncService {
               return;
             }
 
+            watchdog.markPacketActivity();
             const frames = assembler.push(base64ToBytes(value.value));
             for (const frame of frames) {
               const parsed = parseNotification(frame);
@@ -180,6 +323,7 @@ export class WearableSyncService {
               if (parsed.type === 'history') {
                 importedReadings += 1;
                 lastHistoryCursor = parsed.reading.unix;
+                watchdog.markProgress();
                 queueWrite(async () => {
                   await this.db.runAsync(
                     `
@@ -207,23 +351,31 @@ export class WearableSyncService {
               }
 
               if (parsed.type === 'metadata') {
+                watchdog.markProgress();
                 if (parsed.metadata.kind === 2) {
-                  void device!
-                    .writeCharacteristicWithoutResponseForService(
-                      WEARABLE_SERVICE_UUID,
-                      CMD_TO_STRAP_UUID,
-                      bytesToBase64(historyEndPacket(parsed.metadata.data)),
-                    )
-                    .catch(reject);
+                  void queueCommand(() =>
+                    this.sendCommand(
+                      device!,
+                      historyEndPacket(parsed.metadata.data),
+                    ),
+                  ).catch((commandError) => {
+                    fail(
+                      commandError instanceof Error ? commandError : new Error('Failed to acknowledge sync chunk.'),
+                    );
+                  });
                 }
 
                 if (parsed.metadata.kind === 3) {
-                  resolve();
+                  succeed();
                 }
               }
 
               if (parsed.type === 'version') {
                 firmware = parsed.version.harvard;
+              }
+
+              if (parsed.type === 'deviceName') {
+                resolvedDeviceName = parsed.device.name;
               }
             }
           });
@@ -242,15 +394,7 @@ export class WearableSyncService {
 
       onProgress?.({ status: 'syncing', message: 'Requesting wearable history...' });
       await this.sendCommand(device, historyStartPacket());
-
-      await Promise.race([
-        completion,
-        new Promise((_, reject) => {
-          setTimeout(() => {
-            reject(new Error('History sync timed out.'));
-          }, 45000);
-        }),
-      ]);
+      await completion;
 
       await writeQueue;
       onProgress?.({ status: 'refreshing', message: 'Refreshing local metrics...', importedReadings });
@@ -259,8 +403,8 @@ export class WearableSyncService {
       const completedAt = formatSqliteDateTime(new Date());
       await this.db.runAsync(
         SELECTED_DEVICE_SQL,
-        selected.id,
-        selected.name,
+        resolvedDeviceId,
+        resolvedDeviceName,
         formatSqliteDateTime(new Date()),
         completedAt,
         firmware,
@@ -275,11 +419,11 @@ export class WearableSyncService {
         completedAt,
       };
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Sync failed.';
+      const message = formatBleError(error);
       await this.db.runAsync(
         SELECTED_DEVICE_SQL,
-        selected.id,
-        selected.name,
+        resolvedDeviceId,
+        resolvedDeviceName,
         formatSqliteDateTime(new Date()),
         selected.lastSyncedAt,
         firmware,
@@ -290,6 +434,8 @@ export class WearableSyncService {
       onProgress?.({ status: 'error', message });
       throw error;
     } finally {
+      await commandQueue.catch(() => {});
+
       for (const subscription of subscriptions) {
         subscription.remove();
       }
@@ -335,5 +481,210 @@ export class WearableSyncService {
         }
       }, true);
     });
+  }
+
+  private async runDeviceCommand(
+    onProgress: ((progress: SyncProgress) => void) | undefined,
+    workingMessage: string,
+    task: (device: Device) => Promise<void>,
+  ) {
+    const selected = await this.getDeviceState();
+    if (!selected.id) {
+      throw new Error('Select a wearable before updating the alarm.');
+    }
+
+    await this.ensurePoweredOn();
+    onProgress?.({ status: 'connecting', message: `Connecting to ${selected.name ?? 'wearable'}...` });
+
+    let device: Device | null = null;
+    let resolvedDeviceId = selected.id;
+    let resolvedDeviceName = selected.name;
+
+    try {
+      ({ device, resolvedDeviceId, resolvedDeviceName } = await this.connectSelectedWearable(selected, onProgress));
+      onProgress?.({ status: 'updating', message: workingMessage });
+      await task(device);
+
+      await this.db.runAsync(
+        SELECTED_DEVICE_SQL,
+        resolvedDeviceId,
+        resolvedDeviceName,
+        formatSqliteDateTime(new Date()),
+        selected.lastSyncedAt,
+        null,
+        null,
+        null,
+        null,
+      );
+    } catch (error) {
+      const message = formatBleError(error);
+      await this.db.runAsync(
+        SELECTED_DEVICE_SQL,
+        resolvedDeviceId,
+        resolvedDeviceName,
+        formatSqliteDateTime(new Date()),
+        selected.lastSyncedAt,
+        null,
+        null,
+        null,
+        message,
+      );
+      onProgress?.({ status: 'error', message });
+      throw error;
+    } finally {
+      if (device) {
+        try {
+          await device.cancelConnection();
+        } catch {}
+      }
+    }
+  }
+
+  private async connectWithRetry(deviceId: string, deviceName: string) {
+    let lastError: unknown = null;
+
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        await this.manager.cancelDeviceConnection(deviceId).catch(() => {});
+        return await this.manager.connectToDevice(deviceId, { timeout: CONNECT_TIMEOUT_MS });
+      } catch (error) {
+        lastError = error;
+        if (attempt < 2) {
+          await delay(400);
+        }
+      }
+    }
+
+    const message = lastError instanceof Error ? lastError.message : 'Unknown Bluetooth error.';
+    throw new Error(`Unable to connect to ${deviceName}. ${message}`);
+  }
+
+  private async findConnectionCandidate(
+    selected: DeviceState,
+    onProgress?: (progress: SyncProgress) => void,
+  ) {
+    const selectedId = selected.id;
+    if (!selectedId) {
+      throw new Error('No wearable selected.');
+    }
+
+    this.manager.stopDeviceScan();
+
+    const knownById = await this.manager.devices([selectedId]).catch(() => []);
+    if (knownById[0]) {
+      return knownById[0];
+    }
+
+    const connected = await this.manager.connectedDevices([WEARABLE_SERVICE_UUID]).catch(() => []);
+    const connectedMatch = connected.find((device) => this.matchesSelectedDevice(device, selected));
+    if (connectedMatch) {
+      return connectedMatch;
+    }
+
+    onProgress?.({
+      status: 'connecting',
+      message: `Re-discovering ${selected.name ?? 'wearable'} before connecting...`,
+    });
+
+    const scanned = await this.scanForMatchingDevice(selected);
+    if (scanned) {
+      return scanned;
+    }
+
+    throw new Error(
+      `Could not find ${selected.name ?? 'the selected wearable'} nearby. Scan again and keep the wearable awake.`,
+    );
+  }
+
+  private async scanForMatchingDevice(selected: DeviceState) {
+    return new Promise<Device | null>((resolve, reject) => {
+      let fallbackMatch: Device | null = null;
+
+      const finish = (device: Device | null) => {
+        clearTimeout(timeout);
+        this.manager.stopDeviceScan();
+        resolve(device);
+      };
+
+      const timeout = setTimeout(() => {
+        finish(fallbackMatch);
+      }, CONNECT_SCAN_TIMEOUT_MS);
+
+      this.manager.startDeviceScan([WEARABLE_SERVICE_UUID], null, (error, device) => {
+        if (error) {
+          clearTimeout(timeout);
+          this.manager.stopDeviceScan();
+          reject(error);
+          return;
+        }
+
+        if (!device) {
+          return;
+        }
+
+        if (device.id === selected.id) {
+          finish(device);
+          return;
+        }
+
+        if (this.matchesSelectedDevice(device, selected)) {
+          if (!fallbackMatch || (device.rssi ?? -999) > (fallbackMatch.rssi ?? -999)) {
+            fallbackMatch = device;
+          }
+        }
+      });
+    });
+  }
+
+  private matchesSelectedDevice(device: Device, selected: DeviceState) {
+    if (selected.id && device.id === selected.id) {
+      return true;
+    }
+
+    const candidateName = resolveScanDeviceName(device);
+    return Boolean(selected.name && candidateName === selected.name);
+  }
+
+  private async connectSelectedWearable(
+    selected: DeviceState,
+    onProgress?: (progress: SyncProgress) => void,
+  ) {
+    let candidate = await this.findConnectionCandidate(selected, onProgress);
+    let resolvedDeviceId = candidate.id;
+    let resolvedDeviceName = resolveScanDeviceName(candidate) ?? selected.name;
+    let device: Device;
+
+    try {
+      device = await this.connectWithRetry(candidate.id, resolvedDeviceName ?? 'wearable');
+    } catch (error) {
+      onProgress?.({
+        status: 'connecting',
+        message: `Direct connect failed. Re-scanning for ${resolvedDeviceName ?? 'wearable'}...`,
+      });
+
+      const rescanned = await this.scanForMatchingDevice({
+        ...selected,
+        id: resolvedDeviceId,
+        name: resolvedDeviceName,
+      });
+
+      if (!rescanned) {
+        throw error;
+      }
+
+      candidate = rescanned;
+      resolvedDeviceId = rescanned.id;
+      resolvedDeviceName = resolveScanDeviceName(rescanned) ?? resolvedDeviceName;
+      device = await this.connectWithRetry(rescanned.id, resolvedDeviceName ?? 'wearable');
+    }
+
+    device = await device.discoverAllServicesAndCharacteristics();
+    resolvedDeviceName = resolveScanDeviceName(device) ?? resolvedDeviceName;
+
+    return {
+      device,
+      resolvedDeviceId,
+      resolvedDeviceName,
+    };
   }
 }

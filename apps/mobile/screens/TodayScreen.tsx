@@ -1,6 +1,8 @@
 import { Ionicons } from '@expo/vector-icons';
+import { useState } from 'react';
 import { Image, StyleSheet, Text, View } from 'react-native';
 
+import { ChartReadout } from '@/components/charts/ChartReadout';
 import { TrendChart } from '@/components/charts/TrendChart';
 import { SleepStageChart } from '@/components/charts/SleepStageChart';
 import { ScreenShell } from '@/components/layout/ScreenShell';
@@ -10,31 +12,59 @@ import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
 import { appIcon } from '@/constants/assets';
 import { colors, typography } from '@/constants/theme';
 import { useDashboardSnapshot } from '@/hooks/useHealthData';
-import { formatCompactDuration, formatMetricValue } from '@/utils/formatters';
+import type { SleepStageSelection, TrendSelection } from '@/types/health';
+import {
+  formatClockRangeFromStartLabel,
+  formatCompactDuration,
+  formatMetricValue,
+  formatSleepStageLabel,
+} from '@/utils/formatters';
 
 export function TodayScreen() {
   const state = useDashboardSnapshot();
-
-  if (state.status === 'loading') {
-    return (
-      <ScreenShell>
-        <LoadingState label="Loading today's recovery snapshot..." />
-      </ScreenShell>
-    );
-  }
-
-  if (state.status === 'error') {
-    return (
-      <ScreenShell>
-        <ErrorState message="Unable to load the mock dashboard right now." />
-      </ScreenShell>
-    );
-  }
-
+  const [heartSelection, setHeartSelection] = useState<TrendSelection | null>(null);
+  const [sleepSelection, setSleepSelection] = useState<SleepStageSelection | null>(null);
+  const [strainSelection, setStrainSelection] = useState<TrendSelection | null>(null);
   const data = state.data;
+
+  if (!data && state.status === 'loading') {
+    return (
+      <ScreenShell>
+        <LoadingState label="Loading today's recovery snapshot..." variant="inline" />
+      </ScreenShell>
+    );
+  }
+
+  if (!data && state.status === 'error') {
+    return (
+      <ScreenShell>
+        <ErrorState message="Unable to load the dashboard right now." variant="inline" />
+      </ScreenShell>
+    );
+  }
+
+  if (!data) {
+    return null;
+  }
+
+  const heartSelectionValue =
+    heartSelection === null ? null : `${formatMetricValue(heartSelection.point.value, 0)} BPM`;
+  const sleepSelectionDetail =
+    sleepSelection === null
+      ? null
+      : `${sleepSelection.segment.minutes}m · ${formatClockRangeFromStartLabel(
+          data.sleepCard.startLabel,
+          sleepSelection.startMinute,
+          sleepSelection.endMinute,
+        )}`;
+  const strainSelectionValue =
+    strainSelection === null ? null : `${formatMetricValue(strainSelection.point.value, 1)} strain`;
 
   return (
     <ScreenShell>
+      {state.status === 'error' ? (
+        <ErrorState message="Showing the last dashboard snapshot while refresh catches up." variant="inline" />
+      ) : null}
       <View style={styles.topBar}>
         <Image source={appIcon} style={styles.brandIcon} />
         <Text style={styles.topTitle}>Today</Text>
@@ -72,30 +102,46 @@ export function TodayScreen() {
           </View>
           <Ionicons color={colors.subtle} name="ellipsis-horizontal" size={18} />
         </View>
-        <View style={styles.metricRow}>
-          <View>
-            <Text style={styles.metricLabel}>Resting HR</Text>
-            <Text style={styles.metricValue}>
-              {data.heartCard.restingHr}
-              <Text style={styles.metricUnit}> BPM</Text>
-            </Text>
+        {heartSelection ? (
+          <ChartReadout
+            accentColor={colors.primary}
+            detail="Selected 5-minute window"
+            label={heartSelection.point.label}
+            style={styles.chartReadout}
+            value={heartSelectionValue ?? '--'}
+          />
+        ) : (
+          <View style={styles.metricRow}>
+            <View>
+              <Text style={styles.metricLabel}>Resting HR</Text>
+              <Text style={styles.metricValue}>
+                {data.heartCard.restingHr}
+                <Text style={styles.metricUnit}> BPM</Text>
+              </Text>
+            </View>
+            <View>
+              <Text style={styles.metricLabel}>Average</Text>
+              <Text style={styles.metricValue}>
+                {data.heartCard.averageHr}
+                <Text style={styles.metricUnit}> BPM</Text>
+              </Text>
+            </View>
+            <View>
+              <Text style={styles.metricLabel}>Max</Text>
+              <Text style={[styles.metricValue, { color: colors.heart }]}>
+                {data.heartCard.maxHr}
+                <Text style={styles.metricUnit}> BPM</Text>
+              </Text>
+            </View>
           </View>
-          <View>
-            <Text style={styles.metricLabel}>Average</Text>
-            <Text style={styles.metricValue}>
-              {data.heartCard.averageHr}
-              <Text style={styles.metricUnit}> BPM</Text>
-            </Text>
-          </View>
-          <View>
-            <Text style={styles.metricLabel}>Max</Text>
-            <Text style={[styles.metricValue, { color: colors.heart }]}>
-              {data.heartCard.maxHr}
-              <Text style={styles.metricUnit}> BPM</Text>
-            </Text>
-          </View>
-        </View>
-        <TrendChart accentColor={colors.primary} height={164} points={data.heartCard.series} />
+        )}
+        <TrendChart
+          accentColor={colors.primary}
+          height={164}
+          onSelectionChange={setHeartSelection}
+          points={data.heartCard.series}
+          testID="today-heart-chart"
+        />
       </GlassCard>
 
       <View style={styles.bottomGrid}>
@@ -107,13 +153,29 @@ export function TodayScreen() {
             </View>
             <Ionicons color={colors.subtle} name="ellipsis-horizontal" size={18} />
           </View>
-          <Text style={styles.sleepScore}>{formatMetricValue(data.sleepCard.score, 0)}</Text>
-          <Text style={styles.sleepDuration}>{formatCompactDuration(data.sleepCard.durationMinutes)}</Text>
+          {sleepSelection ? (
+            <ChartReadout
+              accentColor={colors.violet}
+              detail={sleepSelectionDetail ?? undefined}
+              label={formatSleepStageLabel(sleepSelection.segment.stage)}
+              size="compact"
+              style={styles.compactReadout}
+              value={`${sleepSelection.segment.minutes}m`}
+            />
+          ) : (
+            <>
+              <Text style={styles.sleepScore}>{formatMetricValue(data.sleepCard.score, 0)}</Text>
+              <Text style={styles.sleepDuration}>{formatCompactDuration(data.sleepCard.durationMinutes)}</Text>
+            </>
+          )}
           <SleepStageChart
+            accentColor={colors.violet}
             endLabel={data.sleepCard.endLabel}
             middleLabel={data.sleepCard.middleLabel}
+            onSelectionChange={setSleepSelection}
             segments={data.sleepCard.stages}
             startLabel={data.sleepCard.startLabel}
+            testID="today-sleep-stage-chart"
           />
         </GlassCard>
 
@@ -125,9 +187,28 @@ export function TodayScreen() {
             </View>
             <Ionicons color={colors.subtle} name="ellipsis-horizontal" size={18} />
           </View>
-          <Text style={styles.strainValue}>{formatMetricValue(data.strainCard.score, 1)}</Text>
-          <Text style={styles.strainLabel}>{data.strainCard.label}</Text>
-          <TrendChart accentColor={colors.cyan} height={110} points={data.strainCard.series} />
+          {strainSelection ? (
+            <ChartReadout
+              accentColor={colors.cyan}
+              detail="Selected strain point"
+              label={strainSelection.point.label}
+              size="compact"
+              style={styles.compactReadout}
+              value={strainSelectionValue ?? '--'}
+            />
+          ) : (
+            <>
+              <Text style={styles.strainValue}>{formatMetricValue(data.strainCard.score, 1)}</Text>
+              <Text style={styles.strainLabel}>{data.strainCard.label}</Text>
+            </>
+          )}
+          <TrendChart
+            accentColor={colors.cyan}
+            height={110}
+            onSelectionChange={setStrainSelection}
+            points={data.strainCard.series}
+            testID="today-strain-chart"
+          />
         </GlassCard>
       </View>
     </ScreenShell>
@@ -206,6 +287,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     marginBottom: 6,
+    minHeight: 60,
   },
   metricLabel: {
     color: colors.subtle,
@@ -241,6 +323,12 @@ const styles = StyleSheet.create({
     color: colors.muted,
     fontFamily: typography.bodySemiBold,
     fontSize: 16,
+    marginBottom: 12,
+  },
+  chartReadout: {
+    marginBottom: 8,
+  },
+  compactReadout: {
     marginBottom: 12,
   },
   strainValue: {

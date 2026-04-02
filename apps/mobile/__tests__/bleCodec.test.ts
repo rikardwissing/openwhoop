@@ -1,5 +1,5 @@
 import { CommandNumber, MetadataType, PacketType } from '@/services/ble/constants';
-import { PacketAssembler, framePacket, parseNotification } from '@/services/ble/codec';
+import { PacketAssembler, decodeDeviceNamePayload, disableAlarmPacket, framePacket, parseNotification, setAlarmPacket } from '@/services/ble/codec';
 
 function writeU16LE(bytes: Uint8Array, offset: number, value: number) {
   bytes[offset] = value & 0xff;
@@ -16,6 +16,10 @@ function writeU32LE(bytes: Uint8Array, offset: number, value: number) {
 function writeF32LE(bytes: Uint8Array, offset: number, value: number) {
   const view = new DataView(bytes.buffer);
   view.setFloat32(offset, value, true);
+}
+
+function asciiBytes(value: string) {
+  return Uint8Array.from(value, (character) => character.charCodeAt(0));
 }
 
 describe('BLE codec', () => {
@@ -110,5 +114,46 @@ describe('BLE codec', () => {
       skin_contact: 1,
       accel_gravity: [0.10999999940395355, -0.019999999552965164, 0.9800000190734863],
     });
+  });
+
+  it('decodes Harvard device-name payloads', () => {
+    expect(
+      decodeDeviceNamePayload(Uint8Array.from([0x00, ...asciiBytes('Strap Neo'), 0x00])),
+    ).toBe('Strap Neo');
+
+    expect(
+      decodeDeviceNamePayload(Uint8Array.from([9, ...asciiBytes('Strap Neo'), 0x00])),
+    ).toBe('Strap Neo');
+  });
+
+  it('parses device-name command responses', () => {
+    const parsed = parseNotification({
+      packetType: PacketType.CommandResponse,
+      seq: 0,
+      cmd: CommandNumber.GetAdvertisingNameHarvard,
+      data: Uint8Array.from([0x00, ...asciiBytes('New Strap'), 0x00]),
+    });
+
+    expect(parsed).toEqual({
+      type: 'deviceName',
+      device: {
+        command: CommandNumber.GetAdvertisingNameHarvard,
+        name: 'New Strap',
+      },
+    });
+  });
+
+  it('builds alarm command packets', () => {
+    const setFrame = setAlarmPacket(1_710_000_123);
+    const disableFrame = disableAlarmPacket();
+    const assembler = new PacketAssembler();
+
+    const [setPacket] = assembler.push(setFrame);
+    const [disablePacket] = assembler.push(disableFrame);
+
+    expect(setPacket.cmd).toBe(CommandNumber.SetAlarmTime);
+    expect(setPacket.data.slice(0, 5)).toEqual(Uint8Array.from([0x01, 0xfb, 0x87, 0xec, 0x65]));
+    expect(disablePacket.cmd).toBe(CommandNumber.DisableAlarm);
+    expect(disablePacket.data).toEqual(Uint8Array.from([0x00]));
   });
 });

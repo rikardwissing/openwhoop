@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useSQLiteContext } from 'expo-sqlite';
 
+import { useHealthRepository, useRefreshHealthData } from '@/providers/HealthDataProvider';
 import { WearableSyncService } from '@/services/ble/WearableSyncService';
 import type { DeviceState, SyncProgress, SyncResult, WearableScanResult } from '@/types/device';
 
@@ -12,6 +13,8 @@ interface WearableSyncContextValue {
   selectDevice: (device: WearableScanResult) => Promise<void>;
   forgetDevice: () => Promise<void>;
   syncSelected: () => Promise<SyncResult | null>;
+  setAlarm: (unixSeconds: number) => Promise<void>;
+  disableAlarm: () => Promise<void>;
 }
 
 export const emptyDeviceState: DeviceState = {
@@ -36,6 +39,8 @@ export const defaultWearableSyncContextValue: WearableSyncContextValue = {
   selectDevice: async () => {},
   forgetDevice: async () => {},
   syncSelected: async () => null,
+  setAlarm: async () => {},
+  disableAlarm: async () => {},
 };
 
 const WearableSyncContext = createContext<WearableSyncContextValue | null>(null);
@@ -56,6 +61,8 @@ export function WearableSyncContextProvider({
 
 export function WearableSyncProvider({ children }: { children: ReactNode }) {
   const db = useSQLiteContext();
+  const healthRepository = useHealthRepository();
+  const refreshHealthData = useRefreshHealthData();
   const [service] = useState(() => new WearableSyncService(db));
   const [deviceState, setDeviceState] = useState<DeviceState>(emptyDeviceState);
   const [progress, setProgress] = useState<SyncProgress>(defaultWearableSyncContextValue.progress);
@@ -127,14 +134,47 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
             setProgress(next);
           });
           setDeviceState(await service.getDeviceState());
+          healthRepository.invalidateCaches('all');
+          refreshHealthData();
+          void healthRepository.warmCaches().catch(() => {});
           return result;
         } catch {
           setDeviceState(await service.getDeviceState());
           return null;
         }
       },
+      setAlarm: async (unixSeconds) => {
+        try {
+          await service.setAlarm(unixSeconds, (next) => {
+            setProgress(next);
+          });
+          setDeviceState(await service.getDeviceState());
+        } catch (error) {
+          setDeviceState(await service.getDeviceState());
+          setProgress({
+            status: 'error',
+            message: error instanceof Error ? error.message : 'Unable to update the wearable alarm.',
+          });
+          throw error;
+        }
+      },
+      disableAlarm: async () => {
+        try {
+          await service.disableAlarm((next) => {
+            setProgress(next);
+          });
+          setDeviceState(await service.getDeviceState());
+        } catch (error) {
+          setDeviceState(await service.getDeviceState());
+          setProgress({
+            status: 'error',
+            message: error instanceof Error ? error.message : 'Unable to disable the wearable alarm.',
+          });
+          throw error;
+        }
+      },
     }),
-    [deviceState, progress, scanResults, service],
+    [deviceState, healthRepository, progress, refreshHealthData, scanResults, service],
   );
 
   return (

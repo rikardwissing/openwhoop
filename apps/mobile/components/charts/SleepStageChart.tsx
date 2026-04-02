@@ -1,8 +1,13 @@
-import { StyleSheet, Text, View } from 'react-native';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { PanResponder, StyleSheet, Text, View } from 'react-native';
 import Svg, { Rect } from 'react-native-svg';
 
+import {
+  buildSleepStageFrames,
+  selectSleepStageAtX,
+} from '@/components/charts/chartSelection';
 import { colors, sleepStageColors, typography } from '@/constants/theme';
-import type { SleepStage, SleepStageSegment } from '@/types/health';
+import type { SleepStage, SleepStageSegment, SleepStageSelection } from '@/types/health';
 
 const stageHeights: Record<SleepStage, number> = {
   awake: 12,
@@ -16,14 +21,78 @@ export function SleepStageChart({
   startLabel,
   middleLabel,
   endLabel,
+  accentColor = colors.cyan,
+  onSelectionChange,
+  testID,
 }: {
   segments: SleepStageSegment[];
   startLabel: string;
   middleLabel: string;
   endLabel: string;
+  accentColor?: string;
+  onSelectionChange?: (selection: SleepStageSelection | null) => void;
+  testID?: string;
 }) {
-  const total = segments.reduce((sum, segment) => sum + segment.minutes, 0);
-  let position = 0;
+  const [chartWidth, setChartWidth] = useState(0);
+  const [selection, setSelection] = useState<SleepStageSelection | null>(null);
+  const selectionRef = useRef<SleepStageSelection | null>(null);
+  const frames = useMemo(() => buildSleepStageFrames(segments), [segments]);
+
+  const commitSelection = useCallback(
+    (nextSelection: SleepStageSelection | null) => {
+      const current = selectionRef.current;
+      const isSame =
+        current?.index === nextSelection?.index &&
+        current?.startMinute === nextSelection?.startMinute &&
+        current?.endMinute === nextSelection?.endMinute;
+
+      if (isSame) {
+        return;
+      }
+
+      selectionRef.current = nextSelection;
+      setSelection(nextSelection);
+      onSelectionChange?.(nextSelection);
+    },
+    [onSelectionChange],
+  );
+
+  const updateSelection = useCallback(
+    (touchX: number) => {
+      commitSelection(selectSleepStageAtX(segments, chartWidth, touchX));
+    },
+    [chartWidth, commitSelection, segments],
+  );
+
+  useEffect(() => {
+    commitSelection(null);
+  }, [commitSelection, segments]);
+
+  const panResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => false,
+        onMoveShouldSetPanResponder: (_, gestureState) =>
+          Math.abs(gestureState.dx) > 6 && Math.abs(gestureState.dx) > Math.abs(gestureState.dy),
+        onPanResponderGrant: (event) => {
+          updateSelection(event.nativeEvent.locationX);
+        },
+        onPanResponderMove: (event) => {
+          updateSelection(event.nativeEvent.locationX);
+        },
+        onPanResponderRelease: () => {
+          commitSelection(null);
+        },
+        onPanResponderTerminate: () => {
+          commitSelection(null);
+        },
+        // Keep the scrub gesture attached to the chart until the user lifts
+        // their finger so the parent ScrollView cannot steal the interaction
+        // when the touch path drifts vertically.
+        onPanResponderTerminationRequest: () => false,
+      }),
+    [commitSelection, updateSelection],
+  );
 
   return (
     <View>
@@ -35,28 +104,48 @@ export function SleepStageChart({
           </View>
         ))}
       </View>
-      <Svg height={92} viewBox="0 0 100 30" width="100%">
-        {segments.map((segment, index) => {
-          const width = total === 0 ? 0 : (segment.minutes / total) * 100;
-          const height = stageHeights[segment.stage];
-          const rect = (
-            <Rect
-              fill={sleepStageColors[segment.stage]}
-              key={`${segment.stage}-${index}`}
-              opacity={segment.stage === 'awake' ? 0.92 : 1}
-              rx="0.8"
-              ry="0.8"
-              width={Math.max(width - 0.7, 0.8)}
-              x={position}
-              y={30 - height}
-              height={height}
-            />
-          );
+      <View
+        onLayout={(event) => {
+          setChartWidth(event.nativeEvent.layout.width);
+        }}
+        style={styles.chartArea}>
+        <Svg height="100%" viewBox="0 0 100 30" width="100%">
+          {frames.map((frame) => {
+            const isSelected = selection?.index === frame.index;
+            const width = Math.max(frame.width - 0.7, 0.8);
 
-          position += width;
-          return rect;
-        })}
-      </Svg>
+            return (
+              <Rect
+                fill={sleepStageColors[frame.segment.stage]}
+                height={stageHeights[frame.segment.stage]}
+                key={`${frame.segment.stage}-${frame.index}`}
+                opacity={
+                  selection
+                    ? isSelected
+                      ? 1
+                      : 0.22
+                    : frame.segment.stage === 'awake'
+                      ? 0.92
+                      : 1
+                }
+                rx="0.8"
+                ry="0.8"
+                stroke={isSelected ? accentColor : 'transparent'}
+                strokeWidth={isSelected ? 0.9 : 0}
+                width={width}
+                x={frame.startX}
+                y={30 - stageHeights[frame.segment.stage]}
+              />
+            );
+          })}
+        </Svg>
+        <View
+          collapsable={false}
+          style={styles.overlay}
+          testID={testID}
+          {...panResponder.panHandlers}
+        />
+      </View>
       <View style={styles.axis}>
         <Text style={styles.axisLabel}>{startLabel}</Text>
         <Text style={styles.axisLabel}>{middleLabel}</Text>
@@ -87,6 +176,14 @@ const styles = StyleSheet.create({
     color: colors.subtle,
     fontFamily: typography.body,
     fontSize: 11,
+  },
+  chartArea: {
+    height: 92,
+    position: 'relative',
+    width: '100%',
+  },
+  overlay: {
+    ...StyleSheet.absoluteFillObject,
   },
   axis: {
     flexDirection: 'row',

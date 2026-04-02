@@ -27,7 +27,11 @@ export enum CommandNumber {
   HistoricalDataResult = 23,
   ReportVersionInfo = 7,
   GetHelloHarvard = 35,
+  SetAlarmTime = 66,
+  GetAlarmTime = 67,
+  DisableAlarm = 69,
   GetAdvertisingNameHarvard = 76,
+  GetAdvertisingName = 141,
   EnterHighFreqSync = 96,
   ExitHighFreqSync = 97,
 }
