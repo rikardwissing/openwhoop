@@ -6,7 +6,7 @@ jest.mock('expo-notifications', () => ({
   },
 }));
 
-jest.mock('@/services/notifications/notificationPermissions', () => ({
+jest.mock('@/services/background/backgroundSyncTask', () => ({
   syncNotificationPermissionFromSystem: jest.fn(async () => ({
     permission: 'granted',
     baselineAt: null,
@@ -15,7 +15,7 @@ jest.mock('@/services/notifications/notificationPermissions', () => ({
 
 import * as Notifications from 'expo-notifications';
 
-import { syncNotificationPermissionFromSystem } from '@/services/notifications/notificationPermissions';
+import { syncNotificationPermissionFromSystem } from '@/services/background/backgroundSyncTask';
 import {
   SLEEP_PREPARATION_REMINDER_NOTIFICATION_ID,
   syncSleepPreparationReminder,

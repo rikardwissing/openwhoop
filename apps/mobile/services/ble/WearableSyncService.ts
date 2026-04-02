@@ -2,12 +2,13 @@ import type { SQLiteDatabase } from 'expo-sqlite';
 import { BleManager, type Device, type Subscription } from 'react-native-ble-plx';
 
 import { refreshDerivedData } from '@/data/sqlite/SQLiteHealthRepository';
+import { acquireBackgroundSyncLock, releaseBackgroundSyncLock } from '@/services/background/backgroundSyncState';
 import { CMD_FROM_STRAP_UUID, CMD_TO_STRAP_UUID, DATA_FROM_STRAP_UUID, EVENTS_FROM_STRAP_UUID, EventNumber, MEMFAULT_UUID, WEARABLE_SERVICE_UUID } from '@/services/ble/constants';
 import { resolveScanDeviceName } from '@/services/ble/deviceNaming';
 import { createWearableBleManager, getRestoredWearableDevice } from '@/services/ble/bleManager';
 import { PacketAssembler, base64ToBytes, bytesToBase64, disableAlarmPacket, enterHighFrequencySyncPacket, exitHighFrequencySyncPacket, getBatteryLevelPacket, getBodyLocationAndStatusPacket, getNamePacket, helloHarvardPacket, historyEndPacket, historyStartPacket, parseNotification, restartPacket, setAlarmPacket, setClockPacket, toggleRealtimeHrPacket, type SensorDataPacket, versionInfoPacket } from '@/services/ble/codec';
 import { HistorySyncWatchdog } from '@/services/ble/syncWatchdog';
-import type { ChargingState, DeviceState, SyncProgress, SyncResult, WearState, WearableLiveEvent, WearableScanResult } from '@/types/device';
+import type { ChargingState, DeviceState, SyncProgress, SyncResult, SyncSource, WearState, WearableLiveEvent, WearableScanResult } from '@/types/device';
 import { formatSqliteDateTime } from '@/utils/dateTime';
 
 const SELECTED_DEVICE_SQL = `
@@ -55,6 +56,8 @@ interface DeviceStateUpdate {
 }
 
 type LiveEventRecorder = (event: WearableLiveEvent) => void;
+type SyncRunSource = SyncSource;
+
 export interface SyncExecutionOutcome {
   status: 'success' | 'skipped';
   importedReadings: number;
@@ -108,7 +111,6 @@ export class WearableSyncService {
   private liveUpdatesCleanup: (() => Promise<void>) | null = null;
   private nextLiveEventId = 0;
   private liveHeartRate: { bpm: number | null; observedAt: number | null } = { bpm: null, observedAt: null };
-  private syncInFlight = false;
 
   constructor(
     private readonly db: SQLiteDatabase,
@@ -571,37 +573,50 @@ export class WearableSyncService {
     onProgress?: (progress: SyncProgress) => void,
     onLiveEvent?: LiveEventRecorder,
   ): Promise<SyncResult> {
-    const outcome = await this.runSync(onProgress, onLiveEvent);
-    return { importedReadings: outcome.importedReadings, completedAt: outcome.completedAt };
+    const outcome = await this.runSync('foreground', onProgress, onLiveEvent);
+    return {
+      importedReadings: outcome.importedReadings,
+      completedAt: outcome.completedAt,
+    };
+  }
+
+  async syncInBackground(): Promise<SyncExecutionOutcome> {
+    return this.runSync('background');
   }
 
   private async runSync(
+    source: SyncRunSource,
     onProgress?: (progress: SyncProgress) => void,
     onLiveEvent?: LiveEventRecorder,
   ): Promise<SyncExecutionOutcome> {
-    await this.stopLiveUpdates();
+    if (source === 'foreground') {
+      await this.stopLiveUpdates();
+    }
 
     const selected = await this.getDeviceState();
     if (!selected.id) {
       throw new Error('Select a wearable before syncing.');
     }
 
-    if (this.syncInFlight) {
+    const lockOwner = `${source}:${Date.now()}`;
+    const lockAcquired = await acquireBackgroundSyncLock(this.db, lockOwner);
+    if (!lockAcquired) {
       const completedAt = formatSqliteDateTime(new Date());
       onProgress?.({
         status: 'complete',
-        message: 'A sync is already running. Wait for it to finish before starting another one.',
+        message: source === 'foreground'
+          ? 'A sync is already running. Wait for it to finish before starting another one.'
+          : 'Skipped background sync because another sync is already running.',
         importedReadings: 0,
       });
       return {
         status: 'skipped',
         importedReadings: 0,
         completedAt,
-        reason: 'sync-in-flight',
+        reason: 'sync-lock-active',
       };
     }
 
-    this.syncInFlight = true;
     await this.ensurePoweredOn();
     onProgress?.({ status: 'connecting', message: `Connecting to ${selected.name ?? 'wearable'}...` });
 
@@ -637,8 +652,8 @@ export class WearableSyncService {
         selected,
         onProgress,
         {
-          allowDiscoveryScan: true,
-          allowRescan: true,
+          allowDiscoveryScan: source === 'foreground',
+          allowRescan: source === 'foreground',
         },
       ));
 
@@ -820,7 +835,8 @@ export class WearableSyncService {
           await device.cancelConnection();
         } catch {}
       }
-      this.syncInFlight = false;
+
+      await releaseBackgroundSyncLock(this.db, lockOwner).catch(() => {});
     }
   }
 

@@ -8,7 +8,10 @@ export type SyncStatus =
   | 'complete'
   | 'error';
 
+export type SyncSource = 'foreground' | 'background';
+export type BackgroundSyncResult = 'success' | 'skipped' | 'error';
 export type NotificationPermissionState = 'unknown' | 'granted' | 'provisional' | 'denied';
+export type BackgroundTaskApiStatus = 'unknown' | 'available' | 'restricted';
 
 export interface WearableScanResult {
   id: string;
@@ -54,6 +57,26 @@ export interface SyncProgress {
 export interface SyncResult {
   importedReadings: number;
   completedAt: string;
+}
+
+export interface BackgroundSyncState {
+  pairedDeviceId: string | null;
+  lastRunStartedAt: string | null;
+  lastRunFinishedAt: string | null;
+  lastSuccessAt: string | null;
+  lastSource: SyncSource | null;
+  lastResult: BackgroundSyncResult | null;
+  lastError: string | null;
+  lastImportedReadings: number | null;
+  notificationPermission: NotificationPermissionState;
+  notificationBaselineAt: string | null;
+}
+
+export interface BackgroundSyncDiagnostics {
+  apiStatus: BackgroundTaskApiStatus;
+  isTaskDefined: boolean;
+  isTaskRegistered: boolean;
+  minimumIntervalMinutes: number;
 }
 
 export function describeBatteryStatus(batteryPercent: number | null) {

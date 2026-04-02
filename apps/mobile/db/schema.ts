@@ -81,6 +81,30 @@ export async function initializeDatabase(db: SQLiteDatabase) {
       refreshed_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS background_sync_state (
+      id INTEGER PRIMARY KEY NOT NULL CHECK (id = 1),
+      paired_device_id TEXT,
+      last_run_started_at TEXT,
+      last_run_finished_at TEXT,
+      last_success_at TEXT,
+      last_source TEXT,
+      last_result TEXT,
+      last_error TEXT,
+      last_imported_readings INTEGER,
+      notification_permission TEXT NOT NULL DEFAULT 'unknown',
+      notification_baseline_at TEXT,
+      lock_owner TEXT,
+      lock_started_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS delivered_notifications (
+      device_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      delivered_at TEXT NOT NULL,
+      PRIMARY KEY (device_id, kind, entity_id)
+    );
+
     CREATE TABLE IF NOT EXISTS sleep_stage_segments (
       id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
       sleep_id TEXT NOT NULL,

@@ -12,13 +12,13 @@ import { colors, typography } from '@/constants/theme';
 import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
 import { useOptionalAppDatabase } from '@/providers/AppDatabaseProvider';
 import { useWearableSync } from '@/providers/WearableSyncProvider';
-import { triggerBackgroundTaskForTestingAsync } from '@/services/background/backgroundSyncTask';
 import { exportAndShareDatabaseSnapshot } from '@/services/databaseExport';
 import {
   describeBatteryStatus,
   describeChargingState,
   describeWearState,
   isBlockingSyncStatus,
+  type BackgroundTaskApiStatus,
 } from '@/types/device';
 
 function batteryAccent(batteryPercent: number | null) {
@@ -111,15 +111,67 @@ function formatBytes(sizeBytes: number) {
   return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function describeNotificationPermission(permission: 'unknown' | 'granted' | 'provisional' | 'denied') {
+  switch (permission) {
+    case 'granted':
+      return 'Allowed';
+    case 'provisional':
+      return 'Provisional';
+    case 'denied':
+      return 'Denied';
+    default:
+      return 'Unknown';
+  }
+}
+
+function describeBackgroundResult(result: 'success' | 'skipped' | 'error' | null) {
+  switch (result) {
+    case 'success':
+      return 'Success';
+    case 'skipped':
+      return 'Skipped';
+    case 'error':
+      return 'Error';
+    default:
+      return 'Idle';
+  }
+}
+
+function describeBackgroundRunState(
+  lastRunStartedAt: string | null,
+  lastRunFinishedAt: string | null,
+  lastResult: 'success' | 'skipped' | 'error' | null,
+) {
+  if (lastRunStartedAt && (!lastRunFinishedAt || lastRunStartedAt > lastRunFinishedAt) && lastResult === null) {
+    return 'Running';
+  }
+
+  return describeBackgroundResult(lastResult);
+}
+
+function describeBackgroundApiStatus(status: BackgroundTaskApiStatus) {
+  switch (status) {
+    case 'available':
+      return 'Available';
+    case 'restricted':
+      return 'Restricted';
+    default:
+      return 'Unknown';
+  }
+}
+
 export function SettingsScreen() {
   const router = useRouter();
   const db = useOptionalAppDatabase();
   const {
+    backgroundSyncDiagnostics,
+    backgroundSyncState,
     deviceState,
     liveEvents,
     progress,
     forgetDevice,
     syncSelected,
+    triggerBackgroundSyncTest,
     restartDevice,
   } = useWearableSync();
   const { onRefresh, refreshing } = useWearableRefreshControl();
@@ -130,40 +182,16 @@ export function SettingsScreen() {
     status: 'idle',
     message: 'Create a portable local data snapshot and share it straight from the phone.',
   });
-  const [backgroundTaskState, setBackgroundTaskState] = useState<{
-    status: 'idle' | 'running' | 'success' | 'error';
-    message: string;
-  }>({
-    status: 'idle',
-    message: 'Use this in a development build to ask Expo to run the registered background task now.',
-  });
   const deviceBusy = isBlockingSyncStatus(progress.status);
   const batteryChipAccent = batteryAccent(deviceState.batteryPercent);
   const chargingChipAccent = chargingAccent(deviceState.chargingStatus);
   const wearChipAccent = wearAccent(deviceState.bodyStatus);
   const exportDisabled = deviceBusy || exportState.status === 'running' || !db;
-
-  async function handleTriggerBackgroundTask() {
-    setBackgroundTaskState({
-      status: 'running',
-      message: 'Triggering the background task worker...',
-    });
-
-    try {
-      const triggered = await triggerBackgroundTaskForTestingAsync();
-      setBackgroundTaskState({
-        status: triggered ? 'success' : 'error',
-        message: triggered
-          ? 'Trigger sent. Check the device log for "Got background task call at date: ...".'
-          : 'Background task testing is only available in a development build.',
-      });
-    } catch (error) {
-      setBackgroundTaskState({
-        status: 'error',
-        message: error instanceof Error ? error.message : 'Unable to trigger the background task.',
-      });
-    }
-  }
+  const backgroundRunState = describeBackgroundRunState(
+    backgroundSyncState.lastRunStartedAt,
+    backgroundSyncState.lastRunFinishedAt,
+    backgroundSyncState.lastResult,
+  );
 
   async function handleExportDatabase() {
     if (!db) {
@@ -316,30 +344,87 @@ export function SettingsScreen() {
         <Text style={styles.roadmapText}>{progress.message}</Text>
       </GlassCard>
 
-      {__DEV__ ? (
-        <GlassCard accentColor={colors.violet}>
-          <SectionHeader title="Background Task" trailing="Dev only" />
-          <View style={styles.settingColumn}>
-            <View style={styles.buttonRow}>
-              <ActionButton
-                label={backgroundTaskState.status === 'running' ? 'Triggering...' : 'Trigger task'}
-                onPress={() => {
-                  void handleTriggerBackgroundTask();
-                }}
-                disabled={backgroundTaskState.status === 'running'}
-                tone="secondary"
-              />
-            </View>
-            <Text
-              style={[
-                styles.roadmapText,
-                backgroundTaskState.status === 'error' ? styles.errorText : null,
-              ]}>
-              {backgroundTaskState.message}
-            </Text>
+      <GlassCard accentColor={colors.violet}>
+        <SectionHeader title="Background Sync" trailing={deviceState.id ? 'Auto after pairing' : 'Inactive'} />
+        <View style={styles.settingColumn}>
+          <View style={styles.chipWrap}>
+            <StatChip
+              accent={backgroundSyncDiagnostics.apiStatus === 'available' ? colors.success : colors.borderStrong}
+              label="API"
+              value={describeBackgroundApiStatus(backgroundSyncDiagnostics.apiStatus)}
+            />
+            <StatChip
+              accent={backgroundSyncDiagnostics.isTaskRegistered ? colors.success : colors.borderStrong}
+              label="Registered"
+              value={backgroundSyncDiagnostics.isTaskRegistered ? 'Yes' : 'No'}
+            />
+            <StatChip
+              accent={colors.borderStrong}
+              label="Min interval"
+              value={`${backgroundSyncDiagnostics.minimumIntervalMinutes}m`}
+            />
+            <StatChip
+              accent={deviceState.id ? colors.success : colors.borderStrong}
+              label="Status"
+              value={deviceState.id ? 'Enabled' : 'No wearable'}
+            />
+            <StatChip
+              accent={colors.borderStrong}
+              label="Alerts"
+              value={describeNotificationPermission(backgroundSyncState.notificationPermission)}
+            />
+            <StatChip
+              accent={colors.borderStrong}
+              label="Last started"
+              value={backgroundSyncState.lastRunStartedAt ?? 'Not yet'}
+            />
+            <StatChip
+              accent={colors.borderStrong}
+              label="Last finished"
+              value={backgroundSyncState.lastRunFinishedAt ?? 'Not yet'}
+            />
+            <StatChip
+              accent={
+                backgroundRunState === 'Error'
+                  ? colors.alert
+                  : backgroundRunState === 'Success'
+                    ? colors.success
+                    : colors.borderStrong
+              }
+              label="Last result"
+              value={backgroundRunState}
+            />
           </View>
-        </GlassCard>
-      ) : null}
+
+          <Text style={styles.roadmapText}>
+            Background sync is best effort on iPhone while the app stays in the background or suspended. iOS chooses the actual run time, and short intervals are often delayed substantially.
+          </Text>
+          <Text style={styles.roadmapText}>
+            If you force-quit the app from the app switcher, iOS stops relaunching it for this work until you open it again.
+          </Text>
+          <Text style={styles.roadmapText}>
+            Keep the official wearable app closed while Unstrap owns the strap. Two apps syncing the same device can race each other and create gaps.
+          </Text>
+          {__DEV__ ? (
+            <>
+              <View style={styles.buttonRow}>
+                <ActionButton
+                  label="Trigger test run"
+                  onPress={() => {
+                    void triggerBackgroundSyncTest();
+                  }}
+                  disabled={!deviceState.id || progress.status === 'scanning' || deviceBusy}
+                  tone="secondary"
+                />
+              </View>
+              <Text style={styles.settingSubtitle}>
+                Debug only. This uses Expo's test hook to run the background worker immediately on a physical development build.
+              </Text>
+            </>
+          ) : null}
+          {backgroundSyncState.lastError ? <Text style={styles.errorText}>{backgroundSyncState.lastError}</Text> : null}
+        </View>
+      </GlassCard>
 
       <GlassCard accentColor={colors.primary}>
         <SectionHeader title="Export for Analysis" trailing="SQLite snapshot" />

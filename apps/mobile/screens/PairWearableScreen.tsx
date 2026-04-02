@@ -78,7 +78,7 @@ export function PairWearableScreen() {
     <ScreenShell headerIcon="pair" headerSettingsDisabled={!deviceState.id} headerTitle="Pair Wearable">
       <View>
         <Text style={styles.subtitle}>
-          Pair the strap you want this phone to own. After the first successful sync, Unstrap keeps your wearable insights local on this phone.
+          Pair the strap you want this phone to own. After the first successful sync, Unstrap keeps your wearable insights local and can refresh in the background on iPhone.
         </Text>
       </View>
 
@@ -138,7 +138,7 @@ export function PairWearableScreen() {
       </GlassCard>
 
       <GlassCard accentColor={colors.violet}>
-        <SectionHeader title="Pairing Notes" trailing="iPhone v1" />
+        <SectionHeader title="Background Sync Notes" trailing="iPhone v1" />
         <Text style={styles.emptyState}>
           Keep the official wearable app closed while Unstrap is paired to this strap. If both apps sync the same device, they can compete for the same history and create gaps in your unlocked data.
         </Text>

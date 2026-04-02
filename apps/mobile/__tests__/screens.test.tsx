@@ -16,6 +16,34 @@ jest.mock('expo-router', () => ({
   useSegments: () => mockSegments,
 }));
 
+jest.mock('@/services/background/backgroundSyncState', () => ({
+  getBackgroundSyncState: jest.fn(async () => ({
+    pairedDeviceId: null,
+    lastRunStartedAt: null,
+    lastRunFinishedAt: null,
+    lastSuccessAt: null,
+    lastSource: null,
+    lastResult: null,
+    lastError: null,
+    lastImportedReadings: null,
+    notificationPermission: 'unknown',
+    notificationBaselineAt: null,
+  })),
+}));
+
+jest.mock('@/services/background/backgroundSyncTask', () => ({
+  ensureBackgroundSyncRegistered: jest.fn(async () => {}),
+  enableBackgroundSyncAfterPairing: jest.fn(async () => {}),
+  disableBackgroundSync: jest.fn(async () => {}),
+  getBackgroundSyncDiagnostics: jest.fn(async () => ({
+    apiStatus: 'available',
+    isTaskDefined: true,
+    isTaskRegistered: true,
+    minimumIntervalMinutes: 15,
+  })),
+  triggerBackgroundSyncForTesting: jest.fn(async () => true),
+}));
+
 import { SleepStageChart } from '@/components/charts/SleepStageChart';
 import { TrendChart } from '@/components/charts/TrendChart';
 import { WearableProgressOverlay } from '@/components/ui/WearableProgressOverlay';
@@ -34,8 +62,6 @@ import { TodayScreen } from '@/screens/TodayScreen';
 import { WellnessScreen } from '@/screens/WellnessScreen';
 import type { DeviceState, SyncProgress, SyncResult, WearableLiveEvent, WearableScanResult } from '@/types/device';
 
-const mockTriggerBackgroundTaskForTestingAsync = jest.fn(async () => true);
-
 jest.mock('@/services/databaseExport', () => ({
   exportAndShareDatabaseSnapshot: jest.fn(async () => ({
     fileName: 'btwearable.db',
@@ -44,13 +70,9 @@ jest.mock('@/services/databaseExport', () => ({
   })),
 }));
 
-jest.mock('@/services/background/backgroundSyncTask', () => ({
-  registerBackgroundTaskAsync: jest.fn(async () => true),
-  triggerBackgroundTaskForTestingAsync: () => mockTriggerBackgroundTaskForTestingAsync(),
-}));
-
 function createWearableContextValue(overrides: Partial<{
   deviceState: DeviceState;
+  backgroundSyncDiagnostics: typeof defaultWearableSyncContextValue.backgroundSyncDiagnostics;
   liveEvents: WearableLiveEvent[];
   progress: SyncProgress;
   scanResults: WearableScanResult[];
@@ -59,6 +81,7 @@ function createWearableContextValue(overrides: Partial<{
   selectDevice: (device: WearableScanResult) => Promise<void>;
   forgetDevice: () => Promise<void>;
   syncSelected: (options?: { showOverlay?: boolean }) => Promise<SyncResult | null>;
+  triggerBackgroundSyncTest: () => Promise<boolean>;
   restartDevice: () => Promise<void>;
   setAlarm: (unixSeconds: number) => Promise<void>;
   disableAlarm: () => Promise<void>;
@@ -108,7 +131,6 @@ describe('screen rendering', () => {
     mockPush.mockClear();
     mockBack.mockClear();
     mockReplace.mockClear();
-    mockTriggerBackgroundTaskForTestingAsync.mockClear();
     mockSegments = ['(tabs)', 'settings'];
   });
 
@@ -271,16 +293,35 @@ describe('screen rendering', () => {
     expect(screen.getByText('Restart wearable')).toBeTruthy();
     expect(screen.getByText('Export for Analysis')).toBeTruthy();
     expect(screen.getByText('Export Snapshot')).toBeTruthy();
-    expect(screen.getByText('Background Task')).toBeTruthy();
-    expect(screen.getByText('Trigger task')).toBeTruthy();
     expect(screen.getByText('Battery')).toBeTruthy();
     expect(screen.getAllByText('Status').length).toBeGreaterThan(0);
     expect(screen.getByText('Charge')).toBeTruthy();
     expect(screen.getByText('Wear')).toBeTruthy();
+    expect(screen.getByText('API')).toBeTruthy();
+    expect(screen.getByText('Registered')).toBeTruthy();
+    expect(screen.getByText('15m')).toBeTruthy();
+    expect(screen.getByText('Last started')).toBeTruthy();
+    expect(screen.getByText('Last finished')).toBeTruthy();
+    expect(screen.getByText('Trigger test run')).toBeTruthy();
     expect(screen.getAllByText('Unknown').length).toBeGreaterThan(0);
     expect(screen.getAllByText('--').length).toBeGreaterThan(0);
     expect(screen.queryByText('Scan nearby')).toBeNull();
     expect(screen.queryByText('Scan Results')).toBeNull();
+  });
+
+  it('runs the background sync test trigger from settings', () => {
+    const triggerBackgroundSyncTest = jest.fn(async () => true);
+    const screen = renderWithProviders(<SettingsScreen />, {
+      deviceState: {
+        id: 'strap-1',
+        name: 'Neo Strap',
+      },
+      triggerBackgroundSyncTest,
+    });
+
+    fireEvent.press(screen.getByText('Trigger test run'));
+
+    expect(triggerBackgroundSyncTest).toHaveBeenCalledTimes(1);
   });
 
   it('opens the live events screen from settings', () => {
@@ -289,17 +330,6 @@ describe('screen rendering', () => {
     fireEvent.press(screen.getByText('Live events'));
 
     expect(mockPush).toHaveBeenCalledWith('/live-events');
-  });
-
-  it('triggers the background task from settings', async () => {
-    const screen = renderWithProviders(<SettingsScreen />);
-
-    await act(async () => {
-      fireEvent.press(screen.getByText('Trigger task'));
-    });
-
-    expect(mockTriggerBackgroundTaskForTestingAsync).toHaveBeenCalledTimes(1);
-    expect(screen.getByText('Trigger sent. Check the device log for "Got background task call at date: ...".')).toBeTruthy();
   });
 
   it('runs the restart action from settings', () => {
