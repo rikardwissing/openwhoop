@@ -7,7 +7,7 @@ use btwearable_codec::{
     WearableData, WearablePacket,
     constants::{
         CMD_FROM_STRAP, CMD_TO_STRAP, CommandNumber, DATA_FROM_STRAP, EVENTS_FROM_STRAP,
-        EventNumber, MEMFAULT, PacketType, WEARABLE_SERVICE,
+        EventNumber, MEMFAULT, MetadataType, PacketType, WEARABLE_SERVICE,
     },
 };
 use btwearable_entities::packets::Model;
@@ -47,6 +47,30 @@ pub struct CommandProbeEntry {
     pub cmd: Option<u8>,
     pub payload: Vec<u8>,
     pub decoded: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HistoryPeekMetadata {
+    pub unix: u32,
+    pub data: u32,
+    pub cmd: MetadataType,
+}
+
+#[derive(Debug, Default)]
+pub struct HistoryPeekSummary {
+    pub notifications: usize,
+    pub decoded_packets: usize,
+    pub readings: usize,
+    pub first_reading_unix: Option<u64>,
+    pub last_reading_unix: Option<u64>,
+    pub history_end_seen: bool,
+    pub history_complete_seen: bool,
+    pub timed_out: bool,
+    pub stream_ended: bool,
+    pub synced_to_db: bool,
+    pub refreshed_metrics: bool,
+    pub trailing_history_flushes: usize,
+    pub metadata: Vec<HistoryPeekMetadata>,
 }
 
 impl WearableDevice {
@@ -130,11 +154,125 @@ impl WearableDevice {
     }
 
     pub async fn sync_history(&mut self, should_exit: Arc<AtomicBool>) -> anyhow::Result<()> {
+        self.sync_history_internal(None, should_exit).await
+    }
+
+    pub async fn sync_history_from_pointer(
+        &mut self,
+        pointer: u32,
+        should_exit: Arc<AtomicBool>,
+    ) -> anyhow::Result<()> {
+        self.sync_history_internal(Some(pointer), should_exit).await
+    }
+
+    pub async fn peek_history(
+        &mut self,
+        replay_pointer: Option<u32>,
+        listen_duration: Duration,
+        sync_db: bool,
+        refresh_metrics: bool,
+    ) -> anyhow::Result<HistoryPeekSummary> {
+        self.wearable.reset_history_sync_state();
+        let mut notifications = self.peripheral.notifications().await?;
+        self.start_history_transfer(replay_pointer).await?;
+
+        let mut summary = HistoryPeekSummary {
+            synced_to_db: sync_db,
+            ..HistoryPeekSummary::default()
+        };
+        let deadline = tokio::time::Instant::now() + listen_duration;
+
+        while tokio::time::Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let notification = match timeout(remaining, notifications.next()).await {
+                Ok(Some(notification)) => notification,
+                Ok(None) => {
+                    summary.stream_ended = true;
+                    break;
+                }
+                Err(_) => {
+                    summary.timed_out = true;
+                    break;
+                }
+            };
+
+            summary.notifications += 1;
+            let packet = if sync_db {
+                self.wearable
+                    .database
+                    .create_packet(notification.uuid, notification.value.clone())
+                    .await?
+            } else {
+                Model {
+                    id: 0,
+                    uuid: notification.uuid,
+                    bytes: notification.value,
+                }
+            };
+
+            let Some(data) = self.wearable.decode_packet(packet)? else {
+                continue;
+            };
+            summary.decoded_packets += 1;
+
+            match &data {
+                WearableData::HistoryReading(reading) if reading.is_valid() => {
+                    summary.readings += 1;
+                    summary.first_reading_unix = summary
+                        .first_reading_unix
+                        .map(|unix| unix.min(reading.unix))
+                        .or(Some(reading.unix));
+                    summary.last_reading_unix = summary
+                        .last_reading_unix
+                        .map(|unix| unix.max(reading.unix))
+                        .or(Some(reading.unix));
+                }
+                WearableData::HistoryMetadata { unix, data, cmd } => {
+                    summary.metadata.push(HistoryPeekMetadata {
+                        unix: *unix,
+                        data: *data,
+                        cmd: *cmd,
+                    });
+                    if matches!(cmd, MetadataType::HistoryEnd) {
+                        summary.history_end_seen = true;
+                        break;
+                    }
+                    if matches!(cmd, MetadataType::HistoryComplete) {
+                        summary.history_complete_seen = true;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+
+            if sync_db {
+                self.wearable
+                    .ingest_decoded_data_without_history_ack(data)
+                    .await?;
+            }
+        }
+
+        if sync_db {
+            summary.trailing_history_flushes =
+                self.wearable.flush_pending_history_readings().await?;
+            if refresh_metrics {
+                self.wearable.refresh_metrics().await?;
+                summary.refreshed_metrics = true;
+            }
+        }
+
+        Ok(summary)
+    }
+
+    async fn sync_history_internal(
+        &mut self,
+        replay_pointer: Option<u32>,
+        should_exit: Arc<AtomicBool>,
+    ) -> anyhow::Result<()> {
         self.wearable.reset_history_sync_state();
         let mut notifications = self.peripheral.notifications().await?;
 
-        info!("Requesting historical data from wearable");
-        self.send_command(WearablePacket::history_start()).await?;
+        self.start_history_transfer(replay_pointer).await?;
 
         'a: loop {
             if should_exit.load(Ordering::SeqCst) {
@@ -154,7 +292,7 @@ impl WearableDevice {
                                 info!("Reconnected, reinitializing history sync");
                                 self.initialize().await?;
                                 self.wearable.reset_history_sync_state();
-                                self.send_command(WearablePacket::history_start()).await?;
+                                self.start_history_transfer(replay_pointer).await?;
                                 continue 'a;
                             }
 
@@ -182,6 +320,24 @@ impl WearableDevice {
             }
         }
 
+        Ok(())
+    }
+
+    async fn start_history_transfer(&mut self, replay_pointer: Option<u32>) -> anyhow::Result<()> {
+        if let Some(pointer) = replay_pointer {
+            info!(
+                "Rewinding device history to read pointer {} (0x{pointer:08x}) before sync",
+                pointer
+            );
+            self.send_command(WearablePacket::abort_historical_transmits())
+                .await?;
+            self.send_command(WearablePacket::set_read_pointer(pointer))
+                .await?;
+        } else {
+            info!("Requesting historical data from wearable");
+        }
+
+        self.send_command(WearablePacket::history_start()).await?;
         Ok(())
     }
 
@@ -327,6 +483,15 @@ impl WearableDevice {
         self.read_command_response_or_event(
             WearablePacket::get_extended_battery_info(),
             Some(EventNumber::ExtendedBatteryInformation),
+            Duration::from_secs(10),
+        )
+        .await
+    }
+
+    pub async fn get_data_range(&mut self) -> anyhow::Result<WearableData> {
+        self.read_command_response_or_event(
+            WearablePacket::get_data_range(),
+            None,
             Duration::from_secs(10),
         )
         .await

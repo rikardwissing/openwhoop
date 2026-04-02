@@ -1,5 +1,5 @@
 import { CommandNumber, EventNumber, MetadataType, PacketType } from '@/services/ble/constants';
-import { PacketAssembler, decodeBatteryEventPayload, decodeBatteryLevelPayload, decodeBodyStatusPayload, decodeDeviceNamePayload, disableAlarmPacket, framePacket, getBatteryLevelPacket, getBodyLocationAndStatusPacket, parseNotification, setAlarmPacket } from '@/services/ble/codec';
+import { PacketAssembler, decodeBatteryEventPayload, decodeBatteryLevelPayload, decodeBodyStatusPayload, decodeDeviceNamePayload, disableAlarmPacket, framePacket, getBatteryLevelPacket, getBodyLocationAndStatusPacket, parseNotification, setAlarmPacket, toggleRealtimeHrPacket } from '@/services/ble/codec';
 
 function writeU16LE(bytes: Uint8Array, offset: number, value: number) {
   bytes[offset] = value & 0xff;
@@ -290,17 +290,49 @@ describe('BLE codec', () => {
     });
   });
 
-  it('builds alarm command packets', () => {
+  it('parses realtime heart-rate packets', () => {
+    const parsed = parseNotification({
+      packetType: PacketType.RealtimeData,
+      seq: 0,
+      cmd: 0x78,
+      data: Uint8Array.from([0x56, 0x34, 0x12, 0x34, 0x12, 72]),
+    });
+
+    expect(parsed).toEqual({
+      type: 'realtimeHr',
+      heartRate: {
+        unix: 0x12345678 * 1000,
+        bpm: 72,
+      },
+    });
+  });
+
+  it('falls back when realtime heart-rate payloads are too short', () => {
+    const parsed = parseNotification({
+      packetType: PacketType.RealtimeData,
+      seq: 0,
+      cmd: 0x78,
+      data: Uint8Array.from([0x56, 0x34, 0x12, 0x34, 0x12]),
+    });
+
+    expect(parsed).toEqual({
+      type: 'unknown',
+    });
+  });
+
+  it('builds alarm and realtime heart-rate command packets', () => {
     const batteryFrame = getBatteryLevelPacket();
     const bodyFrame = getBodyLocationAndStatusPacket();
     const setFrame = setAlarmPacket(1_710_000_123);
     const disableFrame = disableAlarmPacket();
+    const realtimeFrame = toggleRealtimeHrPacket(true);
     const assembler = new PacketAssembler();
 
     const [batteryPacket] = assembler.push(batteryFrame);
     const [bodyPacket] = assembler.push(bodyFrame);
     const [setPacket] = assembler.push(setFrame);
     const [disablePacket] = assembler.push(disableFrame);
+    const [realtimePacket] = assembler.push(realtimeFrame);
 
     expect(batteryPacket.cmd).toBe(CommandNumber.GetBatteryLevel);
     expect(batteryPacket.data).toEqual(Uint8Array.from([0x00]));
@@ -310,5 +342,7 @@ describe('BLE codec', () => {
     expect(setPacket.data.slice(0, 5)).toEqual(Uint8Array.from([0x01, 0xfb, 0x87, 0xec, 0x65]));
     expect(disablePacket.cmd).toBe(CommandNumber.DisableAlarm);
     expect(disablePacket.data).toEqual(Uint8Array.from([0x00]));
+    expect(realtimePacket.cmd).toBe(CommandNumber.ToggleRealtimeHr);
+    expect(realtimePacket.data).toEqual(Uint8Array.from([0x01]));
   });
 });

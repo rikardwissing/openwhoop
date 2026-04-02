@@ -52,6 +52,11 @@ export interface BodyStatusPacket {
   bodyStatus: 'on-body' | 'off-body';
 }
 
+export interface RealtimeHeartRatePacket {
+  unix: number;
+  bpm: number;
+}
+
 export interface DeviceBatteryEventPacket {
   event: EventNumber.BatteryLevel;
   unix: number;
@@ -105,6 +110,7 @@ export interface FramedPacket {
 export type ParsedNotification =
   | { type: 'history'; reading: HistoryReadingPacket }
   | { type: 'metadata'; metadata: MetadataPacket }
+  | { type: 'realtimeHr'; heartRate: RealtimeHeartRatePacket }
   | { type: 'version'; version: VersionInfoPacket }
   | { type: 'deviceName'; device: DeviceNamePacket }
   | { type: 'battery'; battery: BatteryLevelPacket }
@@ -226,6 +232,10 @@ export function getBatteryLevelPacket() {
 
 export function getBodyLocationAndStatusPacket() {
   return framePacket(PacketType.Command, 0, CommandNumber.GetBodyLocationAndStatus, Uint8Array.from([0x00]));
+}
+
+export function toggleRealtimeHrPacket(enable: boolean) {
+  return framePacket(PacketType.Command, 0, CommandNumber.ToggleRealtimeHr, Uint8Array.from([enable ? 0x01 : 0x00]));
 }
 
 export function setAlarmPacket(unixSeconds: number) {
@@ -558,6 +568,21 @@ function parseEventPacket(packet: FramedPacket): ParsedNotification {
   return { type: 'unknown' };
 }
 
+function parseRealtimeHeartRatePacket(packet: FramedPacket): ParsedNotification {
+  if (packet.data.length < 6) {
+    return { type: 'unknown' };
+  }
+
+  const unix = readU32LE(Uint8Array.from([packet.cmd, packet.data[0], packet.data[1], packet.data[2]]), 0) * 1000;
+  return {
+    type: 'realtimeHr',
+    heartRate: {
+      unix,
+      bpm: packet.data[5],
+    },
+  };
+}
+
 export function parseNotification(packet: FramedPacket): ParsedNotification {
   if (packet.packetType === PacketType.HistoricalData) {
     return {
@@ -575,6 +600,10 @@ export function parseNotification(packet: FramedPacket): ParsedNotification {
 
   if (packet.packetType === PacketType.Event) {
     return parseEventPacket(packet);
+  }
+
+  if (packet.packetType === PacketType.RealtimeData) {
+    return parseRealtimeHeartRatePacket(packet);
   }
 
   if (packet.packetType === PacketType.CommandResponse) {

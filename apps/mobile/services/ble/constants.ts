@@ -37,6 +37,7 @@ export enum EventNumber {
 }
 
 export enum CommandNumber {
+  ToggleRealtimeHr = 3,
   SetClock = 10,
   SendHistoricalData = 22,
   HistoricalDataResult = 23,

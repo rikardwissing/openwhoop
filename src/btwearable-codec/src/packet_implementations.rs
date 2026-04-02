@@ -34,6 +34,37 @@ impl WearablePacket {
         )
     }
 
+    pub fn abort_historical_transmits() -> WearablePacket {
+        WearablePacket::new(
+            PacketType::Command,
+            0,
+            CommandNumber::AbortHistoricalTransmits.as_u8(),
+            vec![0x00],
+        )
+    }
+
+    pub fn set_read_pointer(pointer: u32) -> WearablePacket {
+        let mut packet_data = vec![0x01];
+        packet_data.extend_from_slice(&pointer.to_le_bytes());
+        packet_data.append(&mut vec![0, 0, 0, 0]); // padding
+
+        WearablePacket::new(
+            PacketType::Command,
+            0,
+            CommandNumber::SetReadPointer.as_u8(),
+            packet_data,
+        )
+    }
+
+    pub fn get_data_range() -> WearablePacket {
+        WearablePacket::new(
+            PacketType::Command,
+            0,
+            CommandNumber::GetDataRange.as_u8(),
+            vec![0x00],
+        )
+    }
+
     pub fn hello_harvard() -> WearablePacket {
         WearablePacket::new(
             PacketType::Command,
@@ -271,7 +302,6 @@ impl WearablePacket {
             vec![0x01, u8::from(enable)],
         )
     }
-
 }
 
 #[cfg(test)]
@@ -309,6 +339,32 @@ mod tests {
     fn history_start_packet() {
         let p = WearablePacket::history_start();
         assert_command_packet(&p, CommandNumber::SendHistoricalData);
+        assert_eq!(p.data, vec![0x00]);
+        assert_roundtrip(&p);
+    }
+
+    #[test]
+    fn abort_historical_transmits_packet() {
+        let p = WearablePacket::abort_historical_transmits();
+        assert_command_packet(&p, CommandNumber::AbortHistoricalTransmits);
+        assert_eq!(p.data, vec![0x00]);
+        assert_roundtrip(&p);
+    }
+
+    #[test]
+    fn set_read_pointer_packet() {
+        let p = WearablePacket::set_read_pointer(0x12345678);
+        assert_command_packet(&p, CommandNumber::SetReadPointer);
+        assert_eq!(p.data[0], 0x01);
+        assert_eq!(&p.data[1..5], &0x12345678_u32.to_le_bytes());
+        assert_eq!(&p.data[5..], &[0x00, 0x00, 0x00, 0x00]);
+        assert_roundtrip(&p);
+    }
+
+    #[test]
+    fn get_data_range_packet() {
+        let p = WearablePacket::get_data_range();
+        assert_command_packet(&p, CommandNumber::GetDataRange);
         assert_eq!(p.data, vec![0x00]);
         assert_roundtrip(&p);
     }

@@ -9,9 +9,12 @@ import { ScreenShell } from '@/components/layout/ScreenShell';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { GlowRing } from '@/components/ui/GlowRing';
 import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
+import { StatChip } from '@/components/ui/StatChip';
 import { appIcon } from '@/constants/assets';
 import { colors, typography } from '@/constants/theme';
 import { useDashboardSnapshot } from '@/hooks/useHealthData';
+import { useWearableSync } from '@/providers/WearableSyncProvider';
+import { hasFreshLiveHeartRate } from '@/types/device';
 import type { SleepStageSelection, TrendSelection } from '@/types/health';
 import {
   formatClockRangeFromStartLabel,
@@ -22,10 +25,14 @@ import {
 
 export function TodayScreen() {
   const state = useDashboardSnapshot();
+  const { deviceState } = useWearableSync();
   const [heartSelection, setHeartSelection] = useState<TrendSelection | null>(null);
   const [sleepSelection, setSleepSelection] = useState<SleepStageSelection | null>(null);
   const [strainSelection, setStrainSelection] = useState<TrendSelection | null>(null);
   const data = state.data;
+  const showLiveHeartRate = hasFreshLiveHeartRate(deviceState);
+  const liveHeartRateLabel =
+    showLiveHeartRate && deviceState.liveHeartRate !== null ? `${deviceState.liveHeartRate} bpm` : null;
 
   if (!data && state.status === 'loading') {
     return (
@@ -123,28 +130,35 @@ export function TodayScreen() {
             value={heartSelectionValue ?? '--'}
           />
         ) : (
-          <View style={styles.metricRow}>
-            <View>
-              <Text style={styles.metricLabel}>Resting HR</Text>
-              <Text style={styles.metricValue}>
-                {data.heartCard.restingHr}
-                <Text style={styles.metricUnit}> BPM</Text>
-              </Text>
+          <View style={styles.heartSummary}>
+            <View style={styles.metricRow}>
+              <View>
+                <Text style={styles.metricLabel}>Resting HR</Text>
+                <Text style={styles.metricValue}>
+                  {data.heartCard.restingHr}
+                  <Text style={styles.metricUnit}> BPM</Text>
+                </Text>
+              </View>
+              <View>
+                <Text style={styles.metricLabel}>Average</Text>
+                <Text style={styles.metricValue}>
+                  {data.heartCard.averageHr}
+                  <Text style={styles.metricUnit}> BPM</Text>
+                </Text>
+              </View>
+              <View>
+                <Text style={styles.metricLabel}>Max</Text>
+                <Text style={[styles.metricValue, { color: colors.heart }]}>
+                  {data.heartCard.maxHr}
+                  <Text style={styles.metricUnit}> BPM</Text>
+                </Text>
+              </View>
             </View>
-            <View>
-              <Text style={styles.metricLabel}>Average</Text>
-              <Text style={styles.metricValue}>
-                {data.heartCard.averageHr}
-                <Text style={styles.metricUnit}> BPM</Text>
-              </Text>
-            </View>
-            <View>
-              <Text style={styles.metricLabel}>Max</Text>
-              <Text style={[styles.metricValue, { color: colors.heart }]}>
-                {data.heartCard.maxHr}
-                <Text style={styles.metricUnit}> BPM</Text>
-              </Text>
-            </View>
+            {liveHeartRateLabel ? (
+              <View style={styles.heartChipRow}>
+                <StatChip accent={colors.heart} label="Live" value={liveHeartRateLabel} />
+              </View>
+            ) : null}
           </View>
         )}
         <TrendChart
@@ -300,6 +314,12 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     marginBottom: 6,
     minHeight: 60,
+  },
+  heartSummary: {
+    marginBottom: 6,
+  },
+  heartChipRow: {
+    marginTop: 2,
   },
   metricLabel: {
     color: colors.subtle,

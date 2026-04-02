@@ -151,6 +151,17 @@ class MockDevice {
     this.emitFrame(DATA_FROM_STRAP_UUID, framePacket(PacketType.HistoricalData, 0, 0, payload));
   }
 
+  emitRealtimeHeartRate(unixSeconds: number, bpm: number) {
+    const payload = new Uint8Array(6);
+    payload[0] = (unixSeconds >> 8) & 0xff;
+    payload[1] = (unixSeconds >> 16) & 0xff;
+    payload[2] = (unixSeconds >> 24) & 0xff;
+    payload[3] = 0x00;
+    payload[4] = 0x00;
+    payload[5] = bpm;
+    this.emitFrame(DATA_FROM_STRAP_UUID, framePacket(PacketType.RealtimeData, 0, unixSeconds & 0xff, payload));
+  }
+
   emitMetadata(kind: MetadataType, payload: Uint8Array) {
     this.emitFrame(DATA_FROM_STRAP_UUID, framePacket(PacketType.Metadata, 0, kind, payload));
   }
@@ -358,6 +369,35 @@ describe('WearableSyncService battery refresh', () => {
     expect(updates.some((state) => state.bodyStatus === 'on-body')).toBe(true);
 
     await service.stopLiveUpdates();
+  });
+
+  it('streams live heart rate while connected', async () => {
+    const device = new MockDevice();
+    const db = new MockDb(null);
+    const manager = new MockBleManager(device);
+    const service = new WearableSyncService(db as never, manager as never);
+    const updates: Array<Awaited<ReturnType<typeof service.getDeviceState>>> = [];
+
+    await service.startLiveUpdates((nextState) => {
+      updates.push(nextState);
+    });
+
+    device.emitRealtimeHeartRate(0x12345678, 72);
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    await expect(service.getDeviceState()).resolves.toMatchObject({
+      liveHeartRate: 72,
+    });
+    expect(device.sentCommands).toEqual(expect.arrayContaining([CommandNumber.ToggleRealtimeHr]));
+    expect(updates.some((state) => state.liveHeartRate === 72)).toBe(true);
+
+    await service.stopLiveUpdates();
+    await expect(service.getDeviceState()).resolves.toMatchObject({
+      liveHeartRate: null,
+      liveHeartRateAt: null,
+    });
   });
 
   it('updates charging status to not_charging when charging stops', async () => {

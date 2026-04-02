@@ -27,6 +27,8 @@ export interface DeviceState {
   batteryPercent: number | null;
   chargingStatus: ChargingState | null;
   bodyStatus: WearState | null;
+  liveHeartRate: number | null;
+  liveHeartRateAt: number | null;
   syncError: string | null;
 }
 
@@ -93,6 +95,14 @@ export function describeWearState(bodyStatus: WearState | null) {
   }
 
   return 'Unknown';
+}
+
+export function hasFreshLiveHeartRate(deviceState: DeviceState, maxAgeMs = 15_000) {
+  if (deviceState.liveHeartRate === null || deviceState.liveHeartRateAt === null) {
+    return false;
+  }
+
+  return Date.now() - deviceState.liveHeartRateAt <= maxAgeMs;
 }
 
 export function isBlockingSyncStatus(status: SyncStatus) {

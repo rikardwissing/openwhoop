@@ -20,6 +20,8 @@ function createEmptyDeviceState(): DeviceState {
     batteryPercent: null,
     chargingStatus: null,
     bodyStatus: null,
+    liveHeartRate: null,
+    liveHeartRateAt: null,
     syncError: null,
   };
 }

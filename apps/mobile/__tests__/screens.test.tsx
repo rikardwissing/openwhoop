@@ -3,12 +3,16 @@ import { act, fireEvent, render } from '@testing-library/react-native';
 
 const mockPush = jest.fn();
 const mockBack = jest.fn();
+const mockReplace = jest.fn();
+let mockSegments: string[] = ['(tabs)', 'settings'];
 
 jest.mock('expo-router', () => ({
   useRouter: () => ({
     push: mockPush,
     back: mockBack,
+    replace: mockReplace,
   }),
+  useSegments: () => mockSegments,
 }));
 
 import { SleepStageChart } from '@/components/charts/SleepStageChart';
@@ -21,6 +25,7 @@ import {
 } from '@/providers/WearableSyncProvider';
 import { HeartScreen } from '@/screens/HeartScreen';
 import { LiveEventsScreen } from '@/screens/LiveEventsScreen';
+import { PairWearableScreen } from '@/screens/PairWearableScreen';
 import { SettingsScreen } from '@/screens/SettingsScreen';
 import { SleepScreen } from '@/screens/SleepScreen';
 import { TodayScreen } from '@/screens/TodayScreen';
@@ -41,6 +46,7 @@ function createWearableContextValue(overrides: Partial<{
   progress: SyncProgress;
   scanResults: WearableScanResult[];
   scan: () => Promise<void>;
+  pairDevice: (device: WearableScanResult) => Promise<SyncResult | null>;
   selectDevice: (device: WearableScanResult) => Promise<void>;
   forgetDevice: () => Promise<void>;
   syncSelected: () => Promise<SyncResult | null>;
@@ -86,6 +92,8 @@ describe('screen rendering', () => {
   beforeEach(() => {
     mockPush.mockClear();
     mockBack.mockClear();
+    mockReplace.mockClear();
+    mockSegments = ['(tabs)', 'settings'];
   });
 
   it('renders the today screen dashboard', async () => {
@@ -94,6 +102,20 @@ describe('screen rendering', () => {
     expect(await screen.findByText('Good afternoon')).toBeTruthy();
     expect(await screen.findByText('Heart Rate')).toBeTruthy();
     expect(await screen.findByText('Strain')).toBeTruthy();
+  });
+
+  it('shows live heart rate on the today dashboard when streaming is active', async () => {
+    const screen = renderWithProviders(<TodayScreen />, {
+      deviceState: {
+        id: 'strap-1',
+        name: 'Neo Strap',
+        liveHeartRate: 68,
+        liveHeartRateAt: Date.now(),
+      },
+    });
+
+    expect(await screen.findByText('Live')).toBeTruthy();
+    expect(await screen.findByText('68 bpm')).toBeTruthy();
   });
 
   it('renders the sleep screen', async () => {
@@ -131,6 +153,20 @@ describe('screen rendering', () => {
     expect(await screen.findByText('Resting HR Trend')).toBeTruthy();
   });
 
+  it('shows live heart rate on the heart screen when streaming is active', async () => {
+    const screen = renderWithProviders(<HeartScreen />, {
+      deviceState: {
+        id: 'strap-1',
+        name: 'Neo Strap',
+        liveHeartRate: 72,
+        liveHeartRateAt: Date.now(),
+      },
+    });
+
+    expect(await screen.findByText('Live')).toBeTruthy();
+    expect(await screen.findByText('72 bpm')).toBeTruthy();
+  });
+
   it('swaps heart chart readout while scrubbing and restores on release', async () => {
     const screen = renderWithProviders(<HeartScreen />);
     await screen.findByTestId('heart-intraday-chart');
@@ -163,7 +199,6 @@ describe('screen rendering', () => {
     const screen = renderWithProviders(<SettingsScreen />);
 
     expect(screen.getByText('Selected Wearable')).toBeTruthy();
-    expect(screen.getByText('Scan nearby')).toBeTruthy();
     expect(screen.getByText('Live events')).toBeTruthy();
     expect(screen.getByText('Restart wearable')).toBeTruthy();
     expect(screen.getByText('Export for Analysis')).toBeTruthy();
@@ -174,6 +209,8 @@ describe('screen rendering', () => {
     expect(screen.getByText('Wear')).toBeTruthy();
     expect(screen.getAllByText('Unknown').length).toBeGreaterThan(0);
     expect(screen.getAllByText('--').length).toBeGreaterThan(0);
+    expect(screen.queryByText('Scan nearby')).toBeNull();
+    expect(screen.queryByText('Scan Results')).toBeNull();
   });
 
   it('opens the live events screen from settings', () => {
@@ -256,5 +293,49 @@ describe('screen rendering', () => {
     expect(screen.getByText('Harvard 1.2.3 · Boylston 4.5.6')).toBeTruthy();
     expect(screen.getByText('Event')).toBeTruthy();
     expect(screen.getByText('Command')).toBeTruthy();
+  });
+
+  it('renders the pairing screen and auto-starts a scan', () => {
+    const scan = jest.fn(async () => {});
+    const screen = renderWithProviders(<PairWearableScreen />, {
+      scan,
+      progress: {
+        status: 'scanning',
+        message: 'Scanning for nearby wearables...',
+      },
+    });
+
+    expect(screen.getByText('Pair Wearable')).toBeTruthy();
+    expect(screen.getByText('Nearby Wearables')).toBeTruthy();
+    expect(screen.getByText('Scanning for nearby wearables now...')).toBeTruthy();
+    expect(scan).toHaveBeenCalledTimes(1);
+  });
+
+  it('pairs and syncs a wearable from the pairing screen', async () => {
+    const pairDevice = jest.fn(async () => null);
+    const screen = renderWithProviders(<PairWearableScreen />, {
+      progress: {
+        status: 'idle',
+        message: 'Select a wearable.',
+      },
+      scanResults: [
+        {
+          id: 'strap-1',
+          name: 'Neo Strap',
+          rssi: -44,
+        },
+      ],
+      pairDevice,
+    });
+
+    await act(async () => {
+      fireEvent.press(screen.getByText('Pair'));
+    });
+
+    expect(pairDevice).toHaveBeenCalledWith({
+      id: 'strap-1',
+      name: 'Neo Strap',
+      rssi: -44,
+    });
   });
 });

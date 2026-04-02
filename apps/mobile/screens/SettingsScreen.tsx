@@ -106,7 +106,7 @@ function formatBytes(sizeBytes: number) {
 export function SettingsScreen() {
   const router = useRouter();
   const db = useOptionalAppDatabase();
-  const { deviceState, liveEvents, progress, scanResults, scan, selectDevice, forgetDevice, syncSelected, restartDevice } = useWearableSync();
+  const { deviceState, liveEvents, progress, forgetDevice, syncSelected, restartDevice } = useWearableSync();
   const [exportState, setExportState] = useState<{
     status: 'idle' | 'running' | 'success' | 'error';
     message: string;
@@ -182,7 +182,7 @@ export function SettingsScreen() {
           <View>
             <Text style={styles.settingTitle}>{deviceState.name ?? 'No wearable selected yet'}</Text>
             <Text style={styles.settingSubtitle}>
-              {deviceState.id ?? 'Scan for nearby devices, select one, then run a manual sync.'}
+              {deviceState.id ?? 'Pairing opens automatically when no wearable is selected on this phone.'}
             </Text>
           </View>
 
@@ -214,14 +214,6 @@ export function SettingsScreen() {
           {deviceState.syncError ? <Text style={styles.errorText}>{deviceState.syncError}</Text> : null}
 
           <View style={styles.buttonRow}>
-            <ActionButton
-              label={progress.status === 'scanning' ? 'Scanning...' : 'Scan nearby'}
-              onPress={() => {
-                void scan();
-              }}
-              disabled={progress.status === 'scanning' || deviceBusy}
-              tone="secondary"
-            />
             <ActionButton
               label={deviceBusy ? 'Syncing...' : 'Sync now'}
               onPress={() => {
@@ -264,32 +256,6 @@ export function SettingsScreen() {
             Session log stores the latest {liveEvents.length} meaningful wearable events seen since this app session started.
           </Text>
         </View>
-      </GlassCard>
-
-      <GlassCard accentColor={colors.violet}>
-        <SectionHeader title="Scan Results" trailing={`${scanResults.length} found`} />
-        {scanResults.length > 0 ? (
-          scanResults.map((device, index) => (
-            <View key={device.id} style={[styles.deviceRow, index < scanResults.length - 1 ? styles.divider : null]}>
-              <View style={styles.deviceText}>
-                <Text style={styles.settingTitle}>{device.name}</Text>
-                <Text style={styles.settingSubtitle}>
-                  {device.id} · RSSI {device.rssi ?? '--'}
-                </Text>
-              </View>
-              <ActionButton
-                label={deviceState.id === device.id ? 'Selected' : 'Use'}
-                onPress={() => {
-                  void selectDevice(device);
-                }}
-                disabled={deviceState.id === device.id}
-                tone="secondary"
-              />
-            </View>
-          ))
-        ) : (
-          <Text style={styles.roadmapText}>No scanned devices yet. Use the scan button above on a physical iPhone development build.</Text>
-        )}
       </GlassCard>
 
       <GlassCard accentColor={colors.aqua}>

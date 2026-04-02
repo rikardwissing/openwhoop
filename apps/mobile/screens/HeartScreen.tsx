@@ -11,14 +11,20 @@ import { StatChip } from '@/components/ui/StatChip';
 import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
 import { colors, typography } from '@/constants/theme';
 import { useHeartHistory } from '@/hooks/useHealthData';
+import { useWearableSync } from '@/providers/WearableSyncProvider';
+import { hasFreshLiveHeartRate } from '@/types/device';
 import type { TrendSelection } from '@/types/health';
 import { formatMetricValue, formatSignedValue } from '@/utils/formatters';
 
 export function HeartScreen() {
   const state = useHeartHistory('14d');
+  const { deviceState } = useWearableSync();
   const [intradaySelection, setIntradaySelection] = useState<TrendSelection | null>(null);
   const [restingSelection, setRestingSelection] = useState<TrendSelection | null>(null);
   const data = state.data;
+  const showLiveHeartRate = hasFreshLiveHeartRate(deviceState);
+  const liveHeartRateLabel =
+    showLiveHeartRate && deviceState.liveHeartRate !== null ? `${deviceState.liveHeartRate} bpm` : null;
 
   if (!data && state.status === 'loading') {
     return (
@@ -65,7 +71,9 @@ export function HeartScreen() {
               ? intradaySelection.point.value === null
                 ? 'No data in this 5-minute window'
                 : 'Selected 5-minute window'
-              : `Resting ${formatMetricValue(data.restingHr, 0)} BPM · Max ${formatMetricValue(data.maxHr, 0)} BPM`
+              : showLiveHeartRate && deviceState.liveHeartRate !== null
+                ? `Live ${formatMetricValue(deviceState.liveHeartRate, 0)} BPM · Resting ${formatMetricValue(data.restingHr, 0)} BPM`
+                : `Resting ${formatMetricValue(data.restingHr, 0)} BPM · Max ${formatMetricValue(data.maxHr, 0)} BPM`
           }
           label={intradaySelection?.point.label ?? '24-hour average'}
           style={styles.chartReadout}
@@ -82,6 +90,11 @@ export function HeartScreen() {
           points={data.intraday}
           testID="heart-intraday-chart"
         />
+        {!intradaySelection && liveHeartRateLabel ? (
+          <View style={styles.chipRow}>
+            <StatChip accent={colors.heart} label="Live" value={liveHeartRateLabel} />
+          </View>
+        ) : null}
       </GlassCard>
 
       <GlassCard accentColor={colors.cyan}>

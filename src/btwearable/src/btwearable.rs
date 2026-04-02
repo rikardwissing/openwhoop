@@ -57,6 +57,17 @@ impl BtWearable {
         &mut self,
         packet: packets::Model,
     ) -> anyhow::Result<Option<WearablePacket>> {
+        let Some(data) = self.decode_packet(packet)? else {
+            return Ok(None);
+        };
+
+        self.handle_data(data, true).await
+    }
+
+    pub fn decode_packet(
+        &mut self,
+        packet: packets::Model,
+    ) -> anyhow::Result<Option<WearableData>> {
         let data = match packet.uuid {
             DATA_FROM_STRAP => {
                 let packet = if let Some(mut wearable_packet) = self.packet.take() {
@@ -97,10 +108,33 @@ impl BtWearable {
             _ => return Ok(None),
         };
 
-        self.handle_data(data).await
+        Ok(Some(data))
     }
 
-    async fn handle_data(&mut self, data: WearableData) -> anyhow::Result<Option<WearablePacket>> {
+    pub async fn ingest_decoded_data_without_history_ack(
+        &mut self,
+        data: WearableData,
+    ) -> anyhow::Result<()> {
+        let _ = self.handle_data(data, false).await?;
+        Ok(())
+    }
+
+    pub async fn flush_pending_history_readings(&mut self) -> anyhow::Result<usize> {
+        let buffered = self.history_packets.len();
+        if buffered > 0 {
+            self.database
+                .create_readings(std::mem::take(&mut self.history_packets))
+                .await?;
+        }
+
+        Ok(buffered)
+    }
+
+    async fn handle_data(
+        &mut self,
+        data: WearableData,
+        ack_history_end: bool,
+    ) -> anyhow::Result<Option<WearablePacket>> {
         match data {
             WearableData::HistoryReading(hr) if hr.is_valid() => {
                 if let Some(last_packet) = self.last_history_packet.as_mut() {
@@ -133,11 +167,7 @@ impl BtWearable {
                         "Received HistoryComplete; flushing {} buffered readings",
                         self.history_packets.len()
                     );
-                    if !self.history_packets.is_empty() {
-                        self.database
-                            .create_readings(std::mem::take(&mut self.history_packets))
-                            .await?;
-                    }
+                    self.flush_pending_history_readings().await?;
                     self.history_complete = true;
                 }
                 MetadataType::HistoryStart => {
@@ -145,17 +175,25 @@ impl BtWearable {
                     self.history_complete = false;
                 }
                 MetadataType::HistoryEnd => {
-                    info!(
-                        "Received HistoryEnd marker {}; flushing {} readings and requesting next chunk",
-                        data,
-                        self.history_packets.len()
-                    );
-                    self.database
-                        .create_readings(std::mem::take(&mut self.history_packets))
-                        .await?;
+                    if ack_history_end {
+                        info!(
+                            "Received HistoryEnd marker {}; flushing {} readings and requesting next chunk",
+                            data,
+                            self.history_packets.len()
+                        );
+                    } else {
+                        info!(
+                            "Received HistoryEnd marker {}; flushing {} readings without requesting next chunk",
+                            data,
+                            self.history_packets.len()
+                        );
+                    }
+                    self.flush_pending_history_readings().await?;
 
-                    let packet = WearablePacket::history_end(data);
-                    return Ok(Some(packet));
+                    if ack_history_end {
+                        let packet = WearablePacket::history_end(data);
+                        return Ok(Some(packet));
+                    }
                 }
             },
             WearableData::ConsoleLog { log, .. } => {

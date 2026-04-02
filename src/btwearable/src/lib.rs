@@ -6,7 +6,9 @@ pub mod db {
 }
 
 mod device;
-pub use device::{BatteryProbeResult, CommandProbeEntry, WearableDevice};
+pub use device::{
+    BatteryProbeResult, CommandProbeEntry, HistoryPeekMetadata, HistoryPeekSummary, WearableDevice,
+};
 
 mod btwearable;
 pub use btwearable::BtWearable;

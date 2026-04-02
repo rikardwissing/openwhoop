@@ -19,14 +19,14 @@ use btleplug::{
     platform::{Adapter, Manager, Peripheral},
 };
 use btwearable::{
-    BatteryProbeResult, BtWearable, CommandProbeEntry, WearableDevice,
+    BatteryProbeResult, BtWearable, CommandProbeEntry, HistoryPeekSummary, WearableDevice,
     algo::{ExerciseMetrics, SleepConsistencyAnalyzer},
     db::{DatabaseHandler, LatestDeviceEventState},
     types::activities::{ActivityType, SearchActivityPeriods},
 };
 use btwearable_codec::{
     WearablePacket,
-    constants::{PacketType, WEARABLE_SERVICE},
+    constants::{MetadataType, PacketType, WEARABLE_SERVICE},
 };
 use btwearable_entities::packets;
 use chrono::{DateTime, Local, NaiveDateTime, NaiveTime, TimeDelta, Utc};
@@ -66,6 +66,11 @@ pub enum BtWearableCommand {
     DownloadHistory {
         #[arg(long, env)]
         wearable: DeviceId,
+        #[arg(
+            long,
+            help = "Experimental: rewind the device history cursor before downloading. Accepts decimal or 0x-prefixed hex."
+        )]
+        from_pointer: Option<String>,
     },
     ///
     /// Reruns the packet processing on stored packets
@@ -179,6 +184,13 @@ pub enum BtWearableCommand {
         wearable: DeviceId,
     },
     ///
+    /// Query the raw history read-pointer range reported by the device
+    ///
+    GetDataRange {
+        #[arg(long, env)]
+        wearable: DeviceId,
+    },
+    ///
     /// Probe battery packets for reverse engineering
     ///
     ProbeBattery {
@@ -198,6 +210,24 @@ pub enum BtWearableCommand {
         listen_ms: u64,
         #[arg(long, default_value_t = false)]
         with_response: bool,
+    },
+    ///
+    /// Start a history transfer but intentionally do not ACK chunk boundaries
+    ///
+    PeekHistory {
+        #[arg(long, env)]
+        wearable: DeviceId,
+        #[arg(
+            long,
+            help = "Experimental: rewind the device history cursor before peeking. Accepts decimal or 0x-prefixed hex."
+        )]
+        from_pointer: Option<String>,
+        #[arg(long, default_value_t = 10)]
+        listen_secs: u64,
+        #[arg(long, default_value_t = false)]
+        sync_db: bool,
+        #[arg(long, default_value_t = false)]
+        refresh_metrics: bool,
     },
     ///
     /// Copy packets from one database into another
@@ -483,11 +513,15 @@ impl BtWearableCli {
             BtWearableCommand::Scan => {
                 scan_command(&adapter, None).await?;
             }
-            BtWearableCommand::DownloadHistory { wearable } => {
+            BtWearableCommand::DownloadHistory {
+                wearable,
+                from_pointer,
+            } => {
                 info!("Scanning for wearable to start history download");
                 let peripheral = scan_command(&adapter, Some(wearable)).await?;
                 let mut wearable =
                     WearableDevice::new(peripheral, adapter, db_handler, self.debug_packets);
+                let replay_pointer = from_pointer.as_deref().map(parse_u32_arg).transpose()?;
 
                 let should_exit = Arc::new(AtomicBool::new(false));
 
@@ -502,8 +536,19 @@ impl BtWearableCli {
                 info!("Initializing wearable session");
                 wearable.initialize().await?;
 
-                info!("Starting history sync");
-                let result = wearable.sync_history(should_exit).await;
+                if let Some(pointer) = replay_pointer {
+                    info!("Starting history replay from pointer {pointer} (0x{pointer:08x})");
+                } else {
+                    info!("Starting history sync");
+                }
+                let result = match replay_pointer {
+                    Some(pointer) => {
+                        wearable
+                            .sync_history_from_pointer(pointer, should_exit)
+                            .await
+                    }
+                    None => wearable.sync_history(should_exit).await,
+                };
 
                 info!("History sync loop exited");
                 if let Err(e) = result {
@@ -766,6 +811,19 @@ impl BtWearableCli {
                     wearable.get_extended_battery_info().await?,
                 );
             }
+            BtWearableCommand::GetDataRange { wearable } => {
+                let peripheral = scan_command(&adapter, Some(wearable)).await?;
+                let mut wearable = WearableDevice::new(peripheral, adapter, db_handler, false);
+                wearable.connect().await?;
+                wearable.initialize().await?;
+                let data_range = wearable.get_data_range().await;
+                if let Ok(true) = wearable.is_connected().await {
+                    let _ = wearable
+                        .send_command(WearablePacket::exit_high_freq_sync())
+                        .await;
+                }
+                print_command_response("History data range", data_range?);
+            }
             BtWearableCommand::ProbeBattery { wearable } => {
                 let peripheral = scan_command(&adapter, Some(wearable)).await?;
                 let mut wearable = WearableDevice::new(peripheral, adapter, db_handler, false);
@@ -790,6 +848,34 @@ impl BtWearableCli {
                     .probe_command(packet, with_response, Duration::from_millis(listen_ms))
                     .await?;
                 print_command_probe(command, &entries);
+            }
+            BtWearableCommand::PeekHistory {
+                wearable,
+                from_pointer,
+                listen_secs,
+                sync_db,
+                refresh_metrics,
+            } => {
+                let peripheral = scan_command(&adapter, Some(wearable)).await?;
+                let mut wearable = WearableDevice::new(peripheral, adapter, db_handler, false);
+                let replay_pointer = from_pointer.as_deref().map(parse_u32_arg).transpose()?;
+                let sync_db = sync_db || refresh_metrics;
+                wearable.connect().await?;
+                wearable.initialize().await?;
+                let summary = wearable
+                    .peek_history(
+                        replay_pointer,
+                        Duration::from_secs(listen_secs),
+                        sync_db,
+                        refresh_metrics,
+                    )
+                    .await?;
+                if let Ok(true) = wearable.is_connected().await {
+                    let _ = wearable
+                        .send_command(WearablePacket::exit_high_freq_sync())
+                        .await;
+                }
+                print_history_peek_summary(&summary);
             }
             BtWearableCommand::Merge { from } => {
                 let from_db = DatabaseHandler::new(from).await;
@@ -1012,6 +1098,46 @@ fn print_command_response(label: &str, data: btwearable_codec::WearableData) {
                     None => println!("{label} ({command:?}): {}", hex::encode(payload)),
                 }
             }
+            btwearable_codec::constants::CommandNumber::GetDataRange => {
+                let entries = decode_data_range_entries(&payload);
+                if entries.is_empty() {
+                    let words = decode_u32_words(&payload);
+                    if words.is_empty() {
+                        println!("{label} ({command:?}): {}", hex::encode(payload));
+                    } else {
+                        let decoded_words = words
+                            .iter()
+                            .enumerate()
+                            .map(|(index, word)| format!("w{index}=0x{word:08x}/{word}"))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        println!(
+                            "{label}: payload={} decoded_words=[{}]",
+                            hex::encode(payload),
+                            decoded_words
+                        );
+                    }
+                } else {
+                    let formatted_entries = entries
+                        .iter()
+                        .map(|entry| {
+                            format!(
+                                "off={} time={} pointer=0x{:08x}/{}",
+                                entry.offset,
+                                format_local_timestamp(entry.unix),
+                                entry.pointer,
+                                entry.pointer
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    println!(
+                        "{label}: payload={} entries=[{}]",
+                        hex::encode(payload),
+                        formatted_entries
+                    );
+                }
+            }
             _ => {
                 println!("{label} ({command:?}): {}", hex::encode(payload));
             }
@@ -1079,6 +1205,55 @@ fn print_command_probe(command: u8, entries: &[CommandProbeEntry]) {
             decoded
         );
     }
+}
+
+fn print_history_peek_summary(summary: &HistoryPeekSummary) {
+    println!(
+        "History peek: notifications={} decoded={} readings={} first={} last={} history_end={} history_complete={} timed_out={} stream_ended={} sync_db={} refresh_metrics={} trailing_flushes={}",
+        summary.notifications,
+        summary.decoded_packets,
+        summary.readings,
+        summary
+            .first_reading_unix
+            .and_then(format_history_reading_time)
+            .unwrap_or_else(|| "-".to_string()),
+        summary
+            .last_reading_unix
+            .and_then(format_history_reading_time)
+            .unwrap_or_else(|| "-".to_string()),
+        summary.history_end_seen,
+        summary.history_complete_seen,
+        summary.timed_out,
+        summary.stream_ended,
+        summary.synced_to_db,
+        summary.refreshed_metrics,
+        summary.trailing_history_flushes
+    );
+
+    if summary.metadata.is_empty() {
+        println!("  metadata: <none>");
+        return;
+    }
+
+    let metadata = summary
+        .metadata
+        .iter()
+        .map(|entry| {
+            let label = match entry.cmd {
+                MetadataType::HistoryStart => "HistoryStart",
+                MetadataType::HistoryEnd => "HistoryEnd",
+                MetadataType::HistoryComplete => "HistoryComplete",
+            };
+            format!(
+                "{label}@{} data=0x{:08x}/{}",
+                format_local_timestamp(entry.unix),
+                entry.data,
+                entry.data
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    println!("  metadata: {metadata}");
 }
 
 fn print_battery_device_event(label: &str, data: btwearable_codec::WearableData) {
@@ -1156,6 +1331,15 @@ fn format_local_timestamp(unix: u32) -> String {
         .unwrap_or_else(|| unix.to_string())
 }
 
+fn format_history_reading_time(unix_ms: u64) -> Option<String> {
+    let unix_ms = i64::try_from(unix_ms).ok()?;
+    DateTime::from_timestamp_millis(unix_ms).map(|time| {
+        time.with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string()
+    })
+}
+
 fn parse_u8_arg(value: &str) -> anyhow::Result<u8> {
     if let Some(hex) = value
         .strip_prefix("0x")
@@ -1168,6 +1352,22 @@ fn parse_u8_arg(value: &str) -> anyhow::Result<u8> {
         Ok(value) => Ok(value),
         Err(decimal_error) => u8::from_str_radix(value, 16).map_err(|hex_error| {
             anyhow!("invalid command `{value}`: {decimal_error}; {hex_error}")
+        }),
+    }
+}
+
+fn parse_u32_arg(value: &str) -> anyhow::Result<u32> {
+    if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        return Ok(u32::from_str_radix(hex, 16)?);
+    }
+
+    match value.parse::<u32>() {
+        Ok(value) => Ok(value),
+        Err(decimal_error) => u32::from_str_radix(value, 16).map_err(|hex_error| {
+            anyhow!("invalid pointer `{value}`: {decimal_error}; {hex_error}")
         }),
     }
 }
@@ -1314,6 +1514,87 @@ fn read_u16_le(bytes: &[u8], offset: usize) -> Option<u16> {
     Some(u16::from_le_bytes([bytes[0], bytes[1]]))
 }
 
+fn read_u32_le(bytes: &[u8], offset: usize) -> Option<u32> {
+    let bytes = bytes.get(offset..offset + 4)?;
+    Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+fn decode_u32_words(payload: &[u8]) -> Vec<u32> {
+    let mut words = Vec::new();
+    let mut offset = 0;
+    while let Some(word) = read_u32_le(payload, offset) {
+        words.push(word);
+        offset += 4;
+    }
+    words
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DataRangeEntry {
+    offset: usize,
+    unix: u32,
+    pointer: u32,
+}
+
+fn decode_data_range_entries(payload: &[u8]) -> Vec<DataRangeEntry> {
+    const MIN_PLAUSIBLE_UNIX: u32 = 1_577_836_800; // 2020-01-01T00:00:00Z
+
+    let max_plausible_unix = Utc::now()
+        .checked_add_signed(TimeDelta::days(366))
+        .and_then(|time| u32::try_from(time.timestamp()).ok())
+        .unwrap_or(u32::MAX);
+
+    let compact_entries =
+        decode_data_range_entries_in_window(payload, MIN_PLAUSIBLE_UNIX, max_plausible_unix, true);
+    if !compact_entries.is_empty() {
+        return compact_entries;
+    }
+
+    decode_data_range_entries_in_window(payload, MIN_PLAUSIBLE_UNIX, max_plausible_unix, false)
+}
+
+fn decode_data_range_entries_in_window(
+    payload: &[u8],
+    min_plausible_unix: u32,
+    max_plausible_unix: u32,
+    require_zero_upper_pointer_bytes: bool,
+) -> Vec<DataRangeEntry> {
+    const MAX_PLAUSIBLE_POINTER: u32 = 0x00ff_ffff;
+
+    let mut entries = Vec::new();
+    let mut offset = 0;
+
+    while offset + 8 <= payload.len() {
+        let Some(unix) = read_u32_le(payload, offset) else {
+            break;
+        };
+        let Some(pointer) = read_u32_le(payload, offset + 4) else {
+            break;
+        };
+
+        let has_zero_upper_pointer_bytes = payload
+            .get(offset + 6..offset + 8)
+            .map(|tail| tail == [0x00, 0x00])
+            .unwrap_or(false);
+
+        if (min_plausible_unix..=max_plausible_unix).contains(&unix)
+            && (1..=MAX_PLAUSIBLE_POINTER).contains(&pointer)
+            && (!require_zero_upper_pointer_bytes || has_zero_upper_pointer_bytes)
+        {
+            entries.push(DataRangeEntry {
+                offset,
+                unix,
+                pointer,
+            });
+            offset += 8;
+        } else {
+            offset += 1;
+        }
+    }
+
+    entries
+}
+
 fn read_i16_le(bytes: &[u8], offset: usize) -> Option<i16> {
     let bytes = bytes.get(offset..offset + 2)?;
     Some(i16::from_le_bytes([bytes[0], bytes[1]]))
@@ -1325,4 +1606,43 @@ fn decode_battery_response_payload(payload: &[u8]) -> Option<u16> {
 
 fn format_tenths_percent(tenths_percent: u16) -> String {
     format!("{}.{}%", tenths_percent / 10, tenths_percent % 10)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_data_range_entries_extracts_timestamp_pointer_pairs() {
+        let payload = hex::decode(
+            "00010140cc000007cc00002bcc000007cc00001c000000000002006801000098fe13000ab98469086300000d6ace69f04000000d6ace69f04000005d6bce69b87b00000000",
+        )
+        .unwrap();
+
+        assert_eq!(
+            decode_data_range_entries_in_window(&payload, 1_577_836_800, 1_900_000_000, true),
+            vec![
+                DataRangeEntry {
+                    offset: 35,
+                    unix: 0x6984b90a,
+                    pointer: 0x00006308,
+                },
+                DataRangeEntry {
+                    offset: 43,
+                    unix: 0x69ce6a0d,
+                    pointer: 0x000040f0,
+                },
+                DataRangeEntry {
+                    offset: 51,
+                    unix: 0x69ce6a0d,
+                    pointer: 0x000040f0,
+                },
+                DataRangeEntry {
+                    offset: 59,
+                    unix: 0x69ce6b5d,
+                    pointer: 0x00007bb8,
+                },
+            ]
+        );
+    }
 }

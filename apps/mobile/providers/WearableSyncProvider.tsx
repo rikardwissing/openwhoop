@@ -8,11 +8,13 @@ import { isBlockingSyncStatus, type DeviceState, type SyncProgress, type SyncRes
 const MAX_LIVE_EVENTS = 200;
 
 interface WearableSyncContextValue {
+  isReady: boolean;
   deviceState: DeviceState;
   liveEvents: WearableLiveEvent[];
   progress: SyncProgress;
   scanResults: WearableScanResult[];
   scan: () => Promise<void>;
+  pairDevice: (device: WearableScanResult) => Promise<SyncResult | null>;
   selectDevice: (device: WearableScanResult) => Promise<void>;
   forgetDevice: () => Promise<void>;
   syncSelected: () => Promise<SyncResult | null>;
@@ -30,10 +32,13 @@ export const emptyDeviceState: DeviceState = {
   batteryPercent: null,
   chargingStatus: null,
   bodyStatus: null,
+  liveHeartRate: null,
+  liveHeartRateAt: null,
   syncError: null,
 };
 
 export const defaultWearableSyncContextValue: WearableSyncContextValue = {
+  isReady: false,
   deviceState: emptyDeviceState,
   liveEvents: [],
   progress: {
@@ -42,6 +47,7 @@ export const defaultWearableSyncContextValue: WearableSyncContextValue = {
   },
   scanResults: [],
   scan: async () => {},
+  pairDevice: async () => null,
   selectDevice: async () => {},
   forgetDevice: async () => {},
   syncSelected: async () => null,
@@ -71,6 +77,7 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
   const healthRepository = useHealthRepository();
   const refreshHealthData = useRefreshHealthData();
   const [service] = useState(() => new WearableSyncService(db));
+  const [isReady, setIsReady] = useState(false);
   const [deviceState, setDeviceState] = useState<DeviceState>(emptyDeviceState);
   const [liveEvents, setLiveEvents] = useState<WearableLiveEvent[]>([]);
   const [progress, setProgress] = useState<SyncProgress>(defaultWearableSyncContextValue.progress);
@@ -94,7 +101,12 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
           setDeviceState(state);
         }
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) {
+          setIsReady(true);
+        }
+      });
 
     return () => {
       cancelled = true;
@@ -126,8 +138,28 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
     };
   }, [appendLiveEvent, deviceState.id, progress.status, service]);
 
+  const runSyncSelected = useCallback(async () => {
+    try {
+      const result = await service.syncSelected(
+        (next) => {
+          setProgress(next);
+        },
+        appendLiveEvent,
+      );
+      setDeviceState(await service.getDeviceState());
+      healthRepository.invalidateCaches('all');
+      refreshHealthData();
+      void healthRepository.warmCaches().catch(() => {});
+      return result;
+    } catch {
+      setDeviceState(await service.getDeviceState());
+      return null;
+    }
+  }, [appendLiveEvent, healthRepository, refreshHealthData, service]);
+
   const value = useMemo<WearableSyncContextValue>(
     () => ({
+      isReady,
       deviceState,
       liveEvents,
       progress,
@@ -152,6 +184,17 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
           });
         }
       },
+      pairDevice: async (device) => {
+        await service.selectDevice(device);
+        resetLiveEvents();
+        setScanResults([]);
+        setProgress({
+          status: 'connecting',
+          message: `Pairing ${device.name} and starting the first sync...`,
+        });
+        setDeviceState(await service.getDeviceState());
+        return runSyncSelected();
+      },
       selectDevice: async (device) => {
         await service.selectDevice(device);
         resetLiveEvents();
@@ -171,24 +214,7 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
           message: 'Removed the selected wearable.',
         });
       },
-      syncSelected: async () => {
-        try {
-          const result = await service.syncSelected(
-            (next) => {
-              setProgress(next);
-            },
-            appendLiveEvent,
-          );
-          setDeviceState(await service.getDeviceState());
-          healthRepository.invalidateCaches('all');
-          refreshHealthData();
-          void healthRepository.warmCaches().catch(() => {});
-          return result;
-        } catch {
-          setDeviceState(await service.getDeviceState());
-          return null;
-        }
-      },
+      syncSelected: async () => runSyncSelected(),
       restartDevice: async () => {
         try {
           await service.restartDevice(
@@ -245,7 +271,7 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
         }
       },
     }),
-    [appendLiveEvent, deviceState, healthRepository, liveEvents, progress, refreshHealthData, resetLiveEvents, scanResults, service],
+    [appendLiveEvent, deviceState, isReady, liveEvents, progress, resetLiveEvents, runSyncSelected, scanResults, service],
   );
 
   return (

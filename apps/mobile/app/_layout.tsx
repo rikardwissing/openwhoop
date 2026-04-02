@@ -7,6 +7,7 @@ import * as SplashScreen from 'expo-splash-screen';
 import { useEffect } from 'react';
 import { StatusBar } from 'expo-status-bar';
 
+import { WearablePairingGate } from '@/components/navigation/WearablePairingGate';
 import { WearableProgressOverlay } from '@/components/ui/WearableProgressOverlay';
 import { navTheme } from '@/constants/theme';
 import { AppDatabaseProvider } from '@/providers/AppDatabaseProvider';
@@ -59,8 +60,10 @@ function RootLayoutNav() {
             <Stack>
               <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
               <Stack.Screen name="live-events" options={{ headerShown: false }} />
+              <Stack.Screen name="pair-wearable" options={{ headerShown: false }} />
               <Stack.Screen name="+not-found" options={{ title: 'Not Found' }} />
             </Stack>
+            <WearablePairingGate />
             <WearableProgressOverlay />
           </WearableSyncProvider>
         </HealthDataProvider>

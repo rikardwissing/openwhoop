@@ -4,7 +4,7 @@ import { BleManager, type Device, type Subscription } from 'react-native-ble-plx
 import { refreshDerivedData } from '@/data/sqlite/SQLiteHealthRepository';
 import { CMD_FROM_STRAP_UUID, CMD_TO_STRAP_UUID, DATA_FROM_STRAP_UUID, EVENTS_FROM_STRAP_UUID, EventNumber, MEMFAULT_UUID, WEARABLE_SERVICE_UUID } from '@/services/ble/constants';
 import { resolveScanDeviceName } from '@/services/ble/deviceNaming';
-import { PacketAssembler, base64ToBytes, bytesToBase64, disableAlarmPacket, enterHighFrequencySyncPacket, exitHighFrequencySyncPacket, getBatteryLevelPacket, getBodyLocationAndStatusPacket, getNamePacket, helloHarvardPacket, historyEndPacket, historyStartPacket, parseNotification, restartPacket, setAlarmPacket, setClockPacket, type SensorDataPacket, versionInfoPacket } from '@/services/ble/codec';
+import { PacketAssembler, base64ToBytes, bytesToBase64, disableAlarmPacket, enterHighFrequencySyncPacket, exitHighFrequencySyncPacket, getBatteryLevelPacket, getBodyLocationAndStatusPacket, getNamePacket, helloHarvardPacket, historyEndPacket, historyStartPacket, parseNotification, restartPacket, setAlarmPacket, setClockPacket, toggleRealtimeHrPacket, type SensorDataPacket, versionInfoPacket } from '@/services/ble/codec';
 import { HistorySyncWatchdog } from '@/services/ble/syncWatchdog';
 import type { ChargingState, DeviceState, SyncProgress, SyncResult, WearState, WearableLiveEvent, WearableScanResult } from '@/types/device';
 import { formatSqliteDateTime } from '@/utils/dateTime';
@@ -100,6 +100,7 @@ function wearDetail(bodyStatus: WearState) {
 export class WearableSyncService {
   private liveUpdatesCleanup: (() => Promise<void>) | null = null;
   private nextLiveEventId = 0;
+  private liveHeartRate: { bpm: number | null; observedAt: number | null } = { bpm: null, observedAt: null };
 
   constructor(
     private readonly db: SQLiteDatabase,
@@ -133,6 +134,8 @@ export class WearableSyncService {
         batteryPercent: null,
         chargingStatus: null,
         bodyStatus: null,
+        liveHeartRate: this.liveHeartRate.bpm,
+        liveHeartRateAt: this.liveHeartRate.observedAt,
         syncError: null,
       };
     }
@@ -146,6 +149,8 @@ export class WearableSyncService {
       batteryPercent: row.battery_percent,
       chargingStatus: row.charging_status,
       bodyStatus: row.body_status,
+      liveHeartRate: this.liveHeartRate.bpm,
+      liveHeartRateAt: this.liveHeartRate.observedAt,
       syncError: row.sync_error,
     };
   }
@@ -186,6 +191,7 @@ export class WearableSyncService {
 
   async selectDevice(device: WearableScanResult) {
     await this.stopLiveUpdates();
+    this.clearLiveHeartRate();
     await this.db.execAsync('DELETE FROM device_state;');
     await this.persistDeviceState({
       id: device.id,
@@ -195,6 +201,7 @@ export class WearableSyncService {
 
   async forgetDevice() {
     await this.stopLiveUpdates();
+    this.clearLiveHeartRate();
     await this.db.execAsync('DELETE FROM device_state;');
   }
 
@@ -219,6 +226,17 @@ export class WearableSyncService {
       formatSqliteDateTime(new Date()),
       deviceId,
     );
+  }
+
+  private clearLiveHeartRate() {
+    this.liveHeartRate = { bpm: null, observedAt: null };
+  }
+
+  private updateLiveHeartRate(bpm: number) {
+    this.liveHeartRate = {
+      bpm,
+      observedAt: Date.now(),
+    };
   }
 
   private createLiveEvent(
@@ -335,10 +353,15 @@ export class WearableSyncService {
 
       if (device) {
         try {
+          await this.sendCommand(device, toggleRealtimeHrPacket(false));
+        } catch {}
+        try {
           await device.cancelConnection();
         } catch {}
         device = null;
       }
+
+      this.clearLiveHeartRate();
     };
 
     const scheduleReconnect = () => {
@@ -372,6 +395,12 @@ export class WearableSyncService {
 
       if (parsed.type === 'battery') {
         await pushState({ batteryPercent: parsed.battery.percent });
+        return;
+      }
+
+      if (parsed.type === 'realtimeHr') {
+        this.updateLiveHeartRate(parsed.heartRate.bpm);
+        onDeviceState(await this.getDeviceState());
         return;
       }
 
@@ -421,6 +450,7 @@ export class WearableSyncService {
 
         const commandAssembler = new PacketAssembler();
         const eventAssembler = new PacketAssembler();
+        const dataAssembler = new PacketAssembler();
         const monitor = (characteristic: string, assembler: PacketAssembler) =>
           device!.monitorCharacteristicForService(WEARABLE_SERVICE_UUID, characteristic, (error, value) => {
             if (closed) {
@@ -444,8 +474,10 @@ export class WearableSyncService {
 
         subscriptions.push(monitor(CMD_FROM_STRAP_UUID, commandAssembler));
         subscriptions.push(monitor(EVENTS_FROM_STRAP_UUID, eventAssembler));
+        subscriptions.push(monitor(DATA_FROM_STRAP_UUID, dataAssembler));
 
         await this.sendCommand(device, helloHarvardPacket());
+        await this.sendCommand(device, toggleRealtimeHrPacket(true));
         await this.sendCommand(device, getBatteryLevelPacket());
         await this.sendCommand(device, getBodyLocationAndStatusPacket());
         await this.sendCommand(device, getNamePacket());
