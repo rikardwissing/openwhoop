@@ -4,26 +4,29 @@ import { BleManager, type Device, type Subscription } from 'react-native-ble-plx
 import { refreshDerivedData } from '@/data/sqlite/SQLiteHealthRepository';
 import { CMD_FROM_STRAP_UUID, CMD_TO_STRAP_UUID, DATA_FROM_STRAP_UUID, EVENTS_FROM_STRAP_UUID, MEMFAULT_UUID, WEARABLE_SERVICE_UUID } from '@/services/ble/constants';
 import { resolveScanDeviceName } from '@/services/ble/deviceNaming';
-import { PacketAssembler, base64ToBytes, bytesToBase64, disableAlarmPacket, enterHighFrequencySyncPacket, exitHighFrequencySyncPacket, getNamePacket, helloHarvardPacket, historyEndPacket, historyStartPacket, parseNotification, setAlarmPacket, setClockPacket, type SensorDataPacket, versionInfoPacket } from '@/services/ble/codec';
+import { PacketAssembler, base64ToBytes, bytesToBase64, disableAlarmPacket, enterHighFrequencySyncPacket, exitHighFrequencySyncPacket, getBatteryLevelPacket, getBodyLocationAndStatusPacket, getNamePacket, helloHarvardPacket, historyEndPacket, historyStartPacket, parseNotification, setAlarmPacket, setClockPacket, type SensorDataPacket, versionInfoPacket } from '@/services/ble/codec';
 import { HistorySyncWatchdog } from '@/services/ble/syncWatchdog';
-import type { DeviceState, SyncProgress, SyncResult, WearableScanResult } from '@/types/device';
+import type { ChargingState, DeviceState, SyncProgress, SyncResult, WearState, WearableScanResult } from '@/types/device';
 import { formatSqliteDateTime } from '@/utils/dateTime';
 
 const SELECTED_DEVICE_SQL = `
-  INSERT INTO device_state (id, name, last_seen_at, last_synced_at, firmware, battery_percent, body_status, sync_error)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO device_state (id, name, last_seen_at, last_synced_at, firmware, battery_percent, charging_status, body_status, sync_error)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(id) DO UPDATE SET
     name = excluded.name,
     last_seen_at = excluded.last_seen_at,
     last_synced_at = COALESCE(excluded.last_synced_at, device_state.last_synced_at),
     firmware = COALESCE(excluded.firmware, device_state.firmware),
     battery_percent = COALESCE(excluded.battery_percent, device_state.battery_percent),
+    charging_status = COALESCE(excluded.charging_status, device_state.charging_status),
     body_status = COALESCE(excluded.body_status, device_state.body_status),
     sync_error = excluded.sync_error
 `;
 
 const CONNECT_TIMEOUT_MS = 15_000;
 const CONNECT_SCAN_TIMEOUT_MS = 8_000;
+const BATTERY_REQUEST_TIMEOUT_MS = 1_500;
+const LIVE_UPDATES_RECONNECT_DELAY_MS = 3_000;
 
 function delay(ms: number) {
   return new Promise((resolve) => {
@@ -37,6 +40,17 @@ function serializeSensorData(value: SensorDataPacket | null) {
 
 function rrToString(rr: number[]) {
   return rr.join(',');
+}
+
+interface DeviceStateUpdate {
+  id: string;
+  name: string | null;
+  lastSyncedAt?: string | null;
+  firmware?: string | null;
+  batteryPercent?: number | null;
+  chargingStatus?: ChargingState | null;
+  bodyStatus?: WearState | null;
+  syncError?: string | null;
 }
 
 function formatBleError(error: unknown) {
@@ -78,9 +92,12 @@ function formatBleError(error: unknown) {
 }
 
 export class WearableSyncService {
-  private readonly manager = new BleManager();
+  private liveUpdatesCleanup: (() => Promise<void>) | null = null;
 
-  constructor(private readonly db: SQLiteDatabase) {}
+  constructor(
+    private readonly db: SQLiteDatabase,
+    private readonly manager: BleManager = new BleManager(),
+  ) {}
 
   async dispose() {
     this.manager.destroy();
@@ -94,9 +111,10 @@ export class WearableSyncService {
       last_synced_at: string | null;
       firmware: string | null;
       battery_percent: number | null;
-      body_status: string | null;
+      charging_status: ChargingState | null;
+      body_status: WearState | null;
       sync_error: string | null;
-    }>('SELECT id, name, last_seen_at, last_synced_at, firmware, battery_percent, body_status, sync_error FROM device_state ORDER BY last_seen_at DESC LIMIT 1');
+    }>('SELECT id, name, last_seen_at, last_synced_at, firmware, battery_percent, charging_status, body_status, sync_error FROM device_state ORDER BY last_seen_at DESC LIMIT 1');
 
     if (!row) {
       return {
@@ -106,6 +124,7 @@ export class WearableSyncService {
         lastSyncedAt: null,
         firmware: null,
         batteryPercent: null,
+        chargingStatus: null,
         bodyStatus: null,
         syncError: null,
       };
@@ -118,6 +137,7 @@ export class WearableSyncService {
       lastSyncedAt: row.last_synced_at,
       firmware: row.firmware,
       batteryPercent: row.battery_percent,
+      chargingStatus: row.charging_status,
       bodyStatus: row.body_status,
       syncError: row.sync_error,
     };
@@ -158,23 +178,201 @@ export class WearableSyncService {
   }
 
   async selectDevice(device: WearableScanResult) {
+    await this.stopLiveUpdates();
     await this.db.execAsync('DELETE FROM device_state;');
-    const now = formatSqliteDateTime(new Date());
-    await this.db.runAsync(
-      SELECTED_DEVICE_SQL,
-      device.id,
-      device.name,
-      now,
-      null,
-      null,
-      null,
-      null,
-      null,
-    );
+    await this.persistDeviceState({
+      id: device.id,
+      name: device.name,
+    });
   }
 
   async forgetDevice() {
+    await this.stopLiveUpdates();
     await this.db.execAsync('DELETE FROM device_state;');
+  }
+
+  private async persistDeviceState(update: DeviceStateUpdate) {
+    await this.db.runAsync(
+      SELECTED_DEVICE_SQL,
+      update.id,
+      update.name,
+      formatSqliteDateTime(new Date()),
+      update.lastSyncedAt ?? null,
+      update.firmware ?? null,
+      update.batteryPercent ?? null,
+      update.chargingStatus ?? null,
+      update.bodyStatus ?? null,
+      update.syncError ?? null,
+    );
+  }
+
+  async startLiveUpdates(onDeviceState: (state: DeviceState) => void) {
+    await this.stopLiveUpdates();
+
+    const selected = await this.getDeviceState();
+    if (!selected.id) {
+      return;
+    }
+
+    let closed = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let subscriptions: Subscription[] = [];
+    let device: Device | null = null;
+    let resolvedDeviceId = selected.id;
+    let resolvedDeviceName = selected.name;
+
+    const clearReconnect = () => {
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+    };
+
+    const teardownConnection = async () => {
+      for (const subscription of subscriptions) {
+        subscription.remove();
+      }
+      subscriptions = [];
+
+      if (device) {
+        try {
+          await device.cancelConnection();
+        } catch {}
+        device = null;
+      }
+    };
+
+    const scheduleReconnect = () => {
+      if (closed || reconnectTimer) {
+        return;
+      }
+
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        void connectAndMonitor();
+      }, LIVE_UPDATES_RECONNECT_DELAY_MS);
+    };
+
+    const pushState = async (update: Partial<Pick<DeviceStateUpdate, 'batteryPercent' | 'chargingStatus' | 'bodyStatus'>>) => {
+      if (closed) {
+        return;
+      }
+
+      await this.persistDeviceState({
+        id: resolvedDeviceId,
+        name: resolvedDeviceName,
+        batteryPercent: update.batteryPercent,
+        chargingStatus: update.chargingStatus,
+        bodyStatus: update.bodyStatus,
+      });
+      onDeviceState(await this.getDeviceState());
+    };
+
+    const handleNotification = async (parsed: ReturnType<typeof parseNotification>) => {
+      if (parsed.type === 'battery') {
+        await pushState({ batteryPercent: parsed.battery.percent });
+        return;
+      }
+
+      if (parsed.type === 'bodyStatus') {
+        await pushState({ bodyStatus: parsed.body.bodyStatus });
+        return;
+      }
+
+      if (parsed.type !== 'event') {
+        return;
+      }
+
+      if ('percent' in parsed.event) {
+        await pushState({ batteryPercent: parsed.event.percent });
+        return;
+      }
+
+      if ('chargingStatus' in parsed.event) {
+        await pushState({ chargingStatus: parsed.event.chargingStatus });
+        return;
+      }
+
+      if ('bodyStatus' in parsed.event) {
+        await pushState({ bodyStatus: parsed.event.bodyStatus });
+      }
+    };
+
+    const connectAndMonitor = async () => {
+      if (closed) {
+        return;
+      }
+
+      try {
+        await teardownConnection();
+        const latestSelected = await this.getDeviceState();
+        if (!latestSelected.id) {
+          return;
+        }
+
+        ({ device, resolvedDeviceId, resolvedDeviceName } = await this.connectSelectedWearable(latestSelected));
+        await this.persistDeviceState({
+          id: resolvedDeviceId,
+          name: resolvedDeviceName,
+        });
+        onDeviceState(await this.getDeviceState());
+
+        const commandAssembler = new PacketAssembler();
+        const eventAssembler = new PacketAssembler();
+        const monitor = (characteristic: string, assembler: PacketAssembler) =>
+          device!.monitorCharacteristicForService(WEARABLE_SERVICE_UUID, characteristic, (error, value) => {
+            if (closed) {
+              return;
+            }
+
+            if (error) {
+              scheduleReconnect();
+              return;
+            }
+
+            if (!value?.value) {
+              return;
+            }
+
+            const frames = assembler.push(base64ToBytes(value.value));
+            for (const frame of frames) {
+              void handleNotification(parseNotification(frame)).catch(() => {});
+            }
+          });
+
+        subscriptions.push(monitor(CMD_FROM_STRAP_UUID, commandAssembler));
+        subscriptions.push(monitor(EVENTS_FROM_STRAP_UUID, eventAssembler));
+
+        await this.sendCommand(device, helloHarvardPacket());
+        await this.sendCommand(device, getBatteryLevelPacket());
+        await this.sendCommand(device, getBodyLocationAndStatusPacket());
+      } catch {
+        await teardownConnection();
+        scheduleReconnect();
+      }
+    };
+
+    const cleanup = async () => {
+      closed = true;
+      clearReconnect();
+      await teardownConnection();
+      if (this.liveUpdatesCleanup === cleanup) {
+        this.liveUpdatesCleanup = null;
+      }
+    };
+
+    this.liveUpdatesCleanup = cleanup;
+    await connectAndMonitor();
+  }
+
+  async stopLiveUpdates() {
+    const cleanup = this.liveUpdatesCleanup;
+    if (!cleanup) {
+      return;
+    }
+
+    this.liveUpdatesCleanup = null;
+    await cleanup();
   }
 
   async setAlarm(unixSeconds: number, onProgress?: (progress: SyncProgress) => void) {
@@ -204,6 +402,7 @@ export class WearableSyncService {
   }
 
   async syncSelected(onProgress?: (progress: SyncProgress) => void): Promise<SyncResult> {
+    await this.stopLiveUpdates();
     const selected = await this.getDeviceState();
     if (!selected.id) {
       throw new Error('Select a wearable before syncing.');
@@ -214,6 +413,7 @@ export class WearableSyncService {
 
     let device: Device | null = null;
     let firmware: string | null = null;
+    let batteryPercent: number | null = null;
     let importedReadings = 0;
     let lastHistoryCursor = 0;
     let resolvedDeviceId = selected.id;
@@ -390,6 +590,7 @@ export class WearableSyncService {
       await this.sendCommand(device, setClockPacket(Math.floor(Date.now() / 1000)));
       await this.sendCommand(device, getNamePacket());
       await this.sendCommand(device, versionInfoPacket());
+      batteryPercent = await this.refreshBatteryPercent(device, resolvedDeviceId);
       await this.sendCommand(device, enterHighFrequencySyncPacket());
 
       onProgress?.({ status: 'syncing', message: 'Requesting wearable history...' });
@@ -401,17 +602,13 @@ export class WearableSyncService {
       await refreshDerivedData(this.db);
 
       const completedAt = formatSqliteDateTime(new Date());
-      await this.db.runAsync(
-        SELECTED_DEVICE_SQL,
-        resolvedDeviceId,
-        resolvedDeviceName,
-        formatSqliteDateTime(new Date()),
-        completedAt,
+      await this.persistDeviceState({
+        id: resolvedDeviceId,
+        name: resolvedDeviceName,
+        lastSyncedAt: completedAt,
         firmware,
-        null,
-        null,
-        null,
-      );
+        batteryPercent,
+      });
 
       onProgress?.({ status: 'complete', message: `Sync complete. Imported ${importedReadings} readings.`, importedReadings });
       return {
@@ -420,17 +617,13 @@ export class WearableSyncService {
       };
     } catch (error) {
       const message = formatBleError(error);
-      await this.db.runAsync(
-        SELECTED_DEVICE_SQL,
-        resolvedDeviceId,
-        resolvedDeviceName,
-        formatSqliteDateTime(new Date()),
-        selected.lastSyncedAt,
+      await this.persistDeviceState({
+        id: resolvedDeviceId,
+        name: resolvedDeviceName,
+        lastSyncedAt: selected.lastSyncedAt,
         firmware,
-        null,
-        null,
-        message,
-      );
+        syncError: message,
+      });
       onProgress?.({ status: 'error', message });
       throw error;
     } finally {
@@ -461,6 +654,75 @@ export class WearableSyncService {
     await delay(120);
   }
 
+  private async requestBatteryPercent(device: Device): Promise<number | null> {
+    const assembler = new PacketAssembler();
+
+    return new Promise<number | null>((resolve) => {
+      let settled = false;
+      let subscription: Subscription | null = null;
+
+      const finish = (batteryPercent: number | null) => {
+        if (settled) {
+          return;
+        }
+
+        settled = true;
+        clearTimeout(timeout);
+        subscription?.remove();
+        resolve(batteryPercent);
+      };
+
+      const timeout = setTimeout(() => {
+        finish(null);
+      }, BATTERY_REQUEST_TIMEOUT_MS);
+
+      subscription = device.monitorCharacteristicForService(
+        WEARABLE_SERVICE_UUID,
+        CMD_FROM_STRAP_UUID,
+        (error, value) => {
+          if (error) {
+            finish(null);
+            return;
+          }
+
+          if (!value?.value) {
+            return;
+          }
+
+          const frames = assembler.push(base64ToBytes(value.value));
+          for (const frame of frames) {
+            const parsed = parseNotification(frame);
+            if (parsed.type === 'battery') {
+              finish(parsed.battery.percent);
+              return;
+            }
+          }
+        },
+      );
+
+      void this.sendCommand(device, getBatteryLevelPacket()).catch(() => {
+        finish(null);
+      });
+    });
+  }
+
+  private async refreshBatteryPercent(device: Device, deviceId: string): Promise<number | null> {
+    const batteryPercent = await this.requestBatteryPercent(device);
+
+    if (batteryPercent === null) {
+      return null;
+    }
+
+    await this.db.runAsync(
+      'UPDATE device_state SET battery_percent = ?, last_seen_at = ? WHERE id = ?',
+      batteryPercent,
+      formatSqliteDateTime(new Date()),
+      deviceId,
+    );
+
+    return batteryPercent;
+  }
+
   private async ensurePoweredOn() {
     const current = await this.manager.state();
     if (current === 'PoweredOn') {
@@ -488,6 +750,7 @@ export class WearableSyncService {
     workingMessage: string,
     task: (device: Device) => Promise<void>,
   ) {
+    await this.stopLiveUpdates();
     const selected = await this.getDeviceState();
     if (!selected.id) {
       throw new Error('Select a wearable before updating the alarm.');
@@ -504,31 +767,22 @@ export class WearableSyncService {
       ({ device, resolvedDeviceId, resolvedDeviceName } = await this.connectSelectedWearable(selected, onProgress));
       onProgress?.({ status: 'updating', message: workingMessage });
       await task(device);
+      const batteryPercent = await this.refreshBatteryPercent(device, resolvedDeviceId);
 
-      await this.db.runAsync(
-        SELECTED_DEVICE_SQL,
-        resolvedDeviceId,
-        resolvedDeviceName,
-        formatSqliteDateTime(new Date()),
-        selected.lastSyncedAt,
-        null,
-        null,
-        null,
-        null,
-      );
+      await this.persistDeviceState({
+        id: resolvedDeviceId,
+        name: resolvedDeviceName,
+        lastSyncedAt: selected.lastSyncedAt,
+        batteryPercent,
+      });
     } catch (error) {
       const message = formatBleError(error);
-      await this.db.runAsync(
-        SELECTED_DEVICE_SQL,
-        resolvedDeviceId,
-        resolvedDeviceName,
-        formatSqliteDateTime(new Date()),
-        selected.lastSyncedAt,
-        null,
-        null,
-        null,
-        message,
-      );
+      await this.persistDeviceState({
+        id: resolvedDeviceId,
+        name: resolvedDeviceName,
+        lastSyncedAt: selected.lastSyncedAt,
+        syncError: message,
+      });
       onProgress?.({ status: 'error', message });
       throw error;
     } finally {

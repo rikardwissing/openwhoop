@@ -21,16 +21,33 @@ export enum MetadataType {
   HistoryComplete = 3,
 }
 
+export enum EventNumber {
+  BatteryLevel = 3,
+  External5vOn = 5,
+  External5vOff = 6,
+  ChargingOn = 7,
+  ChargingOff = 8,
+  WristOn = 9,
+  WristOff = 10,
+  StrapDrivenAlarmSet = 56,
+  StrapDrivenAlarmExecuted = 57,
+  AppDrivenAlarmExecuted = 58,
+  StrapDrivenAlarmDisabled = 59,
+  ExtendedBatteryInformation = 63,
+}
+
 export enum CommandNumber {
   SetClock = 10,
   SendHistoricalData = 22,
   HistoricalDataResult = 23,
+  GetBatteryLevel = 26,
   ReportVersionInfo = 7,
   GetHelloHarvard = 35,
   SetAlarmTime = 66,
   GetAlarmTime = 67,
   DisableAlarm = 69,
   GetAdvertisingNameHarvard = 76,
+  GetBodyLocationAndStatus = 84,
   GetAdvertisingName = 141,
   EnterHighFreqSync = 96,
   ExitHighFreqSync = 97,

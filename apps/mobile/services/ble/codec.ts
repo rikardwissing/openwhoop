@@ -1,6 +1,6 @@
 import { decode as decodeBase64, encode as encodeBase64 } from 'base-64';
 
-import { CommandNumber, MetadataType, PacketType } from '@/services/ble/constants';
+import { CommandNumber, EventNumber, MetadataType, PacketType } from '@/services/ble/constants';
 
 export interface SensorDataPacket {
   ppg_green: number;
@@ -40,6 +40,46 @@ export interface DeviceNamePacket {
   name: string;
 }
 
+export interface BatteryLevelPacket {
+  command: number;
+  chargeTenthsPercent: number;
+  percent: number;
+}
+
+export interface BodyStatusPacket {
+  command: number;
+  rawStatus: number;
+  bodyStatus: 'on-body' | 'off-body';
+}
+
+export interface DeviceBatteryEventPacket {
+  event: EventNumber.BatteryLevel;
+  unix: number;
+  chargeTenthsPercent: number;
+  percent: number;
+}
+
+export interface DeviceChargingEventPacket {
+  event:
+    | EventNumber.External5vOn
+    | EventNumber.External5vOff
+    | EventNumber.ChargingOn
+    | EventNumber.ChargingOff;
+  unix: number;
+  chargingStatus: 'charging' | 'not_charging';
+}
+
+export interface DeviceBodyEventPacket {
+  event: EventNumber.WristOn | EventNumber.WristOff;
+  unix: number;
+  bodyStatus: 'on-body' | 'off-body';
+}
+
+export type DeviceEventPacket =
+  | DeviceBatteryEventPacket
+  | DeviceChargingEventPacket
+  | DeviceBodyEventPacket;
+
 export interface RawCommandResponsePacket {
   command: number;
   payload: Uint8Array;
@@ -57,6 +97,9 @@ export type ParsedNotification =
   | { type: 'metadata'; metadata: MetadataPacket }
   | { type: 'version'; version: VersionInfoPacket }
   | { type: 'deviceName'; device: DeviceNamePacket }
+  | { type: 'battery'; battery: BatteryLevelPacket }
+  | { type: 'bodyStatus'; body: BodyStatusPacket }
+  | { type: 'event'; event: DeviceEventPacket }
   | { type: 'command'; response: RawCommandResponsePacket }
   | { type: 'unknown' };
 
@@ -161,6 +204,14 @@ export function getNamePacket() {
 
 export function versionInfoPacket() {
   return framePacket(PacketType.Command, 0, CommandNumber.ReportVersionInfo, Uint8Array.from([0x00]));
+}
+
+export function getBatteryLevelPacket() {
+  return framePacket(PacketType.Command, 0, CommandNumber.GetBatteryLevel, Uint8Array.from([0x00]));
+}
+
+export function getBodyLocationAndStatusPacket() {
+  return framePacket(PacketType.Command, 0, CommandNumber.GetBodyLocationAndStatus, Uint8Array.from([0x00]));
 }
 
 export function setAlarmPacket(unixSeconds: number) {
@@ -374,6 +425,110 @@ export function decodeDeviceNamePayload(payload: Uint8Array) {
   return null;
 }
 
+export function decodeBatteryLevelPayload(payload: Uint8Array): BatteryLevelPacket | null {
+  if (payload.length < 4) {
+    return null;
+  }
+
+  const chargeTenthsPercent = readU16LE(payload, 2);
+  return {
+    command: CommandNumber.GetBatteryLevel,
+    chargeTenthsPercent,
+    percent: Math.max(0, Math.min(100, Math.round(chargeTenthsPercent / 10))),
+  };
+}
+
+export function decodeBodyStatusPayload(payload: Uint8Array): BodyStatusPacket | null {
+  if (payload.length < 3) {
+    return null;
+  }
+
+  const rawStatus = payload[2];
+  if (rawStatus !== 0 && rawStatus !== 1) {
+    return null;
+  }
+
+  return {
+    command: CommandNumber.GetBodyLocationAndStatus,
+    rawStatus,
+    bodyStatus: rawStatus === 1 ? 'on-body' : 'off-body',
+  };
+}
+
+export function decodeBatteryEventPayload(payload: Uint8Array) {
+  if (payload.length < 24) {
+    return null;
+  }
+
+  const bodyLength = readU16LE(payload, 2);
+  const body = payload.slice(4);
+  if (body.length < 20 || body.length !== bodyLength) {
+    return null;
+  }
+
+  const chargeTenthsPercent = readU16LE(body, 1);
+  return {
+    chargeTenthsPercent,
+    percent: Math.max(0, Math.min(100, Math.round(chargeTenthsPercent / 10))),
+  };
+}
+
+function parseEventPacket(packet: FramedPacket): ParsedNotification {
+  if (packet.data.length < 5) {
+    return { type: 'unknown' };
+  }
+
+  const unix = readU32LE(packet.data, 1) * 1000;
+  const payload = packet.data.slice(5);
+
+  if (packet.cmd === EventNumber.BatteryLevel) {
+    const battery = decodeBatteryEventPayload(payload);
+    if (battery) {
+      return {
+        type: 'event',
+        event: {
+          event: EventNumber.BatteryLevel,
+          unix,
+          chargeTenthsPercent: battery.chargeTenthsPercent,
+          percent: battery.percent,
+        },
+      };
+    }
+  }
+
+  if (
+    packet.cmd === EventNumber.External5vOn ||
+    packet.cmd === EventNumber.External5vOff ||
+    packet.cmd === EventNumber.ChargingOn ||
+    packet.cmd === EventNumber.ChargingOff
+  ) {
+    return {
+      type: 'event',
+      event: {
+        event: packet.cmd,
+        unix,
+        chargingStatus:
+          packet.cmd === EventNumber.External5vOn || packet.cmd === EventNumber.ChargingOn
+            ? 'charging'
+            : 'not_charging',
+      },
+    };
+  }
+
+  if (packet.cmd === EventNumber.WristOn || packet.cmd === EventNumber.WristOff) {
+    return {
+      type: 'event',
+      event: {
+        event: packet.cmd,
+        unix,
+        bodyStatus: packet.cmd === EventNumber.WristOn ? 'on-body' : 'off-body',
+      },
+    };
+  }
+
+  return { type: 'unknown' };
+}
+
 export function parseNotification(packet: FramedPacket): ParsedNotification {
   if (packet.packetType === PacketType.HistoricalData) {
     return {
@@ -389,7 +544,31 @@ export function parseNotification(packet: FramedPacket): ParsedNotification {
     };
   }
 
+  if (packet.packetType === PacketType.Event) {
+    return parseEventPacket(packet);
+  }
+
   if (packet.packetType === PacketType.CommandResponse) {
+    if (packet.cmd === CommandNumber.GetBatteryLevel) {
+      const battery = decodeBatteryLevelPayload(packet.data);
+      if (battery) {
+        return {
+          type: 'battery',
+          battery,
+        };
+      }
+    }
+
+    if (packet.cmd === CommandNumber.GetBodyLocationAndStatus) {
+      const body = decodeBodyStatusPayload(packet.data);
+      if (body) {
+        return {
+          type: 'bodyStatus',
+          body,
+        };
+      }
+    }
+
     if (packet.cmd === CommandNumber.ReportVersionInfo) {
       return {
         type: 'version',

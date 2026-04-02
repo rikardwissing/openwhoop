@@ -7,7 +7,51 @@ import { StatChip } from '@/components/ui/StatChip';
 import { appIcon } from '@/constants/assets';
 import { colors, typography } from '@/constants/theme';
 import { useWearableSync } from '@/providers/WearableSyncProvider';
-import { isBlockingSyncStatus } from '@/types/device';
+import { describeBatteryStatus, describeChargingState, describeWearState, isBlockingSyncStatus } from '@/types/device';
+
+function batteryAccent(batteryPercent: number | null) {
+  if (batteryPercent === null) {
+    return colors.borderStrong;
+  }
+
+  if (batteryPercent < 20) {
+    return colors.alert;
+  }
+
+  if (batteryPercent < 40) {
+    return colors.violet;
+  }
+
+  if (batteryPercent < 80) {
+    return colors.cyan;
+  }
+
+  return colors.success;
+}
+
+function chargingAccent(chargingStatus: 'charging' | 'not_charging' | null) {
+  if (chargingStatus === 'charging') {
+    return colors.success;
+  }
+
+  if (chargingStatus === 'not_charging') {
+    return colors.borderStrong;
+  }
+
+  return colors.borderStrong;
+}
+
+function wearAccent(bodyStatus: 'on-body' | 'off-body' | null) {
+  if (bodyStatus === 'on-body') {
+    return colors.cyan;
+  }
+
+  if (bodyStatus === 'off-body') {
+    return colors.violet;
+  }
+
+  return colors.borderStrong;
+}
 
 function ActionButton({
   label,
@@ -46,6 +90,9 @@ function ActionButton({
 export function SettingsScreen() {
   const { deviceState, progress, scanResults, scan, selectDevice, forgetDevice, syncSelected } = useWearableSync();
   const deviceBusy = isBlockingSyncStatus(progress.status);
+  const batteryChipAccent = batteryAccent(deviceState.batteryPercent);
+  const chargingChipAccent = chargingAccent(deviceState.chargingStatus);
+  const wearChipAccent = wearAccent(deviceState.bodyStatus);
 
   return (
     <ScreenShell>
@@ -86,6 +133,26 @@ export function SettingsScreen() {
           </View>
 
           <View style={styles.chipWrap}>
+            <StatChip
+              accent={batteryChipAccent}
+              label="Battery"
+              value={deviceState.batteryPercent === null ? '--' : `${deviceState.batteryPercent}%`}
+            />
+            <StatChip
+              accent={batteryChipAccent}
+              label="Status"
+              value={describeBatteryStatus(deviceState.batteryPercent)}
+            />
+            <StatChip
+              accent={chargingChipAccent}
+              label="Charge"
+              value={describeChargingState(deviceState.chargingStatus)}
+            />
+            <StatChip
+              accent={wearChipAccent}
+              label="Wear"
+              value={describeWearState(deviceState.bodyStatus)}
+            />
             <StatChip accent={colors.borderStrong} label="Last sync" value={deviceState.lastSyncedAt ?? 'Not yet'} />
             <StatChip accent={colors.borderStrong} label="Firmware" value={deviceState.firmware ?? '--'} />
           </View>

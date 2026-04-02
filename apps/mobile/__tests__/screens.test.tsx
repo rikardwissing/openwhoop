@@ -14,11 +14,33 @@ import { SettingsScreen } from '@/screens/SettingsScreen';
 import { SleepScreen } from '@/screens/SleepScreen';
 import { TodayScreen } from '@/screens/TodayScreen';
 import { WellnessScreen } from '@/screens/WellnessScreen';
+import type { DeviceState, SyncProgress, SyncResult, WearableScanResult } from '@/types/device';
 
-function renderWithProviders(children: ReactElement) {
+function createWearableContextValue(overrides: Partial<{
+  deviceState: DeviceState;
+  progress: SyncProgress;
+  scanResults: WearableScanResult[];
+  scan: () => Promise<void>;
+  selectDevice: (device: WearableScanResult) => Promise<void>;
+  forgetDevice: () => Promise<void>;
+  syncSelected: () => Promise<SyncResult | null>;
+  setAlarm: (unixSeconds: number) => Promise<void>;
+  disableAlarm: () => Promise<void>;
+}> = {}) {
+  return {
+    ...defaultWearableSyncContextValue,
+    ...overrides,
+    deviceState: {
+      ...defaultWearableSyncContextValue.deviceState,
+      ...overrides.deviceState,
+    },
+  };
+}
+
+function renderWithProviders(children: ReactElement, wearableOverrides = {}) {
   return render(
     <HealthDataProvider repository={new MockHealthRepository({ delayMs: 0 })}>
-      <WearableSyncContextProvider value={defaultWearableSyncContextValue}>
+      <WearableSyncContextProvider value={createWearableContextValue(wearableOverrides)}>
         {children}
       </WearableSyncContextProvider>
     </HealthDataProvider>,
@@ -116,5 +138,28 @@ describe('screen rendering', () => {
 
     expect(screen.getByText('Selected Wearable')).toBeTruthy();
     expect(screen.getByText('Scan nearby')).toBeTruthy();
+    expect(screen.getByText('Battery')).toBeTruthy();
+    expect(screen.getByText('Status')).toBeTruthy();
+    expect(screen.getByText('Charge')).toBeTruthy();
+    expect(screen.getByText('Wear')).toBeTruthy();
+    expect(screen.getAllByText('Unknown').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('--').length).toBeGreaterThan(0);
+  });
+
+  it('renders battery percent and derived status when available', () => {
+    const screen = renderWithProviders(<SettingsScreen />, {
+      deviceState: {
+        id: 'strap-1',
+        name: 'Neo Strap',
+        batteryPercent: 85,
+        chargingStatus: 'charging',
+        bodyStatus: 'on-body',
+      },
+    });
+
+    expect(screen.getByText('85%')).toBeTruthy();
+    expect(screen.getByText('High')).toBeTruthy();
+    expect(screen.getByText('Charging')).toBeTruthy();
+    expect(screen.getByText('On body')).toBeTruthy();
   });
 });

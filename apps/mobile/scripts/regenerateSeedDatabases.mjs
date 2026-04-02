@@ -526,6 +526,7 @@ function resetDerivedSchema(db) {
       last_synced_at TEXT,
       firmware TEXT,
       battery_percent INTEGER,
+      charging_status TEXT,
       body_status TEXT,
       sync_error TEXT
     );

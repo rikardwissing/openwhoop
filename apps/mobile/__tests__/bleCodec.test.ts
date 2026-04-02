@@ -1,5 +1,5 @@
-import { CommandNumber, MetadataType, PacketType } from '@/services/ble/constants';
-import { PacketAssembler, decodeDeviceNamePayload, disableAlarmPacket, framePacket, parseNotification, setAlarmPacket } from '@/services/ble/codec';
+import { CommandNumber, EventNumber, MetadataType, PacketType } from '@/services/ble/constants';
+import { PacketAssembler, decodeBatteryEventPayload, decodeBatteryLevelPayload, decodeBodyStatusPayload, decodeDeviceNamePayload, disableAlarmPacket, framePacket, getBatteryLevelPacket, getBodyLocationAndStatusPacket, parseNotification, setAlarmPacket } from '@/services/ble/codec';
 
 function writeU16LE(bytes: Uint8Array, offset: number, value: number) {
   bytes[offset] = value & 0xff;
@@ -143,14 +143,156 @@ describe('BLE codec', () => {
     });
   });
 
+  it('decodes battery responses into a whole-number percent', () => {
+    const payload = Uint8Array.from([0x00, 0x00, 0x4d, 0x03]);
+
+    expect(decodeBatteryLevelPayload(payload)).toEqual({
+      command: CommandNumber.GetBatteryLevel,
+      chargeTenthsPercent: 845,
+      percent: 85,
+    });
+
+    const parsed = parseNotification({
+      packetType: PacketType.CommandResponse,
+      seq: 0,
+      cmd: CommandNumber.GetBatteryLevel,
+      data: payload,
+    });
+
+    expect(parsed).toEqual({
+      type: 'battery',
+      battery: {
+        command: CommandNumber.GetBatteryLevel,
+        chargeTenthsPercent: 845,
+        percent: 85,
+      },
+    });
+  });
+
+  it('falls back when battery payloads are too short', () => {
+    expect(decodeBatteryLevelPayload(Uint8Array.from([0x00, 0x00, 0x4d]))).toBeNull();
+
+    const parsed = parseNotification({
+      packetType: PacketType.CommandResponse,
+      seq: 0,
+      cmd: CommandNumber.GetBatteryLevel,
+      data: Uint8Array.from([0x00, 0x00, 0x4d]),
+    });
+
+    expect(parsed).toEqual({
+      type: 'command',
+      response: {
+        command: CommandNumber.GetBatteryLevel,
+        payload: Uint8Array.from([0x00, 0x00, 0x4d]),
+      },
+    });
+  });
+
+  it('decodes body-status command responses', () => {
+    const payload = Uint8Array.from([0x00, 0x00, 0x01]);
+
+    expect(decodeBodyStatusPayload(payload)).toEqual({
+      command: CommandNumber.GetBodyLocationAndStatus,
+      rawStatus: 1,
+      bodyStatus: 'on-body',
+    });
+
+    const parsed = parseNotification({
+      packetType: PacketType.CommandResponse,
+      seq: 0,
+      cmd: CommandNumber.GetBodyLocationAndStatus,
+      data: payload,
+    });
+
+    expect(parsed).toEqual({
+      type: 'bodyStatus',
+      body: {
+        command: CommandNumber.GetBodyLocationAndStatus,
+        rawStatus: 1,
+        bodyStatus: 'on-body',
+      },
+    });
+  });
+
+  it('parses useful device events', () => {
+    const batteryPayload = new Uint8Array(24);
+    writeU16LE(batteryPayload, 2, 20);
+    batteryPayload[4] = 0x01;
+    writeU16LE(batteryPayload, 5, 845);
+    const eventData = new Uint8Array(1 + 4 + batteryPayload.length);
+    eventData[0] = 0x00;
+    writeU32LE(eventData, 1, 1_710_000_000);
+    eventData.set(batteryPayload, 5);
+
+    const simpleEventData = new Uint8Array(5);
+    simpleEventData[0] = 0x00;
+    writeU32LE(simpleEventData, 1, 1_710_000_000);
+
+    expect(decodeBatteryEventPayload(batteryPayload)).toEqual({
+      chargeTenthsPercent: 845,
+      percent: 85,
+    });
+
+    expect(parseNotification({
+      packetType: PacketType.Event,
+      seq: 0,
+      cmd: EventNumber.BatteryLevel,
+      data: eventData,
+    })).toEqual({
+      type: 'event',
+      event: {
+        event: EventNumber.BatteryLevel,
+        unix: 1_710_000_000_000,
+        chargeTenthsPercent: 845,
+        percent: 85,
+      },
+    });
+
+    expect(parseNotification({
+      packetType: PacketType.Event,
+      seq: 0,
+      cmd: EventNumber.ChargingOn,
+      data: simpleEventData,
+    })).toEqual({
+      type: 'event',
+      event: {
+        event: EventNumber.ChargingOn,
+        unix: 1_710_000_000_000,
+        chargingStatus: 'charging',
+      },
+    });
+
+    expect(parseNotification({
+      packetType: PacketType.Event,
+      seq: 0,
+      cmd: EventNumber.WristOff,
+      data: simpleEventData,
+    })).toEqual({
+      type: 'event',
+      event: {
+        event: EventNumber.WristOff,
+        unix: 1_710_000_000_000,
+        bodyStatus: 'off-body',
+      },
+    });
+  });
+
   it('builds alarm command packets', () => {
+    const batteryFrame = getBatteryLevelPacket();
+    const bodyFrame = getBodyLocationAndStatusPacket();
     const setFrame = setAlarmPacket(1_710_000_123);
     const disableFrame = disableAlarmPacket();
     const assembler = new PacketAssembler();
 
+    const [batteryPacket] = assembler.push(batteryFrame);
+    const [bodyPacket] = assembler.push(bodyFrame);
     const [setPacket] = assembler.push(setFrame);
     const [disablePacket] = assembler.push(disableFrame);
 
+    expect(batteryPacket.cmd).toBe(CommandNumber.GetBatteryLevel);
+    expect(batteryPacket.data).toEqual(Uint8Array.from([0x00]));
+    expect(bodyPacket.cmd).toBe(CommandNumber.GetBodyLocationAndStatus);
+    expect(bodyPacket.data).toEqual(Uint8Array.from([0x00]));
     expect(setPacket.cmd).toBe(CommandNumber.SetAlarmTime);
     expect(setPacket.data.slice(0, 5)).toEqual(Uint8Array.from([0x01, 0xfb, 0x87, 0xec, 0x65]));
     expect(disablePacket.cmd).toBe(CommandNumber.DisableAlarm);

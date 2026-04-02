@@ -14,6 +14,9 @@ export interface WearableScanResult {
   rssi: number | null;
 }
 
+export type ChargingState = 'charging' | 'not_charging';
+export type WearState = 'on-body' | 'off-body';
+
 export interface DeviceState {
   id: string | null;
   name: string | null;
@@ -21,7 +24,8 @@ export interface DeviceState {
   lastSyncedAt: string | null;
   firmware: string | null;
   batteryPercent: number | null;
-  bodyStatus: string | null;
+  chargingStatus: ChargingState | null;
+  bodyStatus: WearState | null;
   syncError: string | null;
 }
 
@@ -34,6 +38,50 @@ export interface SyncProgress {
 export interface SyncResult {
   importedReadings: number;
   completedAt: string;
+}
+
+export function describeBatteryStatus(batteryPercent: number | null) {
+  if (batteryPercent === null) {
+    return 'Unknown';
+  }
+
+  if (batteryPercent >= 80) {
+    return 'High';
+  }
+
+  if (batteryPercent >= 40) {
+    return 'Okay';
+  }
+
+  if (batteryPercent >= 20) {
+    return 'Low';
+  }
+
+  return 'Critical';
+}
+
+export function describeChargingState(chargingStatus: ChargingState | null) {
+  if (chargingStatus === 'charging') {
+    return 'Charging';
+  }
+
+  if (chargingStatus === 'not_charging') {
+    return 'Not charging';
+  }
+
+  return 'Unknown';
+}
+
+export function describeWearState(bodyStatus: WearState | null) {
+  if (bodyStatus === 'on-body') {
+    return 'On body';
+  }
+
+  if (bodyStatus === 'off-body') {
+    return 'Off body';
+  }
+
+  return 'Unknown';
 }
 
 export function isBlockingSyncStatus(status: SyncStatus) {

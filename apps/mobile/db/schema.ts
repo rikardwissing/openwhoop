@@ -61,6 +61,7 @@ export async function initializeDatabase(db: SQLiteDatabase) {
       last_synced_at TEXT,
       firmware TEXT,
       battery_percent INTEGER,
+      charging_status TEXT,
       body_status TEXT,
       sync_error TEXT
     );
@@ -101,6 +102,13 @@ export async function initializeDatabase(db: SQLiteDatabase) {
 
   if (!sleepPreferenceColumnNames.has('alarm_minutes')) {
     await db.execAsync('ALTER TABLE sleep_preferences ADD COLUMN alarm_minutes INTEGER;');
+  }
+
+  const deviceStateColumns = await db.getAllAsync<{ name: string }>('PRAGMA table_info(device_state)');
+  const deviceStateColumnNames = new Set(deviceStateColumns.map((column) => column.name));
+
+  if (!deviceStateColumnNames.has('charging_status')) {
+    await db.execAsync('ALTER TABLE device_state ADD COLUMN charging_status TEXT;');
   }
 
   const activityForeignKeys = await db.getAllAsync<{ table: string }>('PRAGMA foreign_key_list(activities)');

@@ -3,7 +3,7 @@ import { useSQLiteContext } from 'expo-sqlite';
 
 import { useHealthRepository, useRefreshHealthData } from '@/providers/HealthDataProvider';
 import { WearableSyncService } from '@/services/ble/WearableSyncService';
-import type { DeviceState, SyncProgress, SyncResult, WearableScanResult } from '@/types/device';
+import { isBlockingSyncStatus, type DeviceState, type SyncProgress, type SyncResult, type WearableScanResult } from '@/types/device';
 
 interface WearableSyncContextValue {
   deviceState: DeviceState;
@@ -24,6 +24,7 @@ export const emptyDeviceState: DeviceState = {
   lastSyncedAt: null,
   firmware: null,
   batteryPercent: null,
+  chargingStatus: null,
   bodyStatus: null,
   syncError: null,
 };
@@ -85,6 +86,27 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
       void service.dispose();
     };
   }, [service]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const liveUpdatesBlocked = progress.status === 'scanning' || isBlockingSyncStatus(progress.status);
+
+    if (!deviceState.id || liveUpdatesBlocked) {
+      void service.stopLiveUpdates();
+      return;
+    }
+
+    void service.startLiveUpdates((nextState) => {
+      if (!cancelled) {
+        setDeviceState(nextState);
+      }
+    }).catch(() => {});
+
+    return () => {
+      cancelled = true;
+      void service.stopLiveUpdates();
+    };
+  }, [deviceState.id, progress.status, service]);
 
   const value = useMemo<WearableSyncContextValue>(
     () => ({
