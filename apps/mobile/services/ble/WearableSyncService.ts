@@ -2,11 +2,13 @@ import type { SQLiteDatabase } from 'expo-sqlite';
 import { BleManager, type Device, type Subscription } from 'react-native-ble-plx';
 
 import { refreshDerivedData } from '@/data/sqlite/SQLiteHealthRepository';
+import { acquireBackgroundSyncLock, releaseBackgroundSyncLock } from '@/services/background/backgroundSyncState';
 import { CMD_FROM_STRAP_UUID, CMD_TO_STRAP_UUID, DATA_FROM_STRAP_UUID, EVENTS_FROM_STRAP_UUID, EventNumber, MEMFAULT_UUID, WEARABLE_SERVICE_UUID } from '@/services/ble/constants';
 import { resolveScanDeviceName } from '@/services/ble/deviceNaming';
+import { createWearableBleManager, getRestoredWearableDevice } from '@/services/ble/bleManager';
 import { PacketAssembler, base64ToBytes, bytesToBase64, disableAlarmPacket, enterHighFrequencySyncPacket, exitHighFrequencySyncPacket, getBatteryLevelPacket, getBodyLocationAndStatusPacket, getNamePacket, helloHarvardPacket, historyEndPacket, historyStartPacket, parseNotification, restartPacket, setAlarmPacket, setClockPacket, toggleRealtimeHrPacket, type SensorDataPacket, versionInfoPacket } from '@/services/ble/codec';
 import { HistorySyncWatchdog } from '@/services/ble/syncWatchdog';
-import type { ChargingState, DeviceState, SyncProgress, SyncResult, WearState, WearableLiveEvent, WearableScanResult } from '@/types/device';
+import type { ChargingState, DeviceState, SyncProgress, SyncResult, SyncSource, WearState, WearableLiveEvent, WearableScanResult } from '@/types/device';
 import { formatSqliteDateTime } from '@/utils/dateTime';
 
 const SELECTED_DEVICE_SQL = `
@@ -54,6 +56,14 @@ interface DeviceStateUpdate {
 }
 
 type LiveEventRecorder = (event: WearableLiveEvent) => void;
+type SyncRunSource = SyncSource;
+
+export interface SyncExecutionOutcome {
+  status: 'success' | 'skipped';
+  importedReadings: number;
+  completedAt: string;
+  reason?: string;
+}
 
 function formatBleError(error: unknown) {
   if (!(error instanceof Error)) {
@@ -104,7 +114,7 @@ export class WearableSyncService {
 
   constructor(
     private readonly db: SQLiteDatabase,
-    private readonly manager: BleManager = new BleManager(),
+    private readonly manager: BleManager = createWearableBleManager(),
   ) {}
 
   async dispose() {
@@ -217,14 +227,6 @@ export class WearableSyncService {
       update.chargingStatus ?? null,
       update.bodyStatus ?? null,
       update.syncError ?? null,
-    );
-  }
-
-  private async clearLiveChargingStatus(deviceId: string) {
-    await this.db.runAsync(
-      'UPDATE device_state SET charging_status = NULL, last_seen_at = ? WHERE id = ?',
-      formatSqliteDateTime(new Date()),
-      deviceId,
     );
   }
 
@@ -445,7 +447,6 @@ export class WearableSyncService {
           id: resolvedDeviceId,
           name: resolvedDeviceName,
         });
-        await this.clearLiveChargingStatus(resolvedDeviceId);
         onDeviceState(await this.getDeviceState());
 
         const commandAssembler = new PacketAssembler();
@@ -572,10 +573,48 @@ export class WearableSyncService {
     onProgress?: (progress: SyncProgress) => void,
     onLiveEvent?: LiveEventRecorder,
   ): Promise<SyncResult> {
-    await this.stopLiveUpdates();
+    const outcome = await this.runSync('foreground', onProgress, onLiveEvent);
+    return {
+      importedReadings: outcome.importedReadings,
+      completedAt: outcome.completedAt,
+    };
+  }
+
+  async syncInBackground(): Promise<SyncExecutionOutcome> {
+    return this.runSync('background');
+  }
+
+  private async runSync(
+    source: SyncRunSource,
+    onProgress?: (progress: SyncProgress) => void,
+    onLiveEvent?: LiveEventRecorder,
+  ): Promise<SyncExecutionOutcome> {
+    if (source === 'foreground') {
+      await this.stopLiveUpdates();
+    }
+
     const selected = await this.getDeviceState();
     if (!selected.id) {
       throw new Error('Select a wearable before syncing.');
+    }
+
+    const lockOwner = `${source}:${Date.now()}`;
+    const lockAcquired = await acquireBackgroundSyncLock(this.db, lockOwner);
+    if (!lockAcquired) {
+      const completedAt = formatSqliteDateTime(new Date());
+      onProgress?.({
+        status: 'complete',
+        message: source === 'foreground'
+          ? 'A sync is already running. Wait for it to finish before starting another one.'
+          : 'Skipped background sync because another sync is already running.',
+        importedReadings: 0,
+      });
+      return {
+        status: 'skipped',
+        importedReadings: 0,
+        completedAt,
+        reason: 'sync-lock-active',
+      };
     }
 
     await this.ensurePoweredOn();
@@ -605,36 +644,18 @@ export class WearableSyncService {
     };
 
     try {
-      let candidate = await this.findConnectionCandidate(selected, onProgress);
-      resolvedDeviceId = candidate.id;
-      resolvedDeviceName = resolveScanDeviceName(candidate) ?? resolvedDeviceName;
-
-      try {
-        device = await this.connectWithRetry(candidate.id, resolvedDeviceName ?? 'wearable');
-      } catch (error) {
-        onProgress?.({
-          status: 'connecting',
-          message: `Direct connect failed. Re-scanning for ${resolvedDeviceName ?? 'wearable'}...`,
-        });
-
-        const rescanned = await this.scanForMatchingDevice({
-          ...selected,
-          id: resolvedDeviceId,
-          name: resolvedDeviceName,
-        });
-
-        if (!rescanned) {
-          throw error;
-        }
-
-        candidate = rescanned;
-        resolvedDeviceId = rescanned.id;
-        resolvedDeviceName = resolveScanDeviceName(rescanned) ?? resolvedDeviceName;
-        device = await this.connectWithRetry(rescanned.id, resolvedDeviceName ?? 'wearable');
-      }
-
-      device = await device.discoverAllServicesAndCharacteristics();
-      resolvedDeviceName = resolveScanDeviceName(device) ?? resolvedDeviceName;
+      ({
+        device,
+        resolvedDeviceId,
+        resolvedDeviceName,
+      } = await this.connectSelectedWearable(
+        selected,
+        onProgress,
+        {
+          allowDiscoveryScan: source === 'foreground',
+          allowRescan: source === 'foreground',
+        },
+      ));
 
       const completion = new Promise<void>((resolve, reject) => {
         let settled = false;
@@ -783,6 +804,7 @@ export class WearableSyncService {
 
       onProgress?.({ status: 'complete', message: `Sync complete. Imported ${importedReadings} readings.`, importedReadings });
       return {
+        status: 'success',
         importedReadings,
         completedAt,
       };
@@ -813,6 +835,8 @@ export class WearableSyncService {
           await device.cancelConnection();
         } catch {}
       }
+
+      await releaseBackgroundSyncLock(this.db, lockOwner).catch(() => {});
     }
   }
 
@@ -986,9 +1010,8 @@ export class WearableSyncService {
     throw new Error(`Unable to connect to ${deviceName}. ${message}`);
   }
 
-  private async findConnectionCandidate(
+  private async findKnownConnectionCandidate(
     selected: DeviceState,
-    onProgress?: (progress: SyncProgress) => void,
   ) {
     const selectedId = selected.id;
     if (!selectedId) {
@@ -996,6 +1019,11 @@ export class WearableSyncService {
     }
 
     this.manager.stopDeviceScan();
+
+    const restored = getRestoredWearableDevice(selectedId);
+    if (restored && this.matchesSelectedDevice(restored, selected)) {
+      return restored;
+    }
 
     const knownById = await this.manager.devices([selectedId]).catch(() => []);
     if (knownById[0]) {
@@ -1006,6 +1034,25 @@ export class WearableSyncService {
     const connectedMatch = connected.find((device) => this.matchesSelectedDevice(device, selected));
     if (connectedMatch) {
       return connectedMatch;
+    }
+
+    return null;
+  }
+
+  private async findConnectionCandidate(
+    selected: DeviceState,
+    options: {
+      allowDiscoveryScan: boolean;
+    },
+    onProgress?: (progress: SyncProgress) => void,
+  ) {
+    const known = await this.findKnownConnectionCandidate(selected);
+    if (known) {
+      return known;
+    }
+
+    if (!options.allowDiscoveryScan) {
+      return null;
     }
 
     onProgress?.({
@@ -1075,15 +1122,25 @@ export class WearableSyncService {
   private async connectSelectedWearable(
     selected: DeviceState,
     onProgress?: (progress: SyncProgress) => void,
+    options?: {
+      allowDiscoveryScan?: boolean;
+      allowRescan?: boolean;
+    },
   ) {
-    let candidate = await this.findConnectionCandidate(selected, onProgress);
-    let resolvedDeviceId = candidate.id;
-    let resolvedDeviceName = resolveScanDeviceName(candidate) ?? selected.name;
+    const allowDiscoveryScan = options?.allowDiscoveryScan ?? true;
+    const allowRescan = options?.allowRescan ?? true;
+    let candidate = await this.findConnectionCandidate(selected, { allowDiscoveryScan }, onProgress);
+    let resolvedDeviceId = candidate?.id ?? selected.id!;
+    let resolvedDeviceName = (candidate ? resolveScanDeviceName(candidate) : null) ?? selected.name;
     let device: Device;
 
     try {
-      device = await this.connectWithRetry(candidate.id, resolvedDeviceName ?? 'wearable');
+      device = await this.connectWithRetry(resolvedDeviceId, resolvedDeviceName ?? 'wearable');
     } catch (error) {
+      if (!allowRescan) {
+        throw error;
+      }
+
       onProgress?.({
         status: 'connecting',
         message: `Direct connect failed. Re-scanning for ${resolvedDeviceName ?? 'wearable'}...`,

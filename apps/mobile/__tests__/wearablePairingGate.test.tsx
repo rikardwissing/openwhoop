@@ -10,6 +10,27 @@ jest.mock('expo-router', () => ({
   useSegments: () => mockSegments,
 }));
 
+jest.mock('@/services/background/backgroundSyncState', () => ({
+  getBackgroundSyncState: jest.fn(async () => ({
+    pairedDeviceId: null,
+    lastRunStartedAt: null,
+    lastRunFinishedAt: null,
+    lastSuccessAt: null,
+    lastSource: null,
+    lastResult: null,
+    lastError: null,
+    lastImportedReadings: null,
+    notificationPermission: 'unknown',
+    notificationBaselineAt: null,
+  })),
+}));
+
+jest.mock('@/services/background/backgroundSyncTask', () => ({
+  ensureBackgroundSyncRegistered: jest.fn(async () => {}),
+  enableBackgroundSyncAfterPairing: jest.fn(async () => {}),
+  disableBackgroundSync: jest.fn(async () => {}),
+}));
+
 import { WearablePairingGate } from '@/components/navigation/WearablePairingGate';
 import {
   WearableSyncContextProvider,

@@ -2,7 +2,8 @@ import { ThemeProvider } from '@react-navigation/native';
 import { Manrope_500Medium, Manrope_600SemiBold, Manrope_700Bold } from '@expo-google-fonts/manrope';
 import { SpaceGrotesk_500Medium, SpaceGrotesk_700Bold } from '@expo-google-fonts/space-grotesk';
 import { useFonts } from 'expo-font';
-import { Stack } from 'expo-router';
+import * as Notifications from 'expo-notifications';
+import { Stack, useRouter } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { useEffect } from 'react';
 import { StatusBar } from 'expo-status-bar';
@@ -13,6 +14,8 @@ import { navTheme } from '@/constants/theme';
 import { AppDatabaseProvider } from '@/providers/AppDatabaseProvider';
 import { HealthDataProvider } from '@/providers/HealthDataProvider';
 import { WearableSyncProvider } from '@/providers/WearableSyncProvider';
+import { routeFromNotificationData } from '@/services/background/backgroundSyncNotifications';
+import '@/services/background/backgroundSyncTask';
 
 export {
   ErrorBoundary,
@@ -51,6 +54,31 @@ export default function RootLayout() {
 }
 
 function RootLayoutNav() {
+  const router = useRouter();
+
+  useEffect(() => {
+    let mounted = true;
+
+    const openNotificationRoute = (route: string | null) => {
+      if (mounted && route) {
+        router.push(route as never);
+      }
+    };
+
+    void Notifications.getLastNotificationResponseAsync().then((response) => {
+      openNotificationRoute(routeFromNotificationData(response?.notification.request.content.data));
+    });
+
+    const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
+      openNotificationRoute(routeFromNotificationData(response.notification.request.content.data));
+    });
+
+    return () => {
+      mounted = false;
+      subscription.remove();
+    };
+  }, [router]);
+
   return (
     <ThemeProvider value={navTheme}>
       <AppDatabaseProvider>

@@ -1,6 +1,6 @@
 import { LinearGradient } from 'expo-linear-gradient';
 import type { ReactNode } from 'react';
-import { ScrollView, StyleSheet, View, type StyleProp, type ViewStyle } from 'react-native';
+import { RefreshControl, ScrollView, StyleSheet, View, type StyleProp, type ViewStyle } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { colors, spacing } from '@/constants/theme';
@@ -8,10 +8,16 @@ import { colors, spacing } from '@/constants/theme';
 export function ScreenShell({
   children,
   contentStyle,
+  onRefresh,
+  refreshing = false,
 }: {
   children: ReactNode;
   contentStyle?: StyleProp<ViewStyle>;
+  onRefresh?: () => void;
+  refreshing?: boolean;
 }) {
+  const refreshEnabled = typeof onRefresh === 'function';
+
   return (
     <View style={styles.root}>
       <LinearGradient
@@ -24,8 +30,19 @@ export function ScreenShell({
       <View style={[styles.glow, styles.glowBottom]} />
       <SafeAreaView edges={['top']} style={styles.safeArea}>
         <ScrollView
-          bounces={false}
+          alwaysBounceVertical={refreshEnabled}
+          bounces={refreshEnabled}
           contentContainerStyle={[styles.content, contentStyle]}
+          refreshControl={
+            refreshEnabled ? (
+              <RefreshControl
+                onRefresh={onRefresh}
+                progressBackgroundColor="rgba(18, 28, 42, 0.92)"
+                refreshing={refreshing}
+                tintColor={colors.primary}
+              />
+            ) : undefined
+          }
           showsVerticalScrollIndicator={false}>
           {children}
         </ScrollView>

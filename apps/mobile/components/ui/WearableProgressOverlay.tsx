@@ -22,7 +22,7 @@ function titleForStatus(status: SyncStatus) {
 export function WearableProgressOverlay() {
   const { progress } = useWearableSync();
 
-  if (!isBlockingSyncStatus(progress.status)) {
+  if (!isBlockingSyncStatus(progress.status) || progress.showOverlay === false) {
     return null;
   }
 

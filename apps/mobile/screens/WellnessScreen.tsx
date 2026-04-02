@@ -10,6 +10,7 @@ import { StatChip } from '@/components/ui/StatChip';
 import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
 import { colors, typography } from '@/constants/theme';
 import { useWellnessSnapshot } from '@/hooks/useHealthData';
+import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
 import type { MetricSeries, TrendSelection } from '@/types/health';
 import { formatMetricValue, formatSignedValue } from '@/utils/formatters';
 
@@ -74,11 +75,12 @@ function WellnessMetricCard({ metric }: { metric: MetricSeries }) {
 
 export function WellnessScreen() {
   const state = useWellnessSnapshot('14d');
+  const { onRefresh, refreshing } = useWearableRefreshControl();
   const data = state.data;
 
   if (!data && state.status === 'loading') {
     return (
-      <ScreenShell>
+      <ScreenShell onRefresh={onRefresh} refreshing={refreshing}>
         <LoadingState label="Loading wellness metrics..." variant="inline" />
       </ScreenShell>
     );
@@ -86,7 +88,7 @@ export function WellnessScreen() {
 
   if (!data && state.status === 'error') {
     return (
-      <ScreenShell>
+      <ScreenShell onRefresh={onRefresh} refreshing={refreshing}>
         <ErrorState message="Unable to load the wellness board right now." variant="inline" />
       </ScreenShell>
     );
@@ -97,7 +99,7 @@ export function WellnessScreen() {
   }
 
   return (
-    <ScreenShell>
+    <ScreenShell onRefresh={onRefresh} refreshing={refreshing}>
       {state.status === 'error' ? (
         <ErrorState message="Showing the last wellness snapshot while refresh catches up." variant="inline" />
       ) : null}

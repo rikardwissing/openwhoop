@@ -8,6 +8,7 @@ import { GlassCard } from '@/components/ui/GlassCard';
 import { StatChip } from '@/components/ui/StatChip';
 import { appIcon } from '@/constants/assets';
 import { colors, typography } from '@/constants/theme';
+import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
 import { useOptionalAppDatabase } from '@/providers/AppDatabaseProvider';
 import { useWearableSync } from '@/providers/WearableSyncProvider';
 import { exportAndShareDatabaseSnapshot } from '@/services/databaseExport';
@@ -103,10 +104,37 @@ function formatBytes(sizeBytes: number) {
   return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function describeNotificationPermission(permission: 'unknown' | 'granted' | 'provisional' | 'denied') {
+  switch (permission) {
+    case 'granted':
+      return 'Allowed';
+    case 'provisional':
+      return 'Provisional';
+    case 'denied':
+      return 'Denied';
+    default:
+      return 'Unknown';
+  }
+}
+
+function describeBackgroundResult(result: 'success' | 'skipped' | 'error' | null) {
+  switch (result) {
+    case 'success':
+      return 'Success';
+    case 'skipped':
+      return 'Skipped';
+    case 'error':
+      return 'Error';
+    default:
+      return 'Idle';
+  }
+}
+
 export function SettingsScreen() {
   const router = useRouter();
   const db = useOptionalAppDatabase();
-  const { deviceState, liveEvents, progress, forgetDevice, syncSelected, restartDevice } = useWearableSync();
+  const { backgroundSyncState, deviceState, liveEvents, progress, forgetDevice, syncSelected, restartDevice } = useWearableSync();
+  const { onRefresh, refreshing } = useWearableRefreshControl();
   const [exportState, setExportState] = useState<{
     status: 'idle' | 'running' | 'success' | 'error';
     message: string;
@@ -149,7 +177,7 @@ export function SettingsScreen() {
   }
 
   return (
-    <ScreenShell>
+    <ScreenShell onRefresh={onRefresh} refreshing={refreshing}>
       <View>
         <SectionHeader title="Settings" trailing="Manual sync" />
         <Text style={styles.subtitle}>Local-only device sync and the offline data store that powers every tab.</Text>
@@ -261,6 +289,48 @@ export function SettingsScreen() {
       <GlassCard accentColor={colors.aqua}>
         <SectionHeader title="Local Sync Status" trailing={progress.status} />
         <Text style={styles.roadmapText}>{progress.message}</Text>
+      </GlassCard>
+
+      <GlassCard accentColor={colors.violet}>
+        <SectionHeader title="Background Sync" trailing={deviceState.id ? 'Auto after pairing' : 'Inactive'} />
+        <View style={styles.settingColumn}>
+          <View style={styles.chipWrap}>
+            <StatChip
+              accent={deviceState.id ? colors.success : colors.borderStrong}
+              label="Status"
+              value={deviceState.id ? 'Enabled' : 'No wearable'}
+            />
+            <StatChip
+              accent={colors.borderStrong}
+              label="Alerts"
+              value={describeNotificationPermission(backgroundSyncState.notificationPermission)}
+            />
+            <StatChip
+              accent={colors.borderStrong}
+              label="Last run"
+              value={backgroundSyncState.lastRunFinishedAt ?? 'Not yet'}
+            />
+            <StatChip
+              accent={
+                backgroundSyncState.lastResult === 'error'
+                  ? colors.alert
+                  : backgroundSyncState.lastResult === 'success'
+                    ? colors.success
+                    : colors.borderStrong
+              }
+              label="Last result"
+              value={describeBackgroundResult(backgroundSyncState.lastResult)}
+            />
+          </View>
+
+          <Text style={styles.roadmapText}>
+            Background sync is best effort on iPhone while the app stays in the background or suspended. If you force-quit the app from the app switcher, iOS stops relaunching it for this work until you open it again.
+          </Text>
+          <Text style={styles.roadmapText}>
+            Keep the official wearable app closed while BtWearable owns the strap. Two apps syncing the same device can race each other and create gaps.
+          </Text>
+          {backgroundSyncState.lastError ? <Text style={styles.errorText}>{backgroundSyncState.lastError}</Text> : null}
+        </View>
       </GlassCard>
 
       <GlassCard accentColor={colors.primary}>

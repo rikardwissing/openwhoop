@@ -13,6 +13,7 @@ import { MetricCard } from '@/components/ui/MetricCard';
 import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
 import { colors, typography } from '@/constants/theme';
 import { useSleepHistory } from '@/hooks/useHealthData';
+import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
 import { useHealthRepository } from '@/providers/HealthDataProvider';
 import { useWearableSync } from '@/providers/WearableSyncProvider';
 import type { SleepStageSelection, TrendSelection } from '@/types/health';
@@ -30,6 +31,7 @@ import { calculateOptimalBedtimeMinutes, nextUpcomingClockDate, roundClockMinute
 export function SleepScreen() {
   const repository = useHealthRepository();
   const { deviceState, setAlarm, disableAlarm } = useWearableSync();
+  const { onRefresh, refreshing } = useWearableRefreshControl();
   const state = useSleepHistory('14d');
   const [scoreSelection, setScoreSelection] = useState<TrendSelection | null>(null);
   const [durationSelection, setDurationSelection] = useState<TrendSelection | null>(null);
@@ -77,7 +79,7 @@ export function SleepScreen() {
 
   if (!data && state.status === 'loading') {
     return (
-      <ScreenShell>
+      <ScreenShell onRefresh={onRefresh} refreshing={refreshing}>
         <LoadingState label="Loading sleep score and stage history..." variant="inline" />
       </ScreenShell>
     );
@@ -85,7 +87,7 @@ export function SleepScreen() {
 
   if (!data && state.status === 'error') {
     return (
-      <ScreenShell>
+      <ScreenShell onRefresh={onRefresh} refreshing={refreshing}>
         <ErrorState message="Unable to load sleep history right now." variant="inline" />
       </ScreenShell>
     );
@@ -228,7 +230,7 @@ export function SleepScreen() {
   };
 
   return (
-    <ScreenShell>
+    <ScreenShell onRefresh={onRefresh} refreshing={refreshing}>
       {state.status === 'error' ? (
         <ErrorState message="Showing the last sleep snapshot while refresh catches up." variant="inline" />
       ) : null}

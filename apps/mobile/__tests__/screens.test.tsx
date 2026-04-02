@@ -1,5 +1,6 @@
 import type { ReactElement } from 'react';
 import { act, fireEvent, render } from '@testing-library/react-native';
+import { ScrollView } from 'react-native';
 
 const mockPush = jest.fn();
 const mockBack = jest.fn();
@@ -15,8 +16,30 @@ jest.mock('expo-router', () => ({
   useSegments: () => mockSegments,
 }));
 
+jest.mock('@/services/background/backgroundSyncState', () => ({
+  getBackgroundSyncState: jest.fn(async () => ({
+    pairedDeviceId: null,
+    lastRunStartedAt: null,
+    lastRunFinishedAt: null,
+    lastSuccessAt: null,
+    lastSource: null,
+    lastResult: null,
+    lastError: null,
+    lastImportedReadings: null,
+    notificationPermission: 'unknown',
+    notificationBaselineAt: null,
+  })),
+}));
+
+jest.mock('@/services/background/backgroundSyncTask', () => ({
+  ensureBackgroundSyncRegistered: jest.fn(async () => {}),
+  enableBackgroundSyncAfterPairing: jest.fn(async () => {}),
+  disableBackgroundSync: jest.fn(async () => {}),
+}));
+
 import { SleepStageChart } from '@/components/charts/SleepStageChart';
 import { TrendChart } from '@/components/charts/TrendChart';
+import { WearableProgressOverlay } from '@/components/ui/WearableProgressOverlay';
 import { MockHealthRepository } from '@/data/mock/MockHealthRepository';
 import { HealthDataProvider } from '@/providers/HealthDataProvider';
 import {
@@ -49,7 +72,7 @@ function createWearableContextValue(overrides: Partial<{
   pairDevice: (device: WearableScanResult) => Promise<SyncResult | null>;
   selectDevice: (device: WearableScanResult) => Promise<void>;
   forgetDevice: () => Promise<void>;
-  syncSelected: () => Promise<SyncResult | null>;
+  syncSelected: (options?: { showOverlay?: boolean }) => Promise<SyncResult | null>;
   restartDevice: () => Promise<void>;
   setAlarm: (unixSeconds: number) => Promise<void>;
   disableAlarm: () => Promise<void>;
@@ -88,6 +111,12 @@ function applyChartSelection(
   });
 }
 
+function getRefreshControl(screen: ReturnType<typeof renderWithProviders>) {
+  const scrollView = screen.UNSAFE_getAllByType(ScrollView).find((node) => node.props.refreshControl);
+  expect(scrollView?.props.refreshControl).toBeTruthy();
+  return scrollView?.props.refreshControl;
+}
+
 describe('screen rendering', () => {
   beforeEach(() => {
     mockPush.mockClear();
@@ -116,6 +145,40 @@ describe('screen rendering', () => {
 
     expect(await screen.findByText('Live')).toBeTruthy();
     expect(await screen.findByText('68 bpm')).toBeTruthy();
+  });
+
+  it('runs sync from pull-to-refresh on dashboard screens when a wearable is selected', async () => {
+    const syncSelected = jest.fn(async () => null);
+    const screen = renderWithProviders(<TodayScreen />, {
+      deviceState: {
+        id: 'strap-1',
+        name: 'Neo Strap',
+      },
+      syncSelected,
+    });
+
+    expect(await screen.findByText('Heart Rate')).toBeTruthy();
+
+    const refreshControl = getRefreshControl(screen);
+
+    act(() => {
+      refreshControl?.props.onRefresh();
+    });
+
+    expect(syncSelected).toHaveBeenCalledTimes(1);
+    expect(syncSelected).toHaveBeenCalledWith({ showOverlay: false });
+  });
+
+  it('hides the full-screen progress overlay for non-overlay sync progress', () => {
+    const screen = renderWithProviders(<WearableProgressOverlay />, {
+      progress: {
+        status: 'syncing',
+        message: 'Refreshing from pull-to-refresh...',
+        showOverlay: false,
+      },
+    });
+
+    expect(screen.queryByText('Syncing wearable')).toBeNull();
   });
 
   it('renders the sleep screen', async () => {
@@ -204,7 +267,7 @@ describe('screen rendering', () => {
     expect(screen.getByText('Export for Analysis')).toBeTruthy();
     expect(screen.getByText('Export Database')).toBeTruthy();
     expect(screen.getByText('Battery')).toBeTruthy();
-    expect(screen.getByText('Status')).toBeTruthy();
+    expect(screen.getAllByText('Status').length).toBeGreaterThan(0);
     expect(screen.getByText('Charge')).toBeTruthy();
     expect(screen.getByText('Wear')).toBeTruthy();
     expect(screen.getAllByText('Unknown').length).toBeGreaterThan(0);

@@ -11,6 +11,7 @@ import { StatChip } from '@/components/ui/StatChip';
 import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
 import { colors, typography } from '@/constants/theme';
 import { useHeartHistory } from '@/hooks/useHealthData';
+import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
 import { useWearableSync } from '@/providers/WearableSyncProvider';
 import { hasFreshLiveHeartRate } from '@/types/device';
 import type { TrendSelection } from '@/types/health';
@@ -19,6 +20,7 @@ import { formatMetricValue, formatSignedValue } from '@/utils/formatters';
 export function HeartScreen() {
   const state = useHeartHistory('14d');
   const { deviceState } = useWearableSync();
+  const { onRefresh, refreshing } = useWearableRefreshControl();
   const [intradaySelection, setIntradaySelection] = useState<TrendSelection | null>(null);
   const [restingSelection, setRestingSelection] = useState<TrendSelection | null>(null);
   const data = state.data;
@@ -28,7 +30,7 @@ export function HeartScreen() {
 
   if (!data && state.status === 'loading') {
     return (
-      <ScreenShell>
+      <ScreenShell onRefresh={onRefresh} refreshing={refreshing}>
         <LoadingState label="Loading intraday heart trends..." variant="inline" />
       </ScreenShell>
     );
@@ -36,7 +38,7 @@ export function HeartScreen() {
 
   if (!data && state.status === 'error') {
     return (
-      <ScreenShell>
+      <ScreenShell onRefresh={onRefresh} refreshing={refreshing}>
         <ErrorState message="Unable to load heart history right now." variant="inline" />
       </ScreenShell>
     );
@@ -47,7 +49,7 @@ export function HeartScreen() {
   }
 
   return (
-    <ScreenShell>
+    <ScreenShell onRefresh={onRefresh} refreshing={refreshing}>
       {state.status === 'error' ? (
         <ErrorState message="Showing the last heart snapshot while refresh catches up." variant="inline" />
       ) : null}
@@ -86,8 +88,10 @@ export function HeartScreen() {
         <TrendChart
           accentColor={colors.success}
           height={170}
+          lineStrokeWidth={0.8}
           onSelectionChange={setIntradaySelection}
           points={data.intraday}
+          shadowStrokeWidth={1.6}
           testID="heart-intraday-chart"
         />
         {!intradaySelection && liveHeartRateLabel ? (
@@ -118,8 +122,10 @@ export function HeartScreen() {
         />
         <TrendChart
           accentColor={colors.cyan}
+          lineStrokeWidth={0.8}
           onSelectionChange={setRestingSelection}
           points={data.weeklyResting}
+          shadowStrokeWidth={1.6}
           testID="heart-resting-chart"
         />
         {!restingSelection ? (

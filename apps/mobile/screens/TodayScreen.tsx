@@ -13,6 +13,7 @@ import { StatChip } from '@/components/ui/StatChip';
 import { appIcon } from '@/constants/assets';
 import { colors, typography } from '@/constants/theme';
 import { useDashboardSnapshot } from '@/hooks/useHealthData';
+import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
 import { useWearableSync } from '@/providers/WearableSyncProvider';
 import { hasFreshLiveHeartRate } from '@/types/device';
 import type { SleepStageSelection, TrendSelection } from '@/types/health';
@@ -26,6 +27,7 @@ import {
 export function TodayScreen() {
   const state = useDashboardSnapshot();
   const { deviceState } = useWearableSync();
+  const { onRefresh, refreshing } = useWearableRefreshControl();
   const [heartSelection, setHeartSelection] = useState<TrendSelection | null>(null);
   const [sleepSelection, setSleepSelection] = useState<SleepStageSelection | null>(null);
   const [strainSelection, setStrainSelection] = useState<TrendSelection | null>(null);
@@ -36,7 +38,7 @@ export function TodayScreen() {
 
   if (!data && state.status === 'loading') {
     return (
-      <ScreenShell>
+      <ScreenShell onRefresh={onRefresh} refreshing={refreshing}>
         <LoadingState label="Loading today's recovery snapshot..." variant="inline" />
       </ScreenShell>
     );
@@ -44,7 +46,7 @@ export function TodayScreen() {
 
   if (!data && state.status === 'error') {
     return (
-      <ScreenShell>
+      <ScreenShell onRefresh={onRefresh} refreshing={refreshing}>
         <ErrorState message="Unable to load the dashboard right now." variant="inline" />
       </ScreenShell>
     );
@@ -80,7 +82,7 @@ export function TodayScreen() {
         : 'Selected strain point';
 
   return (
-    <ScreenShell>
+    <ScreenShell onRefresh={onRefresh} refreshing={refreshing}>
       {state.status === 'error' ? (
         <ErrorState message="Showing the last dashboard snapshot while refresh catches up." variant="inline" />
       ) : null}
@@ -164,8 +166,10 @@ export function TodayScreen() {
         <TrendChart
           accentColor={colors.primary}
           height={164}
+          lineStrokeWidth={0.8}
           onSelectionChange={setHeartSelection}
           points={data.heartCard.series}
+          shadowStrokeWidth={1.6}
           testID="today-heart-chart"
         />
       </GlassCard>

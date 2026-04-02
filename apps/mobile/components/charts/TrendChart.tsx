@@ -63,13 +63,17 @@ export function TrendChart({
   points,
   accentColor,
   height = 148,
+  lineStrokeWidth = 1,
   onSelectionChange,
+  shadowStrokeWidth = 2.1,
   testID,
 }: {
   points: TrendPoint[];
   accentColor: string;
   height?: number;
+  lineStrokeWidth?: number;
   onSelectionChange?: (selection: TrendSelection | null) => void;
+  shadowStrokeWidth?: number;
   testID?: string;
 }) {
   const [chartWidth, setChartWidth] = useState(0);
@@ -210,7 +214,7 @@ export function TrendChart({
               d={path}
               fill="none"
               stroke="rgba(86, 246, 255, 0.12)"
-              strokeWidth="2.1"
+              strokeWidth={shadowStrokeWidth}
             />
           ))}
           {paths.map((path, index) => (
@@ -220,7 +224,7 @@ export function TrendChart({
               fill="none"
               stroke={`url(#${chartId}-stroke)`}
               strokeLinecap="round"
-              strokeWidth="1"
+              strokeWidth={lineStrokeWidth}
             />
           ))}
           {activeCoordinate ? (

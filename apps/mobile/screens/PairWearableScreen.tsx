@@ -78,7 +78,7 @@ export function PairWearableScreen() {
       <View>
         <SectionHeader title="Pair Wearable" trailing={progress.status === 'scanning' ? 'Scanning' : 'Required'} />
         <Text style={styles.subtitle}>
-          Pick the strap you want to pair with this phone before using the app.
+          Pick the strap you want this phone to own before using the app. After the first successful sync, background refresh stays enabled on iPhone while the app remains in the background.
         </Text>
       </View>
 
@@ -134,6 +134,13 @@ export function PairWearableScreen() {
               : 'No live scan results yet. Make sure the wearable is awake and close to the phone.'}
           </Text>
         )}
+      </GlassCard>
+
+      <GlassCard accentColor={colors.violet}>
+        <SectionHeader title="Background Sync Notes" trailing="iPhone v1" />
+        <Text style={styles.emptyState}>
+          Keep the official wearable app closed while BtWearable is paired to this strap. If both apps sync the same device, they can compete for the same history and create gaps.
+        </Text>
       </GlassCard>
     </ScreenShell>
   );

@@ -17,7 +17,8 @@
       "infoPlist": {
         "NSBluetoothAlwaysUsageDescription": "BtWearable uses Bluetooth to connect to your wearable and sync health data directly to this iPhone."
       },
-      "supportsTablet": false
+      "supportsTablet": false,
+      "appleTeamId": "3XYXJPF4QV"
     },
     "android": {
       "adaptiveIcon": {
@@ -25,7 +26,12 @@
         "foregroundImage": "./assets/images/app-icon.png"
       },
       "package": "com.rikardwissing.btwearable",
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.BLUETOOTH",
+        "android.permission.BLUETOOTH_ADMIN",
+        "android.permission.BLUETOOTH_CONNECT"
+      ]
     },
     "web": {
       "bundler": "metro",
@@ -38,11 +44,22 @@
       [
         "react-native-ble-plx",
         {
+          "modes": [
+            "central"
+          ],
           "bluetoothAlwaysPermission": "BtWearable uses Bluetooth to connect to your wearable and sync health data directly to this iPhone."
         }
       ],
+      [
+        "expo-notifications",
+        {
+          "enableBackgroundRemoteNotifications": false
+        }
+      ],
       "expo-sharing",
-      "expo-background-task"
+      "expo-background-task",
+      "./plugins/with-local-notifications-only",
+      "./plugins/with-force-close-reminder"
     ],
     "experiments": {
       "typedRoutes": true

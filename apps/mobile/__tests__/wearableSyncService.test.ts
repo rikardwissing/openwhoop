@@ -257,12 +257,6 @@ class MockDb {
       return;
     }
 
-    if (sql.startsWith('UPDATE device_state SET charging_status = NULL')) {
-      this.row.charging_status = null;
-      this.row.last_seen_at = args[0] as string;
-      return;
-    }
-
     if (!sql.includes('INSERT INTO device_state')) {
       return;
     }
@@ -421,7 +415,7 @@ describe('WearableSyncService battery refresh', () => {
     await service.stopLiveUpdates();
   });
 
-  it('clears stale charging state when live updates reconnect before a fresh event arrives', async () => {
+  it('keeps the last persisted charging state until a fresh event arrives', async () => {
     const device = new MockDevice();
     const db = new MockDb(71, 'charging');
     const manager = new MockBleManager(device);
@@ -433,9 +427,9 @@ describe('WearableSyncService battery refresh', () => {
     });
 
     await expect(service.getDeviceState()).resolves.toMatchObject({
-      chargingStatus: null,
+      chargingStatus: 'charging',
     });
-    expect(updates[0]?.chargingStatus ?? null).toBeNull();
+    expect(updates[0]?.chargingStatus ?? null).toBe('charging');
 
     await service.stopLiveUpdates();
   });
