@@ -13,6 +13,10 @@
       "backgroundColor": "#030711"
     },
     "ios": {
+      "bundleIdentifier": "com.rikardwissing.btwearable",
+      "infoPlist": {
+        "NSBluetoothAlwaysUsageDescription": "BtWearable uses Bluetooth to connect to your wearable and sync health data directly to this iPhone."
+      },
       "supportsTablet": false
     },
     "android": {
@@ -20,6 +24,7 @@
         "backgroundColor": "#030711",
         "foregroundImage": "./assets/images/app-icon.png"
       },
+      "package": "com.rikardwissing.btwearable",
       "predictiveBackGestureEnabled": false
     },
     "web": {
@@ -28,7 +33,14 @@
       "favicon": "./assets/images/app-icon.png"
     },
     "plugins": [
-      "expo-router"
+      "expo-router",
+      "expo-sqlite",
+      [
+        "react-native-ble-plx",
+        {
+          "bluetoothAlwaysPermission": "BtWearable uses Bluetooth to connect to your wearable and sync health data directly to this iPhone."
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true

@@ -10,7 +10,7 @@ import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
 import { appIcon } from '@/constants/assets';
 import { colors, typography } from '@/constants/theme';
 import { useDashboardSnapshot } from '@/hooks/useHealthData';
-import { formatCompactDuration } from '@/utils/formatters';
+import { formatCompactDuration, formatMetricValue } from '@/utils/formatters';
 
 export function TodayScreen() {
   const state = useDashboardSnapshot();
@@ -107,7 +107,7 @@ export function TodayScreen() {
             </View>
             <Ionicons color={colors.subtle} name="ellipsis-horizontal" size={18} />
           </View>
-          <Text style={styles.sleepScore}>{data.sleepCard.score}</Text>
+          <Text style={styles.sleepScore}>{formatMetricValue(data.sleepCard.score, 0)}</Text>
           <Text style={styles.sleepDuration}>{formatCompactDuration(data.sleepCard.durationMinutes)}</Text>
           <SleepStageChart
             endLabel={data.sleepCard.endLabel}
@@ -125,7 +125,7 @@ export function TodayScreen() {
             </View>
             <Ionicons color={colors.subtle} name="ellipsis-horizontal" size={18} />
           </View>
-          <Text style={styles.strainValue}>{data.strainCard.score.toFixed(1)}</Text>
+          <Text style={styles.strainValue}>{formatMetricValue(data.strainCard.score, 1)}</Text>
           <Text style={styles.strainLabel}>{data.strainCard.label}</Text>
           <TrendChart accentColor={colors.cyan} height={110} points={data.strainCard.series} />
         </GlassCard>

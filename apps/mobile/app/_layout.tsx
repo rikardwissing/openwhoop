@@ -8,7 +8,9 @@ import { useEffect } from 'react';
 import { StatusBar } from 'expo-status-bar';
 
 import { navTheme } from '@/constants/theme';
+import { AppDatabaseProvider } from '@/providers/AppDatabaseProvider';
 import { HealthDataProvider } from '@/providers/HealthDataProvider';
+import { WearableSyncProvider } from '@/providers/WearableSyncProvider';
 
 export {
   ErrorBoundary,
@@ -49,13 +51,17 @@ export default function RootLayout() {
 function RootLayoutNav() {
   return (
     <ThemeProvider value={navTheme}>
-      <HealthDataProvider>
-        <StatusBar style="light" />
-        <Stack>
-        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-        <Stack.Screen name="+not-found" options={{ title: 'Not Found' }} />
-        </Stack>
-      </HealthDataProvider>
+      <AppDatabaseProvider>
+        <HealthDataProvider>
+          <WearableSyncProvider>
+            <StatusBar style="light" />
+            <Stack>
+              <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+              <Stack.Screen name="+not-found" options={{ title: 'Not Found' }} />
+            </Stack>
+          </WearableSyncProvider>
+        </HealthDataProvider>
+      </AppDatabaseProvider>
     </ThemeProvider>
   );
 }

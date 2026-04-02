@@ -96,8 +96,8 @@ export function WellnessScreen() {
               </Text>
             </View>
             <View style={styles.activityValues}>
-              <Text style={styles.activityStrain}>{activity.strain.toFixed(1)} strain</Text>
-              <Text style={styles.activityCalories}>{activity.calories} kcal</Text>
+              <Text style={styles.activityStrain}>{activity.strain === null ? '-- strain' : `${activity.strain.toFixed(1)} strain`}</Text>
+              <Text style={styles.activityCalories}>{activity.calories === null ? '-- kcal' : `${activity.calories} kcal`}</Text>
             </View>
           </View>
         ))}

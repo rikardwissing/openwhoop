@@ -22,7 +22,7 @@ export function GlowRing({
   caption,
   size = 300,
 }: {
-  score: number;
+  score: number | null;
   label: string;
   caption: string;
   size?: number;
@@ -30,7 +30,7 @@ export function GlowRing({
   const strokeWidth = size * 0.08;
   const radius = size / 2 - strokeWidth / 1.8;
   const circumference = 2 * Math.PI * radius;
-  const progress = Math.max(0.06, Math.min(score / 100, 0.96));
+  const progress = score === null ? 0.08 : Math.max(0.06, Math.min(score / 100, 0.96));
   const dashOffset = circumference * (1 - progress);
 
   return (
@@ -95,7 +95,7 @@ export function GlowRing({
       </Svg>
       <View style={styles.inner}>
         <Text style={styles.caption}>{caption}</Text>
-        <Text style={styles.score}>{score}%</Text>
+        <Text style={styles.score}>{score === null ? '--' : `${score}%`}</Text>
         <Text style={styles.label}>{label}</Text>
       </View>
     </View>

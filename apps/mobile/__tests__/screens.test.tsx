@@ -3,6 +3,7 @@ import { render } from '@testing-library/react-native';
 
 import { MockHealthRepository } from '@/data/mock/MockHealthRepository';
 import { HealthDataProvider } from '@/providers/HealthDataProvider';
+import { WearableSyncContextProvider, defaultWearableSyncContextValue } from '@/providers/WearableSyncProvider';
 import { HeartScreen } from '@/screens/HeartScreen';
 import { SettingsScreen } from '@/screens/SettingsScreen';
 import { SleepScreen } from '@/screens/SleepScreen';
@@ -12,7 +13,9 @@ import { WellnessScreen } from '@/screens/WellnessScreen';
 function renderWithProviders(children: ReactElement) {
   return render(
     <HealthDataProvider repository={new MockHealthRepository({ delayMs: 0 })}>
-      {children}
+      <WearableSyncContextProvider value={defaultWearableSyncContextValue}>
+        {children}
+      </WearableSyncContextProvider>
     </HealthDataProvider>
   );
 }
@@ -47,10 +50,10 @@ describe('screen rendering', () => {
     expect(await screen.findByText('Recent Activity')).toBeTruthy();
   });
 
-  it('renders the settings screen placeholders', () => {
+  it('renders the settings screen device controls', () => {
     const screen = renderWithProviders(<SettingsScreen />);
 
-    expect(screen.getByText('Future Device Actions')).toBeTruthy();
-    expect(screen.getByText('Connect wearable')).toBeTruthy();
+    expect(screen.getByText('Selected Wearable')).toBeTruthy();
+    expect(screen.getByText('Scan nearby')).toBeTruthy();
   });
 });

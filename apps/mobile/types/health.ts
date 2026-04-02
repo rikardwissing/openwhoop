@@ -1,6 +1,7 @@
 export type HistoryRange = '24h' | '7d' | '14d' | '30d';
 export type AccentTone = 'green' | 'cyan' | 'alert' | 'heart' | 'violet';
 export type SleepStage = 'awake' | 'rem' | 'deep' | 'light';
+export type PartialDataReason = string;
 
 export interface TrendPoint {
   label: string;
@@ -12,36 +13,50 @@ export interface SleepStageSegment {
   minutes: number;
 }
 
-export interface RecoverySnapshot {
-  score: number;
-  label: string;
-  caption: string;
+export interface EstimatedValueMeta {
+  isEstimated?: boolean;
+  missingReason?: PartialDataReason | null;
 }
 
-export interface SummaryStat {
+export interface RecoveryBreakdown {
+  sleepScore: number | null;
+  hrvComponent: number | null;
+  rhrComponent: number | null;
+  stressComponent: number | null;
+  tempComponent: number | null;
+}
+
+export interface RecoverySnapshot extends EstimatedValueMeta {
+  score: number | null;
+  label: string;
+  caption: string;
+  breakdown?: RecoveryBreakdown | null;
+}
+
+export interface SummaryStat extends EstimatedValueMeta {
   label: string;
   value: string;
   accent: AccentTone;
 }
 
-export interface HeartCardSnapshot {
-  restingHr: number;
-  averageHr: number;
-  maxHr: number;
+export interface HeartCardSnapshot extends EstimatedValueMeta {
+  restingHr: number | null;
+  averageHr: number | null;
+  maxHr: number | null;
   series: TrendPoint[];
 }
 
-export interface SleepCardSnapshot {
-  score: number;
-  durationMinutes: number;
+export interface SleepCardSnapshot extends EstimatedValueMeta {
+  score: number | null;
+  durationMinutes: number | null;
   stages: SleepStageSegment[];
   startLabel: string;
   middleLabel: string;
   endLabel: string;
 }
 
-export interface StrainCardSnapshot {
-  score: number;
+export interface StrainCardSnapshot extends EstimatedValueMeta {
+  score: number | null;
   label: string;
   series: TrendPoint[];
 }
@@ -54,45 +69,49 @@ export interface DashboardSnapshot {
   heartCard: HeartCardSnapshot;
   sleepCard: SleepCardSnapshot;
   strainCard: StrainCardSnapshot;
+  lastSyncLabel?: string | null;
 }
 
-export interface SleepSession {
+export interface SleepSession extends EstimatedValueMeta {
   id: string;
   dateLabel: string;
-  score: number;
+  score: number | null;
   bedtime: string;
   wakeTime: string;
   durationMinutes: number;
-  efficiency: number;
+  efficiency: number | null;
   remMinutes: number;
   deepMinutes: number;
-  consistency: number;
+  consistency: number | null;
   stages: SleepStageSegment[];
+  minBpm?: number | null;
+  maxBpm?: number | null;
+  avgHrv?: number | null;
 }
 
-export interface SleepHistorySnapshot {
-  headlineScore: number;
+export interface SleepHistorySnapshot extends EstimatedValueMeta {
+  headlineScore: number | null;
   headlineLabel: string;
   bedtime: string;
   wakeTime: string;
-  durationMinutes: number;
-  bedtimeConsistency: number;
-  wakeConsistency: number;
+  durationMinutes: number | null;
+  bedtimeConsistency: number | null;
+  wakeConsistency: number | null;
   scoreTrend: TrendPoint[];
   durationTrend: TrendPoint[];
   sessions: SleepSession[];
 }
 
-export interface HeartHistorySnapshot {
-  restingHr: number;
-  averageHr: number;
-  maxHr: number;
+export interface HeartHistorySnapshot extends EstimatedValueMeta {
+  restingHr: number | null;
+  averageHr: number | null;
+  maxHr: number | null;
   intraday: TrendPoint[];
   weeklyResting: TrendPoint[];
-  recoveryShift: number;
+  recoveryShift: number | null;
 }
 
-export interface MetricSeries {
+export interface MetricSeries extends EstimatedValueMeta {
   title: string;
   latest: number | null;
   average: number | null;
@@ -104,16 +123,18 @@ export interface MetricSeries {
   hasPartialData?: boolean;
 }
 
-export interface ActivitySummary {
+export interface ActivitySummary extends EstimatedValueMeta {
   id: string;
   title: string;
   timeLabel: string;
   durationMinutes: number;
-  strain: number;
-  calories: number;
+  strain: number | null;
+  calories: number | null;
+  strainLabel?: string;
+  caloriesLabel?: string;
 }
 
-export interface WellnessSnapshot {
+export interface WellnessSnapshot extends EstimatedValueMeta {
   stress: MetricSeries;
   spo2: MetricSeries;
   skinTemperature: MetricSeries;

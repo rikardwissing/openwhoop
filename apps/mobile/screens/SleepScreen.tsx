@@ -11,7 +11,7 @@ import { MetricCard } from '@/components/ui/MetricCard';
 import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
 import { colors, typography } from '@/constants/theme';
 import { useSleepHistory } from '@/hooks/useHealthData';
-import { formatCompactDuration, formatDuration } from '@/utils/formatters';
+import { formatCompactDuration, formatDuration, formatMetricValue, formatNullablePercent } from '@/utils/formatters';
 
 export function SleepScreen() {
   const state = useSleepHistory('14d');
@@ -33,7 +33,7 @@ export function SleepScreen() {
   }
 
   const data = state.data;
-  const latestSession = data.sessions[0];
+  const latestSession = data.sessions[0] ?? null;
 
   return (
     <ScreenShell>
@@ -55,9 +55,9 @@ export function SleepScreen() {
         <MetricCard
           accentColor={colors.aqua}
           style={styles.metricCard}
-          subtitle={`Wake consistency ${data.wakeConsistency}%`}
+          subtitle={`Wake consistency ${formatNullablePercent(data.wakeConsistency)}`}
           title="Bedtime Rhythm"
-          value={`${data.bedtimeConsistency}%`}
+          value={formatNullablePercent(data.bedtimeConsistency)}
         />
       </View>
 
@@ -73,23 +73,29 @@ export function SleepScreen() {
       </GlassCard>
 
       <GlassCard accentColor={colors.indigo}>
-        <SectionHeader title="Last Night Stages" trailing={latestSession.dateLabel} />
-        <SleepStageChart
-          endLabel={latestSession.wakeTime}
-          middleLabel="3:00 AM"
-          segments={latestSession.stages}
-          startLabel={latestSession.bedtime}
-        />
-        <View style={styles.sessionStats}>
-          <Text style={styles.sessionStat}>Efficiency {latestSession.efficiency}%</Text>
-          <Text style={styles.sessionStat}>REM {latestSession.remMinutes}m</Text>
-          <Text style={styles.sessionStat}>Deep {latestSession.deepMinutes}m</Text>
-        </View>
+        <SectionHeader title="Last Night Stages" trailing={latestSession?.dateLabel ?? 'Waiting'} />
+        {latestSession ? (
+          <>
+            <SleepStageChart
+              endLabel={latestSession.wakeTime}
+              middleLabel="3:00 AM"
+              segments={latestSession.stages}
+              startLabel={latestSession.bedtime}
+            />
+            <View style={styles.sessionStats}>
+              <Text style={styles.sessionStat}>Efficiency {formatNullablePercent(latestSession.efficiency)}</Text>
+              <Text style={styles.sessionStat}>REM {latestSession.remMinutes}m</Text>
+              <Text style={styles.sessionStat}>Deep {latestSession.deepMinutes}m</Text>
+            </View>
+          </>
+        ) : (
+          <Text style={styles.emptyText}>{data.missingReason ?? 'Sleep stages will appear after the first full overnight sync.'}</Text>
+        )}
       </GlassCard>
 
       <GlassCard accentColor={colors.success}>
         <SectionHeader title="Recent Nights" trailing="Most recent sessions" />
-        {data.sessions.map((session, index) => (
+        {data.sessions.length > 0 ? data.sessions.map((session, index) => (
           <View key={session.id} style={[styles.sessionRow, index < data.sessions.length - 1 ? styles.sessionDivider : null]}>
             <View>
               <Text style={styles.sessionDate}>{session.dateLabel}</Text>
@@ -98,11 +104,13 @@ export function SleepScreen() {
               </Text>
             </View>
             <View style={styles.sessionMeta}>
-              <Text style={styles.sessionScore}>{session.score}</Text>
+              <Text style={styles.sessionScore}>{formatMetricValue(session.score, 0)}</Text>
               <Ionicons color={colors.success} name="moon" size={16} />
             </View>
           </View>
-        ))}
+        )) : (
+          <Text style={styles.emptyText}>{data.missingReason ?? 'Recent nights will appear after the first full overnight sync.'}</Text>
+        )}
       </GlassCard>
     </ScreenShell>
   );
@@ -163,6 +171,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     flexDirection: 'row',
     gap: 8,
+  },
+  emptyText: {
+    color: colors.muted,
+    fontFamily: typography.body,
+    fontSize: 14,
+    lineHeight: 22,
   },
   sessionScore: {
     color: colors.text,

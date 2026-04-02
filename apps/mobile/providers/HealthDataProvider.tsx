@@ -1,9 +1,21 @@
 import { createContext, useContext, useState, type ReactNode } from 'react';
+import { useSQLiteContext } from 'expo-sqlite';
 
 import type { HealthRepository } from '@/data/HealthRepository';
-import { MockHealthRepository } from '@/data/mock/MockHealthRepository';
+import { SQLiteHealthRepository } from '@/data/sqlite/SQLiteHealthRepository';
 
 const HealthRepositoryContext = createContext<HealthRepository | null>(null);
+
+function SQLiteRepositoryProvider({ children }: { children: ReactNode }) {
+  const db = useSQLiteContext();
+  const [value] = useState<HealthRepository>(() => new SQLiteHealthRepository(db));
+
+  return (
+    <HealthRepositoryContext.Provider value={value}>
+      {children}
+    </HealthRepositoryContext.Provider>
+  );
+}
 
 export function HealthDataProvider({
   children,
@@ -12,13 +24,15 @@ export function HealthDataProvider({
   children: ReactNode;
   repository?: HealthRepository;
 }) {
-  const [value] = useState<HealthRepository>(() => repository ?? new MockHealthRepository());
+  if (repository) {
+    return (
+      <HealthRepositoryContext.Provider value={repository}>
+        {children}
+      </HealthRepositoryContext.Provider>
+    );
+  }
 
-  return (
-    <HealthRepositoryContext.Provider value={value}>
-      {children}
-    </HealthRepositoryContext.Provider>
-  );
+  return <SQLiteRepositoryProvider>{children}</SQLiteRepositoryProvider>;
 }
 
 export function useHealthRepository() {
