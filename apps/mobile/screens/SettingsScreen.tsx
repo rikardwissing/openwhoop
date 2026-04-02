@@ -6,13 +6,20 @@ import { ScreenShell } from '@/components/layout/ScreenShell';
 import { SectionHeader } from '@/components/layout/SectionHeader';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { StatChip } from '@/components/ui/StatChip';
-import { appIcon } from '@/constants/assets';
+import { brandMark } from '@/constants/assets';
+import { brand } from '@/constants/brand';
 import { colors, typography } from '@/constants/theme';
 import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
 import { useOptionalAppDatabase } from '@/providers/AppDatabaseProvider';
 import { useWearableSync } from '@/providers/WearableSyncProvider';
 import { exportAndShareDatabaseSnapshot } from '@/services/databaseExport';
-import { describeBatteryStatus, describeChargingState, describeWearState, isBlockingSyncStatus } from '@/types/device';
+import {
+  describeBatteryStatus,
+  describeChargingState,
+  describeWearState,
+  isBlockingSyncStatus,
+  type BackgroundTaskApiStatus,
+} from '@/types/device';
 
 function batteryAccent(batteryPercent: number | null) {
   if (batteryPercent === null) {
@@ -130,17 +137,38 @@ function describeBackgroundResult(result: 'success' | 'skipped' | 'error' | null
   }
 }
 
+function describeBackgroundApiStatus(status: BackgroundTaskApiStatus) {
+  switch (status) {
+    case 'available':
+      return 'Available';
+    case 'restricted':
+      return 'Restricted';
+    default:
+      return 'Unknown';
+  }
+}
+
 export function SettingsScreen() {
   const router = useRouter();
   const db = useOptionalAppDatabase();
-  const { backgroundSyncState, deviceState, liveEvents, progress, forgetDevice, syncSelected, restartDevice } = useWearableSync();
+  const {
+    backgroundSyncDiagnostics,
+    backgroundSyncState,
+    deviceState,
+    liveEvents,
+    progress,
+    forgetDevice,
+    syncSelected,
+    triggerBackgroundSyncTest,
+    restartDevice,
+  } = useWearableSync();
   const { onRefresh, refreshing } = useWearableRefreshControl();
   const [exportState, setExportState] = useState<{
     status: 'idle' | 'running' | 'success' | 'error';
     message: string;
   }>({
     status: 'idle',
-    message: 'Create a portable btwearable.db snapshot and share it straight from the phone.',
+    message: 'Create a portable local data snapshot and share it straight from the phone.',
   });
   const deviceBusy = isBlockingSyncStatus(progress.status);
   const batteryChipAccent = batteryAccent(deviceState.batteryPercent);
@@ -159,14 +187,14 @@ export function SettingsScreen() {
 
     setExportState({
       status: 'running',
-      message: 'Preparing a fresh btwearable.db snapshot...',
+      message: 'Preparing a fresh local data snapshot...',
     });
 
     try {
       const result = await exportAndShareDatabaseSnapshot(db);
       setExportState({
         status: 'success',
-        message: `Prepared ${result.fileName} (${formatBytes(result.sizeBytes)}). Save or send that file back here and I can inspect the raw data directly.`,
+        message: `Prepared a local data snapshot (${formatBytes(result.sizeBytes)}). Share it from this phone if you want help inspecting the raw sync history.`,
       });
     } catch (error) {
       setExportState({
@@ -177,20 +205,28 @@ export function SettingsScreen() {
   }
 
   return (
-    <ScreenShell onRefresh={onRefresh} refreshing={refreshing}>
+    <ScreenShell
+      headerIcon="settings"
+      headerSettingsActive
+      headerTitle="Settings"
+      onRefresh={onRefresh}
+      refreshing={refreshing}>
       <View>
-        <SectionHeader title="Settings" trailing="Manual sync" />
-        <Text style={styles.subtitle}>Local-only device sync and the offline data store that powers every tab.</Text>
+        <Text style={styles.subtitle}>Open wearable insights with local-only sync and the offline data store that powers every tab.</Text>
       </View>
 
       <GlassCard accentColor={colors.primary}>
         <View style={styles.profileRow}>
-          <Image source={appIcon} style={styles.profileIcon} />
+          <View style={styles.profileMarkWrap}>
+            <Image resizeMode="contain" source={brandMark} style={styles.profileIcon} />
+          </View>
           <View style={styles.profileText}>
-            <Text style={styles.profileTitle}>BtWearable</Text>
-            <Text style={styles.profileSubtitle}>SQLite + BLE development build</Text>
+            <Text style={styles.profileEyebrow}>{brand.promise}</Text>
+            <Text style={styles.profileTitle}>{brand.appName}</Text>
+            <Text style={styles.profileSubtitle}>{brand.tagline}</Text>
           </View>
         </View>
+        <Text style={styles.profileManifesto}>{brand.manifesto}</Text>
       </GlassCard>
 
       <GlassCard accentColor={colors.cyan}>
@@ -198,7 +234,7 @@ export function SettingsScreen() {
         <View style={styles.settingRow}>
           <View>
             <Text style={styles.settingTitle}>Dark theme</Text>
-            <Text style={styles.settingSubtitle}>This build stays in the neon dark mode you approved.</Text>
+            <Text style={styles.settingSubtitle}>This build stays in Unstrap's neon dark mode.</Text>
           </View>
           <Switch disabled trackColor={{ false: colors.border, true: colors.primary }} value />
         </View>
@@ -296,6 +332,21 @@ export function SettingsScreen() {
         <View style={styles.settingColumn}>
           <View style={styles.chipWrap}>
             <StatChip
+              accent={backgroundSyncDiagnostics.apiStatus === 'available' ? colors.success : colors.borderStrong}
+              label="API"
+              value={describeBackgroundApiStatus(backgroundSyncDiagnostics.apiStatus)}
+            />
+            <StatChip
+              accent={backgroundSyncDiagnostics.isTaskRegistered ? colors.success : colors.borderStrong}
+              label="Registered"
+              value={backgroundSyncDiagnostics.isTaskRegistered ? 'Yes' : 'No'}
+            />
+            <StatChip
+              accent={colors.borderStrong}
+              label="Min interval"
+              value={`${backgroundSyncDiagnostics.minimumIntervalMinutes}m`}
+            />
+            <StatChip
               accent={deviceState.id ? colors.success : colors.borderStrong}
               label="Status"
               value={deviceState.id ? 'Enabled' : 'No wearable'}
@@ -324,11 +375,31 @@ export function SettingsScreen() {
           </View>
 
           <Text style={styles.roadmapText}>
-            Background sync is best effort on iPhone while the app stays in the background or suspended. If you force-quit the app from the app switcher, iOS stops relaunching it for this work until you open it again.
+            Background sync is best effort on iPhone while the app stays in the background or suspended. iOS chooses the actual run time, and short intervals are often delayed substantially.
           </Text>
           <Text style={styles.roadmapText}>
-            Keep the official wearable app closed while BtWearable owns the strap. Two apps syncing the same device can race each other and create gaps.
+            If you force-quit the app from the app switcher, iOS stops relaunching it for this work until you open it again.
           </Text>
+          <Text style={styles.roadmapText}>
+            Keep the official wearable app closed while Unstrap owns the strap. Two apps syncing the same device can race each other and create gaps.
+          </Text>
+          {__DEV__ ? (
+            <>
+              <View style={styles.buttonRow}>
+                <ActionButton
+                  label="Trigger test run"
+                  onPress={() => {
+                    void triggerBackgroundSyncTest();
+                  }}
+                  disabled={!deviceState.id || progress.status === 'scanning' || deviceBusy}
+                  tone="secondary"
+                />
+              </View>
+              <Text style={styles.settingSubtitle}>
+                Debug only. This uses Expo's test hook to run the background worker immediately on a physical development build.
+              </Text>
+            </>
+          ) : null}
           {backgroundSyncState.lastError ? <Text style={styles.errorText}>{backgroundSyncState.lastError}</Text> : null}
         </View>
       </GlassCard>
@@ -337,15 +408,15 @@ export function SettingsScreen() {
         <SectionHeader title="Export for Analysis" trailing="SQLite snapshot" />
         <View style={styles.settingColumn}>
           <View>
-            <Text style={styles.settingTitle}>Raw database export</Text>
+            <Text style={styles.settingTitle}>Unlocked data snapshot</Text>
             <Text style={styles.settingSubtitle}>
-              Generates a shareable copy of btwearable.db so you can send the exact phone data back for analysis.
+              Generate a shareable SQLite snapshot if you want help inspecting what this phone has already synced.
             </Text>
           </View>
 
           <View style={styles.buttonRow}>
             <ActionButton
-              label={exportState.status === 'running' ? 'Exporting...' : 'Export Database'}
+              label={exportState.status === 'running' ? 'Exporting...' : 'Export Snapshot'}
               onPress={() => {
                 void handleExportDatabase();
               }}
@@ -378,12 +449,29 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 14,
   },
+  profileMarkWrap: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(10, 21, 28, 0.92)',
+    borderColor: colors.border,
+    borderRadius: 24,
+    borderWidth: 1,
+    height: 72,
+    justifyContent: 'center',
+    width: 72,
+  },
   profileIcon: {
     height: 56,
     width: 56,
   },
   profileText: {
     flex: 1,
+  },
+  profileEyebrow: {
+    color: colors.primaryBright,
+    fontFamily: typography.bodyBold,
+    fontSize: 12,
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
   },
   profileTitle: {
     color: colors.text,
@@ -395,6 +483,13 @@ const styles = StyleSheet.create({
     fontFamily: typography.body,
     fontSize: 13,
     marginTop: 4,
+  },
+  profileManifesto: {
+    color: colors.text,
+    fontFamily: typography.bodySemiBold,
+    fontSize: 14,
+    lineHeight: 22,
+    marginTop: 16,
   },
   settingRow: {
     alignItems: 'center',

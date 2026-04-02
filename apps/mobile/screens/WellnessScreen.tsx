@@ -80,7 +80,7 @@ export function WellnessScreen() {
 
   if (!data && state.status === 'loading') {
     return (
-      <ScreenShell onRefresh={onRefresh} refreshing={refreshing}>
+      <ScreenShell headerIcon="wellness" headerTitle="Wellness" onRefresh={onRefresh} refreshing={refreshing}>
         <LoadingState label="Loading wellness metrics..." variant="inline" />
       </ScreenShell>
     );
@@ -88,7 +88,7 @@ export function WellnessScreen() {
 
   if (!data && state.status === 'error') {
     return (
-      <ScreenShell onRefresh={onRefresh} refreshing={refreshing}>
+      <ScreenShell headerIcon="wellness" headerTitle="Wellness" onRefresh={onRefresh} refreshing={refreshing}>
         <ErrorState message="Unable to load the wellness board right now." variant="inline" />
       </ScreenShell>
     );
@@ -99,13 +99,12 @@ export function WellnessScreen() {
   }
 
   return (
-    <ScreenShell onRefresh={onRefresh} refreshing={refreshing}>
+    <ScreenShell headerIcon="wellness" headerTitle="Wellness" onRefresh={onRefresh} refreshing={refreshing}>
       {state.status === 'error' ? (
         <ErrorState message="Showing the last wellness snapshot while refresh catches up." variant="inline" />
       ) : null}
       <View>
-        <SectionHeader title="Wellness" trailing="Signals and trends" />
-        <Text style={styles.subtitle}>Stress, oxygen, temperature, recovery, and recent activity.</Text>
+        <Text style={styles.subtitle}>Stress, oxygen, temperature, recovery, and recent activity trends.</Text>
       </View>
 
       <WellnessMetricCard metric={data.stress} />

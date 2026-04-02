@@ -1,6 +1,7 @@
 import * as Notifications from 'expo-notifications';
 import type { SQLiteDatabase } from 'expo-sqlite';
 
+import { brand } from '@/constants/brand';
 import { getBackgroundSyncState } from '@/services/background/backgroundSyncState';
 import type { BackgroundSyncResult } from '@/types/device';
 
@@ -47,27 +48,27 @@ function buildBackgroundSyncNotificationContent(params: {
         title: 'Background sync complete',
         body:
           params.importedReadings > 0
-            ? `BtWearable synced ${params.importedReadings} new reading${params.importedReadings === 1 ? '' : 's'} in the background.`
-            : 'BtWearable checked your wearable in the background and found no new readings.',
+            ? `${brand.appName} synced ${params.importedReadings} new reading${params.importedReadings === 1 ? '' : 's'} in the background. Your data is unlocked and ready.`
+            : `${brand.appName} checked your wearable in the background and found no new readings.`,
       };
     case 'skipped':
       return {
         title: 'Background sync skipped',
         body: params.error
-          ? `BtWearable skipped this background sync: ${params.error}`
-          : 'BtWearable skipped this background sync and will try again later.',
+          ? `${brand.appName} skipped this background sync: ${params.error}`
+          : `${brand.appName} skipped this background sync and will try again later.`,
       };
     case 'error':
       return {
         title: 'Background sync failed',
         body: params.error
-          ? `BtWearable hit a background sync error: ${params.error}`
-          : 'BtWearable hit a background sync error. Open Settings for more details.',
+          ? `${brand.appName} hit a background sync error: ${params.error}`
+          : `${brand.appName} hit a background sync error. Open Settings for more details.`,
       };
     default:
       return {
         title: 'Background sync update',
-        body: 'BtWearable finished a background sync run.',
+        body: `${brand.appName} finished a background sync run.`,
       };
   }
 }

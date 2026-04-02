@@ -2,7 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'react-native';
 import { Tabs } from 'expo-router';
 
-import { appIcon } from '@/constants/assets';
+import { brandMark } from '@/constants/assets';
 import { colors, typography } from '@/constants/theme';
 
 function TabIcon({
@@ -19,10 +19,11 @@ function TabIcon({
   if (today) {
     return (
       <Image
-        source={appIcon}
+        resizeMode="contain"
+        source={brandMark}
         style={{
-          width: focused ? 24 : 22,
-          height: focused ? 24 : 22,
+          width: focused ? 28 : 25,
+          height: focused ? 28 : 25,
           opacity: focused ? 1 : 0.75,
         }}
       />
@@ -94,6 +95,7 @@ export default function TabLayout() {
       <Tabs.Screen
         name="settings"
         options={{
+          href: null,
           title: 'Settings',
           tabBarIcon: ({ color, focused }) => (
             <TabIcon color={color} focused={focused} icon="settings-sharp" />

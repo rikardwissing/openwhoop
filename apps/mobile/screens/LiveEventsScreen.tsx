@@ -1,9 +1,6 @@
-import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 
 import { ScreenShell } from '@/components/layout/ScreenShell';
-import { SectionHeader } from '@/components/layout/SectionHeader';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { colors, typography } from '@/constants/theme';
 import { useWearableSync } from '@/providers/WearableSyncProvider';
@@ -20,29 +17,16 @@ function eventTimestamp(event: WearableLiveEvent) {
 }
 
 export function LiveEventsScreen() {
-  const router = useRouter();
   const { deviceState, liveEvents } = useWearableSync();
 
   return (
-    <ScreenShell>
+    <ScreenShell headerIcon="live-events" headerTitle="Live Events">
       <View>
-        <Pressable
-          accessibilityRole="button"
-          onPress={() => {
-            router.back();
-          }}
-          style={({ pressed }) => [
-            styles.backButton,
-            pressed ? styles.backButtonPressed : null,
-          ]}>
-          <Ionicons color={colors.primary} name="arrow-back" size={18} />
-          <Text style={styles.backLabel}>Back to Settings</Text>
-        </Pressable>
-        <SectionHeader title="Live Events" trailing={`${liveEvents.length} seen`} />
         <Text style={styles.subtitle}>
           Meaningful wearable events and replies observed since this app session started
           {deviceState.name ? ` for ${deviceState.name}.` : '.'}
         </Text>
+        <Text style={styles.meta}>{liveEvents.length} seen in this app session</Text>
       </View>
 
       <GlassCard accentColor={colors.cyan}>
@@ -71,32 +55,18 @@ export function LiveEventsScreen() {
 }
 
 const styles = StyleSheet.create({
-  backButton: {
-    alignItems: 'center',
-    alignSelf: 'flex-start',
-    borderColor: colors.border,
-    borderRadius: 999,
-    borderWidth: 1,
-    flexDirection: 'row',
-    gap: 8,
-    marginBottom: 14,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-  },
-  backButtonPressed: {
-    opacity: 0.8,
-  },
-  backLabel: {
-    color: colors.text,
-    fontFamily: typography.bodySemiBold,
-    fontSize: 13,
-  },
   subtitle: {
     color: colors.muted,
     fontFamily: typography.body,
     fontSize: 15,
     lineHeight: 22,
-    marginTop: 6,
+  },
+  meta: {
+    color: colors.subtle,
+    fontFamily: typography.bodySemiBold,
+    fontSize: 12,
+    marginTop: 8,
+    textTransform: 'uppercase',
   },
   emptyState: {
     color: colors.muted,

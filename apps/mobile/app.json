@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "BtWearable",
+    "name": "Unstrap",
     "slug": "btwearable",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -8,22 +8,22 @@
     "scheme": "btwearable",
     "userInterfaceStyle": "dark",
     "splash": {
-      "image": "./assets/images/app-icon.png",
+      "image": "./assets/images/splash-screen.png",
       "resizeMode": "contain",
-      "backgroundColor": "#030711"
+      "backgroundColor": "#02060d"
     },
     "ios": {
       "bundleIdentifier": "com.rikardwissing.btwearable",
       "infoPlist": {
-        "NSBluetoothAlwaysUsageDescription": "BtWearable uses Bluetooth to connect to your wearable and sync health data directly to this iPhone."
+        "NSBluetoothAlwaysUsageDescription": "Unstrap uses Bluetooth to connect to your wearable and sync your data directly to this iPhone."
       },
       "supportsTablet": false,
       "appleTeamId": "3XYXJPF4QV"
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#030711",
-        "foregroundImage": "./assets/images/app-icon.png"
+        "backgroundColor": "#02060d",
+        "foregroundImage": "./assets/images/android-icon-foreground.png"
       },
       "package": "com.rikardwissing.btwearable",
       "predictiveBackGestureEnabled": false,
@@ -36,7 +36,7 @@
     "web": {
       "bundler": "metro",
       "output": "static",
-      "favicon": "./assets/images/app-icon.png"
+      "favicon": "./assets/images/favicon.png"
     },
     "plugins": [
       "expo-router",
@@ -47,7 +47,7 @@
           "modes": [
             "central"
           ],
-          "bluetoothAlwaysPermission": "BtWearable uses Bluetooth to connect to your wearable and sync health data directly to this iPhone."
+          "bluetoothAlwaysPermission": "Unstrap uses Bluetooth to connect to your wearable and sync your data directly to this iPhone."
         }
       ],
       "expo-sharing",

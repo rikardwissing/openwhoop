@@ -30,7 +30,7 @@ export function HeartScreen() {
 
   if (!data && state.status === 'loading') {
     return (
-      <ScreenShell onRefresh={onRefresh} refreshing={refreshing}>
+      <ScreenShell headerIcon="heart" headerTitle="Heart" onRefresh={onRefresh} refreshing={refreshing}>
         <LoadingState label="Loading intraday heart trends..." variant="inline" />
       </ScreenShell>
     );
@@ -38,7 +38,7 @@ export function HeartScreen() {
 
   if (!data && state.status === 'error') {
     return (
-      <ScreenShell onRefresh={onRefresh} refreshing={refreshing}>
+      <ScreenShell headerIcon="heart" headerTitle="Heart" onRefresh={onRefresh} refreshing={refreshing}>
         <ErrorState message="Unable to load heart history right now." variant="inline" />
       </ScreenShell>
     );
@@ -49,13 +49,12 @@ export function HeartScreen() {
   }
 
   return (
-    <ScreenShell onRefresh={onRefresh} refreshing={refreshing}>
+    <ScreenShell headerIcon="heart" headerTitle="Heart" onRefresh={onRefresh} refreshing={refreshing}>
       {state.status === 'error' ? (
         <ErrorState message="Showing the last heart snapshot while refresh catches up." variant="inline" />
       ) : null}
       <View>
-        <SectionHeader title="Heart" trailing="Daily profile" />
-        <Text style={styles.subtitle}>Heart rate range, resting trend, and recovery cues.</Text>
+        <Text style={styles.subtitle}>Heart rate range, resting trend, and recovery cues across your daily profile.</Text>
       </View>
 
       <View style={styles.metricGrid}>

@@ -38,8 +38,8 @@ const HELPER_EXTENSION = `private extension AppDelegate {
 
   func scheduleKeepAliveReminder() {
     let content = UNMutableNotificationContent()
-    content.title = "Keep BtWearable open in the background"
-    content.body = "If you fully close the app, iPhone is less likely to run wearable syncs in the background."
+    content.title = "Keep Unstrap open in the background"
+    content.body = "If you fully close Unstrap, iPhone is less likely to keep your wearable insights syncing in the background."
     content.sound = nil
     content.userInfo = [
       "route": keepAliveReminderRoute

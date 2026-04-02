@@ -35,6 +35,13 @@ jest.mock('@/services/background/backgroundSyncTask', () => ({
   ensureBackgroundSyncRegistered: jest.fn(async () => {}),
   enableBackgroundSyncAfterPairing: jest.fn(async () => {}),
   disableBackgroundSync: jest.fn(async () => {}),
+  getBackgroundSyncDiagnostics: jest.fn(async () => ({
+    apiStatus: 'available',
+    isTaskDefined: true,
+    isTaskRegistered: true,
+    minimumIntervalMinutes: 15,
+  })),
+  triggerBackgroundSyncForTesting: jest.fn(async () => true),
 }));
 
 import { SleepStageChart } from '@/components/charts/SleepStageChart';
@@ -65,6 +72,7 @@ jest.mock('@/services/databaseExport', () => ({
 
 function createWearableContextValue(overrides: Partial<{
   deviceState: DeviceState;
+  backgroundSyncDiagnostics: typeof defaultWearableSyncContextValue.backgroundSyncDiagnostics;
   liveEvents: WearableLiveEvent[];
   progress: SyncProgress;
   scanResults: WearableScanResult[];
@@ -73,6 +81,7 @@ function createWearableContextValue(overrides: Partial<{
   selectDevice: (device: WearableScanResult) => Promise<void>;
   forgetDevice: () => Promise<void>;
   syncSelected: (options?: { showOverlay?: boolean }) => Promise<SyncResult | null>;
+  triggerBackgroundSyncTest: () => Promise<boolean>;
   restartDevice: () => Promise<void>;
   setAlarm: (unixSeconds: number) => Promise<void>;
   disableAlarm: () => Promise<void>;
@@ -145,6 +154,22 @@ describe('screen rendering', () => {
 
     expect(await screen.findByText('Live')).toBeTruthy();
     expect(await screen.findByText('68 bpm')).toBeTruthy();
+  });
+
+  it('opens settings from the shared header and shows the wearable battery badge', async () => {
+    const screen = renderWithProviders(<TodayScreen />, {
+      deviceState: {
+        id: 'strap-1',
+        name: 'Neo Strap',
+        batteryPercent: 85,
+      },
+    });
+
+    expect(await screen.findByText('85%')).toBeTruthy();
+
+    fireEvent.press(screen.getByLabelText('Open settings'));
+
+    expect(mockPush).toHaveBeenCalledWith('/settings');
   });
 
   it('runs sync from pull-to-refresh on dashboard screens when a wearable is selected', async () => {
@@ -261,19 +286,40 @@ describe('screen rendering', () => {
   it('renders the settings screen device controls', () => {
     const screen = renderWithProviders(<SettingsScreen />);
 
+    expect(screen.getByText('Unstrap')).toBeTruthy();
+    expect(screen.getByText('Your data. Unlocked.')).toBeTruthy();
     expect(screen.getByText('Selected Wearable')).toBeTruthy();
     expect(screen.getByText('Live events')).toBeTruthy();
     expect(screen.getByText('Restart wearable')).toBeTruthy();
     expect(screen.getByText('Export for Analysis')).toBeTruthy();
-    expect(screen.getByText('Export Database')).toBeTruthy();
+    expect(screen.getByText('Export Snapshot')).toBeTruthy();
     expect(screen.getByText('Battery')).toBeTruthy();
     expect(screen.getAllByText('Status').length).toBeGreaterThan(0);
     expect(screen.getByText('Charge')).toBeTruthy();
     expect(screen.getByText('Wear')).toBeTruthy();
+    expect(screen.getByText('API')).toBeTruthy();
+    expect(screen.getByText('Registered')).toBeTruthy();
+    expect(screen.getByText('15m')).toBeTruthy();
+    expect(screen.getByText('Trigger test run')).toBeTruthy();
     expect(screen.getAllByText('Unknown').length).toBeGreaterThan(0);
     expect(screen.getAllByText('--').length).toBeGreaterThan(0);
     expect(screen.queryByText('Scan nearby')).toBeNull();
     expect(screen.queryByText('Scan Results')).toBeNull();
+  });
+
+  it('runs the background sync test trigger from settings', () => {
+    const triggerBackgroundSyncTest = jest.fn(async () => true);
+    const screen = renderWithProviders(<SettingsScreen />, {
+      deviceState: {
+        id: 'strap-1',
+        name: 'Neo Strap',
+      },
+      triggerBackgroundSyncTest,
+    });
+
+    fireEvent.press(screen.getByText('Trigger test run'));
+
+    expect(triggerBackgroundSyncTest).toHaveBeenCalledTimes(1);
   });
 
   it('opens the live events screen from settings', () => {
@@ -310,7 +356,7 @@ describe('screen rendering', () => {
       },
     });
 
-    expect(screen.getByText('85%')).toBeTruthy();
+    expect(screen.getAllByText('85%').length).toBeGreaterThan(0);
     expect(screen.getByText('High')).toBeTruthy();
     expect(screen.getByText('Charging')).toBeTruthy();
     expect(screen.getByText('On body')).toBeTruthy();
@@ -369,6 +415,7 @@ describe('screen rendering', () => {
     });
 
     expect(screen.getByText('Pair Wearable')).toBeTruthy();
+    expect(screen.getByText('Connect your wearable. Unlock your data.')).toBeTruthy();
     expect(screen.getByText('Nearby Wearables')).toBeTruthy();
     expect(screen.getByText('Scanning for nearby wearables now...')).toBeTruthy();
     expect(scan).toHaveBeenCalledTimes(1);

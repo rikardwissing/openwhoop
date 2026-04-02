@@ -18,10 +18,10 @@ import {
 } from '@/services/background/backgroundSyncState';
 import { WearableSyncService } from '@/services/ble/WearableSyncService';
 import { formatSqliteDateTime } from '@/utils/dateTime';
-import type { NotificationPermissionState } from '@/types/device';
+import type { BackgroundSyncDiagnostics, NotificationPermissionState } from '@/types/device';
 
 export const BACKGROUND_SYNC_TASK_NAME = 'btwearable-background-sync';
-const BACKGROUND_SYNC_MIN_INTERVAL_MINUTES = 1;
+export const BACKGROUND_SYNC_MIN_INTERVAL_MINUTES = 15;
 
 if (typeof Notifications.setNotificationHandler === 'function') {
   Notifications.setNotificationHandler({
@@ -63,6 +63,38 @@ function mapNotificationPermission(settings: Notifications.NotificationPermissio
   }
 
   return 'denied';
+}
+
+function mapBackgroundTaskStatus(status: BackgroundTask.BackgroundTaskStatus): BackgroundSyncDiagnostics['apiStatus'] {
+  return status === BackgroundTask.BackgroundTaskStatus.Available ? 'available' : 'restricted';
+}
+
+export async function getBackgroundSyncDiagnostics(): Promise<BackgroundSyncDiagnostics> {
+  let apiStatus: BackgroundSyncDiagnostics['apiStatus'] = 'unknown';
+  let isTaskRegistered = false;
+
+  try {
+    apiStatus = mapBackgroundTaskStatus(await BackgroundTask.getStatusAsync());
+  } catch {}
+
+  try {
+    isTaskRegistered = await TaskManager.isTaskRegisteredAsync(BACKGROUND_SYNC_TASK_NAME);
+  } catch {}
+
+  return {
+    apiStatus,
+    isTaskDefined: TaskManager.isTaskDefined(BACKGROUND_SYNC_TASK_NAME),
+    isTaskRegistered,
+    minimumIntervalMinutes: BACKGROUND_SYNC_MIN_INTERVAL_MINUTES,
+  };
+}
+
+export async function triggerBackgroundSyncForTesting() {
+  if (!__DEV__) {
+    return false;
+  }
+
+  return BackgroundTask.triggerTaskWorkerForTestingAsync();
 }
 
 export async function syncNotificationPermissionFromSystem(

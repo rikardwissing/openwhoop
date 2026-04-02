@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useState } from 'react';
-import { Image, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 
 import { ChartReadout } from '@/components/charts/ChartReadout';
 import { TrendChart } from '@/components/charts/TrendChart';
@@ -10,7 +10,6 @@ import { GlassCard } from '@/components/ui/GlassCard';
 import { GlowRing } from '@/components/ui/GlowRing';
 import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
 import { StatChip } from '@/components/ui/StatChip';
-import { appIcon } from '@/constants/assets';
 import { colors, typography } from '@/constants/theme';
 import { useDashboardSnapshot } from '@/hooks/useHealthData';
 import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
@@ -38,7 +37,7 @@ export function TodayScreen() {
 
   if (!data && state.status === 'loading') {
     return (
-      <ScreenShell onRefresh={onRefresh} refreshing={refreshing}>
+      <ScreenShell headerIcon="today" headerTitle="Today" onRefresh={onRefresh} refreshing={refreshing}>
         <LoadingState label="Loading today's recovery snapshot..." variant="inline" />
       </ScreenShell>
     );
@@ -46,7 +45,7 @@ export function TodayScreen() {
 
   if (!data && state.status === 'error') {
     return (
-      <ScreenShell onRefresh={onRefresh} refreshing={refreshing}>
+      <ScreenShell headerIcon="today" headerTitle="Today" onRefresh={onRefresh} refreshing={refreshing}>
         <ErrorState message="Unable to load the dashboard right now." variant="inline" />
       </ScreenShell>
     );
@@ -82,15 +81,10 @@ export function TodayScreen() {
         : 'Selected strain point';
 
   return (
-    <ScreenShell onRefresh={onRefresh} refreshing={refreshing}>
+    <ScreenShell headerIcon="today" headerTitle="Today" onRefresh={onRefresh} refreshing={refreshing}>
       {state.status === 'error' ? (
         <ErrorState message="Showing the last dashboard snapshot while refresh catches up." variant="inline" />
       ) : null}
-      <View style={styles.topBar}>
-        <Image source={appIcon} style={styles.brandIcon} />
-        <Text style={styles.topTitle}>Today</Text>
-        <Ionicons color={colors.text} name="search" size={22} />
-      </View>
 
       <View>
         <Text style={styles.greeting}>{data.greeting}</Text>
@@ -246,21 +240,6 @@ export function TodayScreen() {
 }
 
 const styles = StyleSheet.create({
-  topBar: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: 4,
-  },
-  brandIcon: {
-    height: 28,
-    width: 28,
-  },
-  topTitle: {
-    color: colors.text,
-    fontFamily: typography.heading,
-    fontSize: 21,
-  },
   greeting: {
     color: colors.success,
     fontFamily: typography.headingMedium,

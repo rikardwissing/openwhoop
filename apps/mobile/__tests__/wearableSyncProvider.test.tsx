@@ -108,6 +108,13 @@ jest.mock('@/services/background/backgroundSyncTask', () => ({
   ensureBackgroundSyncRegistered: jest.fn(async () => {}),
   enableBackgroundSyncAfterPairing: jest.fn(async () => {}),
   disableBackgroundSync: jest.fn(async () => {}),
+  getBackgroundSyncDiagnostics: jest.fn(async () => ({
+    apiStatus: 'available',
+    isTaskDefined: true,
+    isTaskRegistered: true,
+    minimumIntervalMinutes: 15,
+  })),
+  triggerBackgroundSyncForTesting: jest.fn(async () => true),
 }));
 
 jest.mock('@/services/ble/WearableSyncService', () => ({
@@ -124,12 +131,16 @@ import {
   disableBackgroundSync,
   enableBackgroundSyncAfterPairing,
   ensureBackgroundSyncRegistered,
+  getBackgroundSyncDiagnostics,
+  triggerBackgroundSyncForTesting,
 } from '@/services/background/backgroundSyncTask';
 
 const mockGetBackgroundSyncState = jest.mocked(getBackgroundSyncState);
 const mockEnsureBackgroundSyncRegistered = jest.mocked(ensureBackgroundSyncRegistered);
 const mockEnableBackgroundSyncAfterPairing = jest.mocked(enableBackgroundSyncAfterPairing);
 const mockDisableBackgroundSync = jest.mocked(disableBackgroundSync);
+const mockGetBackgroundSyncDiagnostics = jest.mocked(getBackgroundSyncDiagnostics);
+const mockTriggerBackgroundSyncForTesting = jest.mocked(triggerBackgroundSyncForTesting);
 
 function buildLiveEvent(index: number): WearableLiveEvent {
   return {
@@ -168,7 +179,7 @@ function EventHarness() {
 }
 
 function BackgroundSyncHarness() {
-  const { pairDevice, forgetDevice } = useWearableSync();
+  const { pairDevice, forgetDevice, triggerBackgroundSyncTest } = useWearableSync();
 
   return (
     <View>
@@ -182,6 +193,12 @@ function BackgroundSyncHarness() {
         testID="forget-selected-device"
         onPress={() => {
           void forgetDevice();
+        }}
+      />
+      <Pressable
+        testID="trigger-background-test"
+        onPress={() => {
+          void triggerBackgroundSyncTest();
         }}
       />
     </View>
@@ -250,6 +267,8 @@ describe('WearableSyncProvider live events', () => {
     mockEnsureBackgroundSyncRegistered.mockClear();
     mockEnableBackgroundSyncAfterPairing.mockClear();
     mockDisableBackgroundSync.mockClear();
+    mockGetBackgroundSyncDiagnostics.mockClear();
+    mockTriggerBackgroundSyncForTesting.mockClear();
     mockServiceInstances.length = 0;
     mockAppState.currentState = 'active';
     appStateListeners.clear();
@@ -365,6 +384,23 @@ describe('WearableSyncProvider live events', () => {
 
     await waitFor(() => {
       expect(mockDisableBackgroundSync).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('triggers Expo background task testing from the provider', async () => {
+    jest.useFakeTimers();
+    const screen = renderBackgroundHarness();
+
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('trigger-background-test'));
+      await Promise.resolve();
+      await Promise.resolve();
+      jest.advanceTimersByTime(1200);
+    });
+
+    await waitFor(() => {
+      expect(mockTriggerBackgroundSyncForTesting).toHaveBeenCalledTimes(1);
+      expect(mockGetBackgroundSyncDiagnostics).toHaveBeenCalled();
     });
   });
 

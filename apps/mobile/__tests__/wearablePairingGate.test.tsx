@@ -29,6 +29,13 @@ jest.mock('@/services/background/backgroundSyncTask', () => ({
   ensureBackgroundSyncRegistered: jest.fn(async () => {}),
   enableBackgroundSyncAfterPairing: jest.fn(async () => {}),
   disableBackgroundSync: jest.fn(async () => {}),
+  getBackgroundSyncDiagnostics: jest.fn(async () => ({
+    apiStatus: 'available',
+    isTaskDefined: true,
+    isTaskRegistered: true,
+    minimumIntervalMinutes: 15,
+  })),
+  triggerBackgroundSyncForTesting: jest.fn(async () => true),
 }));
 
 import { WearablePairingGate } from '@/components/navigation/WearablePairingGate';

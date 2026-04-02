@@ -79,7 +79,7 @@ export function SleepScreen() {
 
   if (!data && state.status === 'loading') {
     return (
-      <ScreenShell onRefresh={onRefresh} refreshing={refreshing}>
+      <ScreenShell headerIcon="sleep" headerTitle="Sleep" onRefresh={onRefresh} refreshing={refreshing}>
         <LoadingState label="Loading sleep score and stage history..." variant="inline" />
       </ScreenShell>
     );
@@ -87,7 +87,7 @@ export function SleepScreen() {
 
   if (!data && state.status === 'error') {
     return (
-      <ScreenShell onRefresh={onRefresh} refreshing={refreshing}>
+      <ScreenShell headerIcon="sleep" headerTitle="Sleep" onRefresh={onRefresh} refreshing={refreshing}>
         <ErrorState message="Unable to load sleep history right now." variant="inline" />
       </ScreenShell>
     );
@@ -230,13 +230,12 @@ export function SleepScreen() {
   };
 
   return (
-    <ScreenShell onRefresh={onRefresh} refreshing={refreshing}>
+    <ScreenShell headerIcon="sleep" headerTitle="Sleep" onRefresh={onRefresh} refreshing={refreshing}>
       {state.status === 'error' ? (
         <ErrorState message="Showing the last sleep snapshot while refresh catches up." variant="inline" />
       ) : null}
       <View>
-        <SectionHeader title="Sleep" trailing="Last 14 nights" />
-        <Text style={styles.subtitle}>Rhythm, recovery, and stage balance.</Text>
+        <Text style={styles.subtitle}>Rhythm, recovery, and stage balance across the last 14 nights.</Text>
       </View>
 
       <GlowRing caption="Sleep Score" label={data.headlineLabel} score={data.headlineScore} size={238} />

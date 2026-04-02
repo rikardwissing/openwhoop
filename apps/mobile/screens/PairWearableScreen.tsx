@@ -1,10 +1,11 @@
-import { Ionicons } from '@expo/vector-icons';
 import { useEffect, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { ScreenShell } from '@/components/layout/ScreenShell';
 import { SectionHeader } from '@/components/layout/SectionHeader';
 import { GlassCard } from '@/components/ui/GlassCard';
+import { brandMark } from '@/constants/assets';
+import { brand } from '@/constants/brand';
 import { colors, typography } from '@/constants/theme';
 import { useWearableSync } from '@/providers/WearableSyncProvider';
 import { isBlockingSyncStatus, type WearableScanResult } from '@/types/device';
@@ -39,7 +40,7 @@ function ActionButton({
 }
 
 export function PairWearableScreen() {
-  const { progress, scanResults, scan, pairDevice } = useWearableSync();
+  const { deviceState, progress, scanResults, scan, pairDevice } = useWearableSync();
   const startedScanRef = useRef(false);
   const [selectingDeviceId, setSelectingDeviceId] = useState<string | null>(null);
   const deviceBusy = progress.status === 'scanning' || isBlockingSyncStatus(progress.status) || selectingDeviceId !== null;
@@ -69,26 +70,26 @@ export function PairWearableScreen() {
   const statusMessage =
     progress.status === 'idle' || progress.status === 'complete'
       ? scanResults.length > 0
-        ? 'Choose the wearable you want this phone to use.'
+        ? 'Choose the wearable you want this phone to unlock and sync locally.'
         : 'No wearable found yet. Keep the strap awake and scan again.'
       : progress.message;
 
   return (
-    <ScreenShell>
+    <ScreenShell headerIcon="pair" headerSettingsDisabled={!deviceState.id} headerTitle="Pair Wearable">
       <View>
-        <SectionHeader title="Pair Wearable" trailing={progress.status === 'scanning' ? 'Scanning' : 'Required'} />
         <Text style={styles.subtitle}>
-          Pick the strap you want this phone to own before using the app. After the first successful sync, background refresh stays enabled on iPhone while the app remains in the background.
+          Pair the strap you want this phone to own. After the first successful sync, Unstrap keeps your wearable insights local and can refresh in the background on iPhone.
         </Text>
       </View>
 
       <GlassCard accentColor={colors.primary}>
         <View style={styles.heroRow}>
           <View style={styles.heroBadge}>
-            <Ionicons color={colors.primary} name="bluetooth" size={24} />
+            <Image resizeMode="contain" source={brandMark} style={styles.heroLogo} />
           </View>
           <View style={styles.heroCopy}>
-            <Text style={styles.heroTitle}>Searching for your wearable</Text>
+            <Text style={styles.heroEyebrow}>{brand.pairingEyebrow}</Text>
+            <Text style={styles.heroTitle}>{brand.pairingTitle}</Text>
             <Text style={[styles.heroBody, progress.status === 'error' ? styles.errorText : null]}>
               {progress.status === 'error' ? progress.message : statusMessage}
             </Text>
@@ -139,7 +140,7 @@ export function PairWearableScreen() {
       <GlassCard accentColor={colors.violet}>
         <SectionHeader title="Background Sync Notes" trailing="iPhone v1" />
         <Text style={styles.emptyState}>
-          Keep the official wearable app closed while BtWearable is paired to this strap. If both apps sync the same device, they can compete for the same history and create gaps.
+          Keep the official wearable app closed while Unstrap is paired to this strap. If both apps sync the same device, they can compete for the same history and create gaps in your unlocked data.
         </Text>
       </GlassCard>
     </ScreenShell>
@@ -160,20 +161,33 @@ const styles = StyleSheet.create({
   },
   heroBadge: {
     alignItems: 'center',
-    backgroundColor: 'rgba(90, 200, 255, 0.14)',
-    borderRadius: 18,
-    height: 52,
+    backgroundColor: 'rgba(8, 18, 25, 0.94)',
+    borderColor: colors.border,
+    borderRadius: 20,
+    borderWidth: 1,
+    height: 64,
     justifyContent: 'center',
-    width: 52,
+    width: 64,
+  },
+  heroLogo: {
+    height: 44,
+    width: 44,
   },
   heroCopy: {
     flex: 1,
     gap: 4,
   },
+  heroEyebrow: {
+    color: colors.primaryBright,
+    fontFamily: typography.bodyBold,
+    fontSize: 12,
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
+  },
   heroTitle: {
     color: colors.text,
-    fontFamily: typography.bodySemiBold,
-    fontSize: 17,
+    fontFamily: typography.headingMedium,
+    fontSize: 19,
   },
   heroBody: {
     color: colors.muted,

@@ -3,16 +3,25 @@ import type { ReactNode } from 'react';
 import { RefreshControl, ScrollView, StyleSheet, View, type StyleProp, type ViewStyle } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { AppHeader, type AppHeaderIcon } from '@/components/layout/AppHeader';
 import { colors, spacing } from '@/constants/theme';
 
 export function ScreenShell({
   children,
   contentStyle,
+  headerIcon,
+  headerSettingsActive = false,
+  headerSettingsDisabled = false,
+  headerTitle,
   onRefresh,
   refreshing = false,
 }: {
   children: ReactNode;
   contentStyle?: StyleProp<ViewStyle>;
+  headerIcon?: AppHeaderIcon;
+  headerSettingsActive?: boolean;
+  headerSettingsDisabled?: boolean;
+  headerTitle?: string;
   onRefresh?: () => void;
   refreshing?: boolean;
 }) {
@@ -44,6 +53,14 @@ export function ScreenShell({
             ) : undefined
           }
           showsVerticalScrollIndicator={false}>
+          {headerTitle && headerIcon ? (
+            <AppHeader
+              icon={headerIcon}
+              settingsActive={headerSettingsActive}
+              settingsDisabled={headerSettingsDisabled}
+              title={headerTitle}
+            />
+          ) : null}
           {children}
         </ScrollView>
       </SafeAreaView>

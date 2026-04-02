@@ -4,19 +4,43 @@ import { AppState, type AppStateStatus } from 'react-native';
 
 import { useHealthRepository, useRefreshHealthData } from '@/providers/HealthDataProvider';
 import { getBackgroundSyncState } from '@/services/background/backgroundSyncState';
-import { disableBackgroundSync, enableBackgroundSyncAfterPairing, ensureBackgroundSyncRegistered } from '@/services/background/backgroundSyncTask';
+import {
+  disableBackgroundSync,
+  enableBackgroundSyncAfterPairing,
+  ensureBackgroundSyncRegistered,
+  getBackgroundSyncDiagnostics,
+  triggerBackgroundSyncForTesting,
+} from '@/services/background/backgroundSyncTask';
 import { WearableSyncService } from '@/services/ble/WearableSyncService';
-import { isBlockingSyncStatus, type BackgroundSyncState, type DeviceState, type SyncProgress, type SyncResult, type WearableLiveEvent, type WearableScanResult } from '@/types/device';
+import {
+  isBlockingSyncStatus,
+  type BackgroundSyncDiagnostics,
+  type BackgroundSyncState,
+  type DeviceState,
+  type SyncProgress,
+  type SyncResult,
+  type WearableLiveEvent,
+  type WearableScanResult,
+} from '@/types/device';
 import { parseSqliteDateTime } from '@/utils/dateTime';
 
 const MAX_LIVE_EVENTS = 200;
 const FOREGROUND_AUTO_SYNC_INTERVAL_MS = 15 * 60 * 1000;
 const FOREGROUND_AUTO_SYNC_MIN_DELAY_MS = 5 * 1000;
+const BACKGROUND_TEST_POLL_INTERVAL_MS = 250;
+const BACKGROUND_TEST_TIMEOUT_MS = 4_000;
+
+function delay(ms: number) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
 
 interface WearableSyncContextValue {
   isReady: boolean;
   deviceState: DeviceState;
   backgroundSyncState: BackgroundSyncState;
+  backgroundSyncDiagnostics: BackgroundSyncDiagnostics;
   liveEvents: WearableLiveEvent[];
   progress: SyncProgress;
   scanResults: WearableScanResult[];
@@ -25,6 +49,7 @@ interface WearableSyncContextValue {
   selectDevice: (device: WearableScanResult) => Promise<void>;
   forgetDevice: () => Promise<void>;
   syncSelected: (options?: { showOverlay?: boolean }) => Promise<SyncResult | null>;
+  triggerBackgroundSyncTest: () => Promise<boolean>;
   restartDevice: () => Promise<void>;
   setAlarm: (unixSeconds: number) => Promise<void>;
   disableAlarm: () => Promise<void>;
@@ -59,6 +84,12 @@ export const defaultWearableSyncContextValue: WearableSyncContextValue = {
     notificationPermission: 'unknown',
     notificationBaselineAt: null,
   },
+  backgroundSyncDiagnostics: {
+    apiStatus: 'unknown',
+    isTaskDefined: false,
+    isTaskRegistered: false,
+    minimumIntervalMinutes: 15,
+  },
   liveEvents: [],
   progress: {
     status: 'idle',
@@ -70,6 +101,7 @@ export const defaultWearableSyncContextValue: WearableSyncContextValue = {
   selectDevice: async () => {},
   forgetDevice: async () => {},
   syncSelected: async () => null,
+  triggerBackgroundSyncTest: async () => false,
   restartDevice: async () => {},
   setAlarm: async () => {},
   disableAlarm: async () => {},
@@ -101,6 +133,9 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
   const [backgroundSyncState, setBackgroundSyncState] = useState<BackgroundSyncState>(
     defaultWearableSyncContextValue.backgroundSyncState,
   );
+  const [backgroundSyncDiagnostics, setBackgroundSyncDiagnostics] = useState<BackgroundSyncDiagnostics>(
+    defaultWearableSyncContextValue.backgroundSyncDiagnostics,
+  );
   const [liveEvents, setLiveEvents] = useState<WearableLiveEvent[]>([]);
   const [progress, setProgress] = useState<SyncProgress>(defaultWearableSyncContextValue.progress);
   const [scanResults, setScanResults] = useState<WearableScanResult[]>([]);
@@ -122,14 +157,21 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
     } catch {}
   }, [db]);
 
+  const refreshBackgroundDiagnostics = useCallback(async () => {
+    try {
+      setBackgroundSyncDiagnostics(await getBackgroundSyncDiagnostics());
+    } catch {}
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
 
-    Promise.all([service.getDeviceState(), getBackgroundSyncState(db)])
-      .then(([state, nextBackgroundState]) => {
+    Promise.all([service.getDeviceState(), getBackgroundSyncState(db), getBackgroundSyncDiagnostics()])
+      .then(([state, nextBackgroundState, nextBackgroundDiagnostics]) => {
         if (!cancelled) {
           setDeviceState(state);
           setBackgroundSyncState(nextBackgroundState);
+          setBackgroundSyncDiagnostics(nextBackgroundDiagnostics);
         }
       })
       .catch(() => {})
@@ -166,13 +208,17 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
 
     if (!deviceState.id) {
       setBackgroundSyncState(defaultWearableSyncContextValue.backgroundSyncState);
+      void refreshBackgroundDiagnostics();
       return;
     }
 
     void ensureBackgroundSyncRegistered(deviceState.id)
-      .then(() => refreshBackgroundState())
+      .then(async () => {
+        await refreshBackgroundState();
+        await refreshBackgroundDiagnostics();
+      })
       .catch(() => {});
-  }, [deviceState.id, isReady, refreshBackgroundState]);
+  }, [deviceState.id, isReady, refreshBackgroundDiagnostics, refreshBackgroundState]);
 
   useEffect(() => {
     let cancelled = false;
@@ -256,6 +302,7 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
       isReady,
       deviceState,
       backgroundSyncState,
+      backgroundSyncDiagnostics,
       liveEvents,
       progress,
       scanResults,
@@ -292,6 +339,7 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
         if (result) {
           await enableBackgroundSyncAfterPairing(device.id);
           await refreshBackgroundState();
+          await refreshBackgroundDiagnostics();
         }
         return result;
       },
@@ -313,6 +361,7 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
         setLastSyncAttemptAtMs(null);
         setDeviceState(emptyDeviceState);
         setBackgroundSyncState(defaultWearableSyncContextValue.backgroundSyncState);
+        await refreshBackgroundDiagnostics();
         setScanResults([]);
         setProgress({
           status: 'idle',
@@ -320,6 +369,84 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
         });
       },
       syncSelected: async (options) => runSyncSelected(options),
+      triggerBackgroundSyncTest: async () => {
+        const baselineState = await getBackgroundSyncState(db).catch(
+          () => defaultWearableSyncContextValue.backgroundSyncState,
+        );
+        const diagnostics = await getBackgroundSyncDiagnostics().catch(
+          () => defaultWearableSyncContextValue.backgroundSyncDiagnostics,
+        );
+
+        setBackgroundSyncDiagnostics(diagnostics);
+
+        if (!deviceState.id) {
+          setProgress({
+            status: 'error',
+            message: 'Select a wearable before testing background sync.',
+          });
+          return false;
+        }
+
+        if (diagnostics.apiStatus !== 'available') {
+          setProgress({
+            status: 'error',
+            message: 'Background tasks are unavailable on this build or device. Use a physical iPhone development build.',
+          });
+          return false;
+        }
+
+        if (!diagnostics.isTaskRegistered) {
+          setProgress({
+            status: 'error',
+            message: 'The background task is not registered yet. Pair the wearable again or reopen the app and check Registered.',
+          });
+          return false;
+        }
+
+        setProgress({
+          status: 'refreshing',
+          message: 'Triggering background sync test...',
+        });
+
+        const triggered = await triggerBackgroundSyncForTesting();
+        await refreshBackgroundDiagnostics();
+
+        if (!triggered) {
+          setProgress({
+            status: 'error',
+            message: 'Background task testing is only available in a development build on a physical device.',
+          });
+          return false;
+        }
+
+        const deadline = Date.now() + BACKGROUND_TEST_TIMEOUT_MS;
+        while (Date.now() < deadline) {
+          await delay(BACKGROUND_TEST_POLL_INTERVAL_MS);
+          const nextState = await getBackgroundSyncState(db).catch(() => null);
+          if (!nextState) {
+            continue;
+          }
+
+          setBackgroundSyncState(nextState);
+
+          if (
+            nextState.lastRunStartedAt !== baselineState.lastRunStartedAt ||
+            nextState.lastRunFinishedAt !== baselineState.lastRunFinishedAt
+          ) {
+            setProgress({
+              status: 'complete',
+              message: 'Background sync test ran. Check Last run and Last result below.',
+            });
+            return true;
+          }
+        }
+
+        setProgress({
+          status: 'error',
+          message: 'The test trigger was sent, but no background run was recorded. Check API, Registered, and Xcode logs if it still stays idle.',
+        });
+        return false;
+      },
       restartDevice: async () => {
         try {
           await service.restartDevice(
@@ -378,11 +505,13 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
     }),
     [
       appendLiveEvent,
+      backgroundSyncDiagnostics,
       backgroundSyncState,
       deviceState,
       isReady,
       liveEvents,
       progress,
+      refreshBackgroundDiagnostics,
       refreshBackgroundState,
       resetLiveEvents,
       runSyncSelected,

@@ -2,6 +2,7 @@ import { File, Paths } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import type { SQLiteDatabase } from 'expo-sqlite';
 
+import { brand } from '@/constants/brand';
 import { APP_DATABASE_NAME } from '@/db/schema';
 
 const EXPORT_DIRECTORY_NAME = 'exports';
@@ -29,7 +30,7 @@ export async function exportAndShareDatabaseSnapshot(db: SQLiteDatabase): Promis
   exportFile.write(serializedDatabase);
 
   await Sharing.shareAsync(exportFile.uri, {
-    dialogTitle: 'Export BtWearable Database',
+    dialogTitle: `Export ${brand.appName} data snapshot`,
   });
 
   return {

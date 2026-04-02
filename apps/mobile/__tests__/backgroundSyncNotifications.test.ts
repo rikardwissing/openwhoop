@@ -111,7 +111,7 @@ describe('background sync notifications', () => {
       identifier: 'background-sync:strap-1:success:2026-04-02 10:15:00',
       content: {
         title: 'Background sync complete',
-        body: 'BtWearable synced 24 new readings in the background.',
+        body: 'Unstrap synced 24 new readings in the background. Your data is unlocked and ready.',
         data: {
           route: '/settings',
         },
