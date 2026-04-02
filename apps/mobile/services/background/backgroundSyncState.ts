@@ -182,23 +182,29 @@ export async function updateNotificationPermissionState(
 export async function recordBackgroundRunStart(
   db: Pick<SQLiteDatabase, 'getFirstAsync' | 'runAsync'>,
   params: {
-    deviceId: string;
+    deviceId?: string | null;
     source: SyncSource;
     startedAt: string;
   },
 ) {
-  await persistBackgroundSyncStateRow(db, {
-    paired_device_id: params.deviceId,
+  const patch: Partial<BackgroundSyncStateRow> = {
     last_run_started_at: params.startedAt,
     last_source: params.source,
+    last_result: null,
     last_error: null,
-  });
+  };
+
+  if (params.deviceId !== undefined && params.deviceId !== null) {
+    patch.paired_device_id = params.deviceId;
+  }
+
+  await persistBackgroundSyncStateRow(db, patch);
 }
 
 export async function recordBackgroundRunResult(
   db: Pick<SQLiteDatabase, 'getFirstAsync' | 'runAsync'>,
   params: {
-    deviceId: string;
+    deviceId?: string | null;
     source: SyncSource;
     result: BackgroundSyncResult;
     finishedAt: string;
@@ -206,16 +212,23 @@ export async function recordBackgroundRunResult(
     error: string | null;
   },
 ) {
-  const current = await loadBackgroundSyncStateRow(db);
-  await persistBackgroundSyncStateRow(db, {
-    paired_device_id: params.deviceId,
+  const patch: Partial<BackgroundSyncStateRow> = {
     last_run_finished_at: params.finishedAt,
-    last_success_at: params.result === 'success' ? params.finishedAt : current?.last_success_at ?? null,
     last_source: params.source,
     last_result: params.result,
     last_error: params.error,
     last_imported_readings: params.importedReadings,
-  });
+  };
+
+  if (params.result === 'success') {
+    patch.last_success_at = params.finishedAt;
+  }
+
+  if (params.deviceId !== undefined && params.deviceId !== null) {
+    patch.paired_device_id = params.deviceId;
+  }
+
+  await persistBackgroundSyncStateRow(db, patch);
 }
 
 export async function acquireBackgroundSyncLock(

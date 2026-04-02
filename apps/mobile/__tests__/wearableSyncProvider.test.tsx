@@ -1,6 +1,6 @@
 import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
 import { AppState, Pressable, Text, View } from 'react-native';
-import type { DeviceState, WearableLiveEvent } from '@/types/device';
+import type { DeviceState, SyncProgress, WearableLiveEvent } from '@/types/device';
 
 const mockRefreshHealthData = jest.fn();
 const appStateListeners = new Set<(nextState: string) => void>();
@@ -12,6 +12,10 @@ const mockHealthRepository = {
   warmCaches: jest.fn(async () => {}),
 };
 const mockUseSQLiteContext = jest.fn(() => ({}));
+const mockFreshBackgroundDb = {
+  closeAsync: jest.fn(async () => {}),
+};
+const mockOpenAppDatabaseAsync = jest.fn(async () => mockFreshBackgroundDb);
 const mockServiceInstances: Array<ReturnType<typeof mockCreateWearableSyncService>> = [];
 
 function createEmptyDeviceState(): DeviceState {
@@ -66,7 +70,7 @@ function mockCreateWearableSyncService() {
       currentState = createEmptyDeviceState();
       liveStateCallback?.({ ...currentState });
     }),
-    syncSelected: jest.fn(async () => ({
+    syncSelected: jest.fn(async (..._args: unknown[]) => ({
       importedReadings: 0,
       completedAt: '2026-04-02 10:00:00',
     })),
@@ -82,6 +86,10 @@ function mockCreateWearableSyncService() {
 
 jest.mock('expo-sqlite', () => ({
   useSQLiteContext: () => mockUseSQLiteContext(),
+}));
+
+jest.mock('@/db/appDatabase', () => ({
+  openAppDatabaseAsync: () => mockOpenAppDatabaseAsync(),
 }));
 
 jest.mock('@/providers/HealthDataProvider', () => ({
@@ -205,10 +213,29 @@ function BackgroundSyncHarness() {
   );
 }
 
+function ProgressHarness() {
+  const { progress } = useWearableSync();
+
+  return (
+    <View>
+      <Text testID="progress-status">{progress.status}</Text>
+      <Text testID="progress-show-overlay">{String(progress.showOverlay)}</Text>
+    </View>
+  );
+}
+
 function renderProviderHarness() {
   return render(
     <WearableSyncProvider>
       <EventHarness />
+    </WearableSyncProvider>,
+  );
+}
+
+function renderProgressHarness() {
+  return render(
+    <WearableSyncProvider>
+      <ProgressHarness />
     </WearableSyncProvider>,
   );
 }
@@ -263,6 +290,8 @@ describe('WearableSyncProvider live events', () => {
     mockHealthRepository.warmCaches.mockClear();
     mockUseSQLiteContext.mockClear();
     mockUseSQLiteContext.mockReturnValue({});
+    mockOpenAppDatabaseAsync.mockClear();
+    mockFreshBackgroundDb.closeAsync.mockClear();
     mockGetBackgroundSyncState.mockClear();
     mockEnsureBackgroundSyncRegistered.mockClear();
     mockEnableBackgroundSyncAfterPairing.mockClear();
@@ -390,17 +419,19 @@ describe('WearableSyncProvider live events', () => {
   it('triggers Expo background task testing from the provider', async () => {
     jest.useFakeTimers();
     const screen = renderBackgroundHarness();
+    await flushAsyncState();
 
     await act(async () => {
       fireEvent.press(screen.getByTestId('trigger-background-test'));
       await Promise.resolve();
       await Promise.resolve();
-      jest.advanceTimersByTime(1200);
+      jest.advanceTimersByTime(4_500);
     });
 
     await waitFor(() => {
       expect(mockTriggerBackgroundSyncForTesting).toHaveBeenCalledTimes(1);
       expect(mockGetBackgroundSyncDiagnostics).toHaveBeenCalled();
+      expect(mockOpenAppDatabaseAsync).toHaveBeenCalled();
     });
   });
 
@@ -415,6 +446,37 @@ describe('WearableSyncProvider live events', () => {
     await advanceTimersAndFlush(5_000);
 
     expect(service.syncSelected).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps foreground auto-sync progress discreet without showing the overlay', async () => {
+    jest.useFakeTimers();
+
+    const screen = renderProgressHarness();
+    const service = latestService();
+    service.syncSelected.mockImplementationOnce(async (...args: unknown[]) => {
+      const onProgress = args[0] as ((progress: SyncProgress) => void) | undefined;
+
+      if (!onProgress) {
+        throw new Error('Expected syncSelected progress callback during auto-sync test.');
+      }
+
+      onProgress({
+        status: 'connecting',
+        message: 'Connecting in foreground auto-sync...',
+      });
+      return {
+        importedReadings: 3,
+        completedAt: '2026-04-02 10:05:00',
+      };
+    });
+
+    await flushAsyncState();
+    await advanceTimersAndFlush(5_000);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('progress-status').props.children).toBe('connecting');
+      expect(screen.getByTestId('progress-show-overlay').props.children).toBe('false');
+    });
   });
 
   it('waits for the app to become active again before auto-syncing', async () => {

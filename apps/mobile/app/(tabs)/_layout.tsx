@@ -2,18 +2,23 @@ import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'react-native';
 import { Tabs } from 'expo-router';
 
+import { PulsingHeartIcon } from '@/components/ui/PulsingHeartIcon';
 import { brandMark } from '@/constants/assets';
 import { colors, typography } from '@/constants/theme';
+import { useWearableSync } from '@/providers/WearableSyncProvider';
+import { hasFreshLiveHeartRate } from '@/types/device';
 
 function TabIcon({
   color,
   focused,
   icon,
+  pulseBpm,
   today,
 }: {
   color: string;
   focused: boolean;
   icon: keyof typeof Ionicons.glyphMap;
+  pulseBpm?: number | null;
   today?: boolean;
 }) {
   if (today) {
@@ -30,10 +35,24 @@ function TabIcon({
     );
   }
 
+  if (icon === 'heart') {
+    return (
+      <PulsingHeartIcon
+        bpm={pulseBpm ?? null}
+        color={color}
+        name="heart"
+        size={focused ? 24 : 22}
+      />
+    );
+  }
+
   return <Ionicons color={color} name={icon} size={focused ? 24 : 22} />;
 }
 
 export default function TabLayout() {
+  const { deviceState } = useWearableSync();
+  const liveHeartRate = hasFreshLiveHeartRate(deviceState) ? deviceState.liveHeartRate : null;
+
   return (
     <Tabs
       screenOptions={{
@@ -79,7 +98,7 @@ export default function TabLayout() {
         options={{
           title: 'Heart',
           tabBarIcon: ({ color, focused }) => (
-            <TabIcon color={color} focused={focused} icon="heart" />
+            <TabIcon color={color} focused={focused} icon="heart" pulseBpm={liveHeartRate} />
           ),
         }}
       />

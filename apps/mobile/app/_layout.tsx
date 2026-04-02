@@ -8,6 +8,7 @@ import * as SplashScreen from 'expo-splash-screen';
 import { useEffect } from 'react';
 import { StatusBar } from 'expo-status-bar';
 
+import { SleepPreparationReminderSync } from '@/components/navigation/SleepPreparationReminderSync';
 import { WearablePairingGate } from '@/components/navigation/WearablePairingGate';
 import { WearableProgressOverlay } from '@/components/ui/WearableProgressOverlay';
 import { navTheme } from '@/constants/theme';
@@ -85,6 +86,7 @@ function RootLayoutNav() {
         <HealthDataProvider>
           <WearableSyncProvider>
             <StatusBar style="light" />
+            <SleepPreparationReminderSync />
             <Stack>
               <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
               <Stack.Screen name="live-events" options={{ headerShown: false }} />

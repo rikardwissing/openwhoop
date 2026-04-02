@@ -16,6 +16,7 @@ import { useSleepHistory } from '@/hooks/useHealthData';
 import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
 import { useHealthRepository } from '@/providers/HealthDataProvider';
 import { useWearableSync } from '@/providers/WearableSyncProvider';
+import { syncSleepPreparationReminder } from '@/services/notifications/sleepPreparationReminder';
 import type { SleepStageSelection, TrendSelection } from '@/types/health';
 import {
   formatClockRangeFromStartLabel,
@@ -41,6 +42,7 @@ export function SleepScreen() {
   const [wakeTargetError, setWakeTargetError] = useState<string | null>(null);
   const [savingAlarm, setSavingAlarm] = useState(false);
   const [alarmError, setAlarmError] = useState<string | null>(null);
+  const [reminderNotice, setReminderNotice] = useState<string | null>(null);
   const wakeSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wakeSaveQueueRef = useRef(Promise.resolve());
   const targetWakeMinutesRef = useRef<number | null>(null);
@@ -149,6 +151,11 @@ export function SleepScreen() {
       setAlarmEnabled(false);
       alarmEnabledRef.current = false;
       setAlarmError(null);
+      setReminderNotice(null);
+      void syncSleepPreparationReminder({
+        ...sleepPlan,
+        alarmEnabled: false,
+      });
     }
     queueWakeTargetCommit();
   };
@@ -160,6 +167,7 @@ export function SleepScreen() {
 
     setSavingAlarm(true);
     setAlarmError(null);
+    setReminderNotice(null);
     setAlarmEnabled(true);
     alarmEnabledRef.current = true;
 
@@ -173,6 +181,19 @@ export function SleepScreen() {
     try {
       await repository.enableAlarm(resolvedTargetWakeMinutes);
       savedLocally = true;
+      const reminderResult = await syncSleepPreparationReminder(
+        {
+          ...sleepPlan,
+          alarmEnabled: true,
+        },
+        {
+          requestPermission: true,
+        },
+      );
+
+      if (!reminderResult.scheduled && reminderResult.reason === 'permission-denied') {
+        setReminderNotice('Bedtime reminder notifications are off on this iPhone, so Unstrap could not schedule the one-hour wind-down alert.');
+      }
 
       if (deviceState.id) {
         await setAlarm(Math.floor(nextUpcomingClockDate(resolvedTargetWakeMinutes).getTime() / 1000));
@@ -198,6 +219,7 @@ export function SleepScreen() {
 
     setSavingAlarm(true);
     setAlarmError(null);
+    setReminderNotice(null);
     setAlarmEnabled(false);
     alarmEnabledRef.current = false;
 
@@ -211,6 +233,10 @@ export function SleepScreen() {
     try {
       await repository.disableAlarm(resolvedTargetWakeMinutes);
       savedLocally = true;
+      await syncSleepPreparationReminder({
+        ...sleepPlan,
+        alarmEnabled: false,
+      });
 
       if (deviceState.id) {
         await disableAlarm();
@@ -331,8 +357,8 @@ export function SleepScreen() {
           </View>
           <Text style={styles.alarmCaption}>
             {sleepPlan.alarmEnabled
-              ? 'Enabled for your current target wake-up time.'
-              : 'Wake-up changes stay local until you press Enable alarm.'}
+              ? 'Enabled for your current target wake-up time. Unstrap also schedules a quiet phone reminder one hour before your optimal bedtime.'
+              : 'Wake-up changes stay local until you press Enable alarm. Enabling it also schedules a quiet phone reminder one hour before bed.'}
           </Text>
 
           <Pressable
@@ -367,6 +393,7 @@ export function SleepScreen() {
             ? 'Enable alarm pushes the current target wake-up time to the selected wearable.'
             : 'Select a wearable before enabling if you want to push it to hardware.'}
         </Text>
+        {reminderNotice ? <Text style={styles.planFootnote}>{reminderNotice}</Text> : null}
         {wakeTargetError ? <Text style={styles.planError}>{wakeTargetError}</Text> : null}
         {alarmError ? <Text style={styles.planError}>{alarmError}</Text> : null}
       </GlassCard>

@@ -300,6 +300,8 @@ describe('screen rendering', () => {
     expect(screen.getByText('API')).toBeTruthy();
     expect(screen.getByText('Registered')).toBeTruthy();
     expect(screen.getByText('15m')).toBeTruthy();
+    expect(screen.getByText('Last started')).toBeTruthy();
+    expect(screen.getByText('Last finished')).toBeTruthy();
     expect(screen.getByText('Trigger test run')).toBeTruthy();
     expect(screen.getAllByText('Unknown').length).toBeGreaterThan(0);
     expect(screen.getAllByText('--').length).toBeGreaterThan(0);

@@ -168,6 +168,10 @@ describe('background sync task diagnostics', () => {
     const triggered = await triggerBackgroundSyncForTesting();
 
     expect(triggered).toBe(true);
+    expect(mockUnregisterTaskAsync).toHaveBeenCalledWith(BACKGROUND_SYNC_TASK_NAME);
+    expect(mockRegisterTaskAsync).toHaveBeenCalledWith(BACKGROUND_SYNC_TASK_NAME, {
+      minimumInterval: 15,
+    });
     expect(mockTriggerTaskWorkerForTestingAsync).toHaveBeenCalledTimes(1);
   });
 });

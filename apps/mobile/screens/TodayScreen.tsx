@@ -8,6 +8,7 @@ import { SleepStageChart } from '@/components/charts/SleepStageChart';
 import { ScreenShell } from '@/components/layout/ScreenShell';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { GlowRing } from '@/components/ui/GlowRing';
+import { PulsingHeartIcon } from '@/components/ui/PulsingHeartIcon';
 import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
 import { StatChip } from '@/components/ui/StatChip';
 import { colors, typography } from '@/constants/theme';
@@ -112,7 +113,12 @@ export function TodayScreen() {
       <GlassCard accentColor={colors.success}>
         <View style={styles.cardHeader}>
           <View style={styles.cardHeaderLeft}>
-            <Ionicons color={colors.success} name="heart-circle-outline" size={22} />
+            <PulsingHeartIcon
+              bpm={showLiveHeartRate ? deviceState.liveHeartRate : null}
+              color={colors.success}
+              name="heart-circle-outline"
+              size={22}
+            />
             <Text style={styles.cardTitle}>Heart Rate</Text>
           </View>
           <Ionicons color={colors.subtle} name="ellipsis-horizontal" size={18} />

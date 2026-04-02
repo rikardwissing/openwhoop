@@ -94,7 +94,12 @@ export async function triggerBackgroundSyncForTesting() {
     return false;
   }
 
-  return BackgroundTask.triggerTaskWorkerForTestingAsync();
+  console.log('Triggering background sync for testing...');
+
+
+
+  await BackgroundTask.triggerTaskWorkerForTestingAsync();
+  return true;
 }
 
 export async function syncNotificationPermissionFromSystem(
@@ -222,21 +227,52 @@ TaskManager.defineTask(BACKGROUND_SYNC_TASK_NAME, async () => {
     return BackgroundTask.BackgroundTaskResult.Success;
   }
 
+  await Notifications.scheduleNotificationAsync({
+    content: {
+      title: 'Hello world',
+      body: 'Hello world',
+      sound: 'default',
+    },
+    trigger: null,
+  }).catch(() => {});
+
   const db = await openAppDatabaseAsync();
   const service = new WearableSyncService(db);
+  const startedAt = formatSqliteDateTime(new Date());
+  let recordedDeviceId: string | null = null;
 
   try {
-    const selected = await service.getDeviceState();
-    if (!selected.id) {
-      return BackgroundTask.BackgroundTaskResult.Success;
-    }
-
-    const startedAt = formatSqliteDateTime(new Date());
+    const backgroundState = await getBackgroundSyncState(db);
+    recordedDeviceId = backgroundState.pairedDeviceId;
     await recordBackgroundRunStart(db, {
-      deviceId: selected.id,
+      deviceId: recordedDeviceId,
       source: 'background',
       startedAt,
     });
+
+    const selected = await service.getDeviceState();
+    if (!selected.id) {
+      const finishedAt = formatSqliteDateTime(new Date());
+      await recordBackgroundRunResult(db, {
+        deviceId: recordedDeviceId,
+        source: 'background',
+        result: 'skipped',
+        finishedAt,
+        importedReadings: 0,
+        error: 'No wearable was selected when the background task started.',
+      });
+      return BackgroundTask.BackgroundTaskResult.Success;
+    }
+    const selectedDeviceId = selected.id!;
+
+    if (recordedDeviceId !== selectedDeviceId) {
+      recordedDeviceId = selectedDeviceId;
+      await recordBackgroundRunStart(db, {
+        deviceId: recordedDeviceId,
+        source: 'background',
+        startedAt,
+      });
+    }
 
     const settings = await Notifications.getPermissionsAsync();
     const current = await getBackgroundSyncState(db);
@@ -249,11 +285,11 @@ TaskManager.defineTask(BACKGROUND_SYNC_TASK_NAME, async () => {
 
     const outcome = await service.syncInBackground();
     if (outcome.status === 'success') {
-      await deliverNewBackgroundNotifications(db, selected.id);
+      await deliverNewBackgroundNotifications(db, selectedDeviceId);
     }
 
     await recordBackgroundRunResult(db, {
-      deviceId: selected.id,
+      deviceId: selectedDeviceId,
       source: 'background',
       result: outcome.status === 'success' ? 'success' : 'skipped',
       finishedAt: outcome.completedAt,
@@ -261,7 +297,7 @@ TaskManager.defineTask(BACKGROUND_SYNC_TASK_NAME, async () => {
       error: outcome.status === 'success' ? null : outcome.reason ?? null,
     });
     await deliverBackgroundSyncRunNotification(db, {
-      deviceId: selected.id,
+      deviceId: selectedDeviceId,
       result: outcome.status === 'success' ? 'success' : 'skipped',
       finishedAt: outcome.completedAt,
       importedReadings: outcome.importedReadings,
@@ -271,23 +307,36 @@ TaskManager.defineTask(BACKGROUND_SYNC_TASK_NAME, async () => {
     return BackgroundTask.BackgroundTaskResult.Success;
   } catch (error) {
     const selected = await service.getDeviceState().catch(() => null);
-    if (selected?.id) {
-      const finishedAt = formatSqliteDateTime(new Date());
-      const transient = isTransientBackgroundSyncError(error);
+    const selectedDeviceId = selected?.id ?? null;
+    if (selectedDeviceId) {
+      recordedDeviceId = selectedDeviceId;
+    }
+
+    const transient = isTransientBackgroundSyncError(error);
+    const finishedAt = formatSqliteDateTime(new Date());
+    const errorRecord =
+      typeof error === 'object' && error !== null ? (error as Record<string, unknown>) : null;
+    const errorMessage: string =
+      errorRecord !== null && typeof errorRecord.message === 'string'
+        ? errorRecord.message
+        : 'Background sync failed.';
+
+    if (recordedDeviceId) {
+      const resolvedDeviceId = recordedDeviceId!;
       await recordBackgroundRunResult(db, {
-        deviceId: selected.id,
+        deviceId: resolvedDeviceId,
         source: 'background',
         result: transient ? 'skipped' : 'error',
         finishedAt,
         importedReadings: 0,
-        error: error instanceof Error ? error.message : 'Background sync failed.',
+        error: errorMessage,
       }).catch(() => {});
       await deliverBackgroundSyncRunNotification(db, {
-        deviceId: selected.id,
+        deviceId: resolvedDeviceId,
         result: transient ? 'skipped' : 'error',
         finishedAt,
         importedReadings: 0,
-        error: error instanceof Error ? error.message : 'Background sync failed.',
+        error: errorMessage,
       }).catch(() => {});
 
       if (transient) {

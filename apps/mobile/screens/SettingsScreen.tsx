@@ -137,6 +137,18 @@ function describeBackgroundResult(result: 'success' | 'skipped' | 'error' | null
   }
 }
 
+function describeBackgroundRunState(
+  lastRunStartedAt: string | null,
+  lastRunFinishedAt: string | null,
+  lastResult: 'success' | 'skipped' | 'error' | null,
+) {
+  if (lastRunStartedAt && (!lastRunFinishedAt || lastRunStartedAt > lastRunFinishedAt) && lastResult === null) {
+    return 'Running';
+  }
+
+  return describeBackgroundResult(lastResult);
+}
+
 function describeBackgroundApiStatus(status: BackgroundTaskApiStatus) {
   switch (status) {
     case 'available':
@@ -175,6 +187,11 @@ export function SettingsScreen() {
   const chargingChipAccent = chargingAccent(deviceState.chargingStatus);
   const wearChipAccent = wearAccent(deviceState.bodyStatus);
   const exportDisabled = deviceBusy || exportState.status === 'running' || !db;
+  const backgroundRunState = describeBackgroundRunState(
+    backgroundSyncState.lastRunStartedAt,
+    backgroundSyncState.lastRunFinishedAt,
+    backgroundSyncState.lastResult,
+  );
 
   async function handleExportDatabase() {
     if (!db) {
@@ -358,19 +375,24 @@ export function SettingsScreen() {
             />
             <StatChip
               accent={colors.borderStrong}
-              label="Last run"
+              label="Last started"
+              value={backgroundSyncState.lastRunStartedAt ?? 'Not yet'}
+            />
+            <StatChip
+              accent={colors.borderStrong}
+              label="Last finished"
               value={backgroundSyncState.lastRunFinishedAt ?? 'Not yet'}
             />
             <StatChip
               accent={
-                backgroundSyncState.lastResult === 'error'
+                backgroundRunState === 'Error'
                   ? colors.alert
-                  : backgroundSyncState.lastResult === 'success'
+                  : backgroundRunState === 'Success'
                     ? colors.success
                     : colors.borderStrong
               }
               label="Last result"
-              value={describeBackgroundResult(backgroundSyncState.lastResult)}
+              value={backgroundRunState}
             />
           </View>
 

@@ -3,8 +3,10 @@ import { useRouter } from 'expo-router';
 import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { brandMark } from '@/constants/assets';
+import { PulsingHeartIcon } from '@/components/ui/PulsingHeartIcon';
 import { colors, typography } from '@/constants/theme';
 import { useWearableSync } from '@/providers/WearableSyncProvider';
+import { hasFreshLiveHeartRate } from '@/types/device';
 
 export type AppHeaderIcon = 'today' | 'sleep' | 'heart' | 'wellness' | 'settings' | 'pair' | 'live-events';
 
@@ -73,6 +75,8 @@ export function AppHeader({
   const buttonDisabled = settingsDisabled || settingsActive;
   const badgeText = deviceState.batteryPercent === null ? '--' : `${deviceState.batteryPercent}%`;
   const badgeColors = badgePalette(deviceState.batteryPercent, buttonDisabled);
+  const liveHeartRate =
+    icon === 'heart' && hasFreshLiveHeartRate(deviceState) ? deviceState.liveHeartRate : null;
 
   return (
     <View style={styles.row}>
@@ -80,6 +84,8 @@ export function AppHeader({
         <View style={styles.iconWrap}>
           {icon === 'today' ? (
             <Image resizeMode="contain" source={brandMark} style={styles.brandMark} />
+          ) : icon === 'heart' ? (
+            <PulsingHeartIcon bpm={liveHeartRate} color={colors.primary} name="heart" size={19} />
           ) : (
             <Ionicons color={colors.primary} name={iconNameFor(icon)} size={19} />
           )}
@@ -175,17 +181,20 @@ const styles = StyleSheet.create({
   },
   badge: {
     alignItems: 'center',
+    justifyContent: 'center',
     borderRadius: 10,
     borderWidth: 1,
-    minWidth: 28,
-    paddingHorizontal: 5,
+    height: 18,
+    minWidth: 30,
+    paddingHorizontal: 6,
     position: 'absolute',
-    right: -10,
-    top: -6,
+    right: -8,
+    top: -5,
   },
   badgeText: {
     fontFamily: typography.bodyBold,
-    fontSize: 10,
-    lineHeight: 16,
+    fontSize: 9,
+    lineHeight: 10,
+    textAlign: 'center',
   },
 });
