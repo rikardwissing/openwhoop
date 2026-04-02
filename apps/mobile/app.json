@@ -50,12 +50,6 @@
           "bluetoothAlwaysPermission": "BtWearable uses Bluetooth to connect to your wearable and sync health data directly to this iPhone."
         }
       ],
-      [
-        "expo-notifications",
-        {
-          "enableBackgroundRemoteNotifications": false
-        }
-      ],
       "expo-sharing",
       "expo-background-task",
       "./plugins/with-local-notifications-only",
