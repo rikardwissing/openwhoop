@@ -36,6 +36,29 @@ function buildLine(points: Array<{ x: number; y: number }>) {
   return points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x} ${point.y}`).join(' ');
 }
 
+function buildLineSegments(coordinates: Array<{ x: number; y: number | null }>) {
+  const segments: Array<Array<{ x: number; y: number }>> = [];
+  let current: Array<{ x: number; y: number }> = [];
+
+  for (const coordinate of coordinates) {
+    if (coordinate.y === null) {
+      if (current.length > 0) {
+        segments.push(current);
+        current = [];
+      }
+      continue;
+    }
+
+    current.push({ x: coordinate.x, y: coordinate.y });
+  }
+
+  if (current.length > 0) {
+    segments.push(current);
+  }
+
+  return segments;
+}
+
 export function TrendChart({
   points,
   accentColor,
@@ -55,12 +78,26 @@ export function TrendChart({
   const chartId = useId().replace(/[:]/g, '');
 
   const coordinates = useMemo(() => buildTrendCoordinates(points), [points]);
-  const path = useMemo(() => buildLine(coordinates), [coordinates]);
-  const area = useMemo(
-    () => `${path} L 100 ${TREND_VIEWBOX_BASELINE} L 0 ${TREND_VIEWBOX_BASELINE} Z`,
-    [path],
+  const lineSegments = useMemo(() => buildLineSegments(coordinates), [coordinates]);
+  const paths = useMemo(() => lineSegments.map((segment) => buildLine(segment)), [lineSegments]);
+  const areas = useMemo(
+    () =>
+      lineSegments
+        .filter((segment) => segment.length >= 2)
+        .map((segment) => {
+          const path = buildLine(segment);
+          const startX = segment[0]?.x ?? 0;
+          const endX = segment.at(-1)?.x ?? startX;
+          return `${path} L ${endX} ${TREND_VIEWBOX_BASELINE} L ${startX} ${TREND_VIEWBOX_BASELINE} Z`;
+        }),
+    [lineSegments],
   );
-  const activeCoordinate = selection ? coordinates[selection.index] ?? null : null;
+  const selectedCoordinate = selection ? coordinates[selection.index] ?? null : null;
+  const activeCoordinate =
+    selectedCoordinate && selectedCoordinate.y !== null
+      ? { x: selectedCoordinate.x, y: selectedCoordinate.y }
+      : null;
+  const activeX = selectedCoordinate?.x ?? null;
 
   const commitSelection = useCallback(
     (nextSelection: TrendSelection | null) => {
@@ -152,27 +189,40 @@ export function TrendChart({
             y1="24"
             y2="24"
           />
-          {activeCoordinate ? (
+          {activeX !== null ? (
             <Line
               stroke={accentColor}
               strokeDasharray="2 2"
               strokeOpacity="0.35"
               strokeWidth="0.7"
-              x1={activeCoordinate.x}
-              x2={activeCoordinate.x}
+              x1={activeX}
+              x2={activeX}
               y1="2"
               y2={TREND_VIEWBOX_BASELINE}
             />
           ) : null}
-          <Path d={area} fill={`url(#${chartId}-fill)`} />
-          <Path d={path} fill="none" stroke="rgba(86, 246, 255, 0.12)" strokeWidth="2.1" />
-          <Path
-            d={path}
-            fill="none"
-            stroke={`url(#${chartId}-stroke)`}
-            strokeLinecap="round"
-            strokeWidth="1"
-          />
+          {areas.map((area, index) => (
+            <Path key={`area-${index}`} d={area} fill={`url(#${chartId}-fill)`} />
+          ))}
+          {paths.map((path, index) => (
+            <Path
+              key={`shadow-${index}`}
+              d={path}
+              fill="none"
+              stroke="rgba(86, 246, 255, 0.12)"
+              strokeWidth="2.1"
+            />
+          ))}
+          {paths.map((path, index) => (
+            <Path
+              key={`line-${index}`}
+              d={path}
+              fill="none"
+              stroke={`url(#${chartId}-stroke)`}
+              strokeLinecap="round"
+              strokeWidth="1"
+            />
+          ))}
           {activeCoordinate ? (
             <>
               <Circle

@@ -86,6 +86,7 @@ interface HeartRateRecord {
   spo2: number | null;
   skinTemp: number | null;
   sensorData: SensorDataRow | null;
+  skinContact: number | null;
   gravity: [number, number, number] | null;
   ppgGreen: number | null;
 }
@@ -158,6 +159,7 @@ interface DeviceStateRow {
   last_synced_at: string | null;
   firmware: string | null;
   battery_percent: number | null;
+  charging_status: string | null;
   body_status: string | null;
   sync_error: string | null;
 }
@@ -242,6 +244,7 @@ function toHeartRateRecord(row: HeartRateQueryRow): HeartRateRecord {
     spo2: row.spo2,
     skinTemp: row.skin_temp,
     sensorData,
+    skinContact: sensorData?.skin_contact ?? null,
     gravity: sensorData?.accel_gravity ?? null,
     ppgGreen: sensorData?.ppg_green ?? null,
   };
@@ -325,7 +328,41 @@ function rrToRmssd(rr: number[]): number | null {
   return Math.sqrt(mean(diffs));
 }
 
-function createTimeBuckets(points: HeartRateRecord[], bucketMinutes: number): TrendPoint[] {
+function startOfDay(date: Date): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function trendValues(points: TrendPoint[]): number[] {
+  return points
+    .map((point) => point.value)
+    .filter((value): value is number => value !== null);
+}
+
+function buildFilledDailySeries(
+  range: HistoryRange,
+  endDate: Date,
+  valueForDay: (dayKey: string) => number | null,
+): TrendPoint[] {
+  const end = startOfDay(endDate);
+  const days = rangeDays(range);
+
+  return Array.from({ length: days }, (_, index) => {
+    const offset = days - 1 - index;
+    const date = new Date(end);
+    date.setDate(end.getDate() - offset);
+    return {
+      label: formatShortDate(date),
+      value: valueForDay(dateKey(date)),
+    };
+  });
+}
+
+function createTimeBuckets(
+  points: HeartRateRecord[],
+  bucketMinutes: number,
+  startDate?: Date,
+  endDate?: Date,
+): TrendPoint[] {
   if (points.length === 0) {
     return [];
   }
@@ -345,12 +382,20 @@ function createTimeBuckets(points: HeartRateRecord[], bucketMinutes: number): Tr
     buckets.set(bucketStart, [point]);
   }
 
-  return Array.from(buckets.entries())
-    .sort(([left], [right]) => left - right)
-    .map(([bucketStart, bucket]) => ({
+  const firstBucket = Math.floor((startDate?.getTime() ?? points[0]!.date.getTime()) / bucketMs) * bucketMs;
+  const lastBucket =
+    Math.floor((endDate?.getTime() ?? points.at(-1)!.date.getTime()) / bucketMs) * bucketMs;
+  const series: TrendPoint[] = [];
+
+  for (let bucketStart = firstBucket; bucketStart <= lastBucket; bucketStart += bucketMs) {
+    const bucket = buckets.get(bucketStart);
+    series.push({
       label: formatAxisTime(new Date(bucketStart)),
-      value: Math.round(mean(bucket.map((point) => point.bpm))),
-    }));
+      value: bucket ? Math.round(mean(bucket.map((point) => point.bpm))) : null,
+    });
+  }
+
+  return series;
 }
 
 function detectFromGravity(history: HeartRateRecord[]): DetectedPeriod[] {
@@ -391,7 +436,9 @@ function detectFromGravity(history: HeartRateRecord[]): DetectedPeriod[] {
     return still / window.length;
   });
 
-  const classified = stillFractions.map((fraction) => fraction >= GRAVITY_STILL_FRACTION);
+  const classified = stillFractions.map(
+    (fraction, index) => fraction >= GRAVITY_STILL_FRACTION && history[index].skinContact !== 0,
+  );
   const periods: DetectedPeriod[] = [];
   let runStart = 0;
 
@@ -1009,12 +1056,17 @@ function latestValue(values: number[]): number | null {
 }
 
 function buildDailyTrend(range: HistoryRange, rows: HeartRateRecord[], accessor: (rows: HeartRateRecord[]) => number | null): TrendPoint[] {
-  return groupByDay(rows)
-    .slice(-rangeDays(range))
-    .map(([day, items]) => ({
-      label: formatShortDate(parseSqliteDateTime(`${day} 00:00:00`)),
-      value: accessor(items) ?? 0,
-    }));
+  if (rows.length === 0) {
+    return [];
+  }
+
+  const grouped = new Map(groupByDay(rows));
+  const endDate = rows.at(-1)?.date ?? new Date();
+
+  return buildFilledDailySeries(range, endDate, (day) => {
+    const items = grouped.get(day);
+    return items ? accessor(items) : null;
+  });
 }
 
 function aggregateSleepStages(records: SleepStageRecord[]): SleepStageSegment[] {
@@ -1034,7 +1086,7 @@ async function loadPreparedData(db: SQLiteDatabase): Promise<PreparedDataBundle>
     db.getAllAsync<SleepCycleRow>('SELECT id, sleep_id, start, end, min_bpm, max_bpm, avg_bpm, min_hrv, max_hrv, avg_hrv, score FROM sleep_cycles ORDER BY start ASC'),
     db.getAllAsync<ActivityRow>('SELECT id, period_id, start, end, activity FROM activities ORDER BY start ASC'),
     db.getAllAsync<SleepStageRow>('SELECT id, sleep_id, start, end, stage, is_estimated FROM sleep_stage_segments ORDER BY start ASC'),
-    db.getAllAsync<DeviceStateRow>('SELECT id, name, last_seen_at, last_synced_at, firmware, battery_percent, body_status, sync_error FROM device_state ORDER BY last_synced_at DESC LIMIT 1'),
+    db.getAllAsync<DeviceStateRow>('SELECT id, name, last_seen_at, last_synced_at, firmware, battery_percent, charging_status, body_status, sync_error FROM device_state ORDER BY last_synced_at DESC LIMIT 1'),
   ]);
 
   return {
@@ -1372,7 +1424,7 @@ export class SQLiteHealthRepository implements HealthRepository {
     return this.readQuery('device-state:latest', () =>
       this.db.getFirstAsync<DeviceStateRow>(
         `
-          SELECT id, name, last_seen_at, last_synced_at, firmware, battery_percent, body_status, sync_error
+          SELECT id, name, last_seen_at, last_synced_at, firmware, battery_percent, charging_status, body_status, sync_error
           FROM device_state
           ORDER BY last_synced_at DESC
           LIMIT 1
@@ -1501,7 +1553,15 @@ export class SQLiteHealthRepository implements HealthRepository {
       const recovery = estimateRecoveryScore(latestSleep, sleepCycles, heartRows);
       const last24Hours = heartRows.filter((row) => now.getTime() - row.date.getTime() <= 24 * 3600000);
       const intradayRows = last24Hours.length > 0 ? last24Hours : heartRows;
-      const heartCardSeries = createTimeBuckets(intradayRows, DASHBOARD_HEART_BUCKET_MINUTES);
+      const heartCardSeries =
+        last24Hours.length > 0
+          ? createTimeBuckets(
+              intradayRows,
+              DASHBOARD_HEART_BUCKET_MINUTES,
+              new Date(now.getTime() - 24 * 3600000),
+              now,
+            )
+          : createTimeBuckets(intradayRows, DASHBOARD_HEART_BUCKET_MINUTES);
       const latestDayKey = dateKey(heartRows.at(-1)?.date ?? now);
       const latestDayRows = heartRows.filter((row) => dateKey(row.date) === latestDayKey);
       const todayStrain = calculateStrain(latestDayRows, maxHr, restingHr);
@@ -1651,6 +1711,10 @@ export class SQLiteHealthRepository implements HealthRepository {
           avgHrv: session.avgHrv,
         };
       });
+      const sleepScoreByDay = new Map(sessions.map((session) => [dateKey(session.end), session.score]));
+      const sleepDurationByDay = new Map(
+        sessions.map((session) => [dateKey(session.end), minutesBetween(session.start, session.end)]),
+      );
 
       return {
         headlineScore: latestSleep.score,
@@ -1660,14 +1724,8 @@ export class SQLiteHealthRepository implements HealthRepository {
         durationMinutes: minutesBetween(latestSleep.start, latestSleep.end),
         bedtimeConsistency: Math.round(bedtimeConsistency),
         wakeConsistency: Math.round(wakeConsistency),
-        scoreTrend: sessions.map((session) => ({
-          label: formatShortDate(session.end),
-          value: session.score ?? 0,
-        })),
-        durationTrend: sessions.map((session) => ({
-          label: formatShortDate(session.end),
-          value: minutesBetween(session.start, session.end),
-        })),
+        scoreTrend: buildFilledDailySeries(range, latestSleep.end, (day) => sleepScoreByDay.get(day) ?? null),
+        durationTrend: buildFilledDailySeries(range, latestSleep.end, (day) => sleepDurationByDay.get(day) ?? null),
         sessions: mappedSessions,
         sleepPlan,
         isEstimated: true,
@@ -1704,17 +1762,20 @@ export class SQLiteHealthRepository implements HealthRepository {
       );
       const dailyMinima = dailyMinimaRows.map((row) => row.min_bpm);
       const restingHr = personalizeRestingHr(sleepCycles, dailyMinima);
-      const weeklyResting = dailyMinimaRows.slice(-rangeDays(range)).map((row) => ({
-        label: formatShortDate(parseSqliteDateTime(`${row.day} 00:00:00`)),
-        value: row.min_bpm,
-      }));
-      const previousMedian = median(weeklyResting.slice(0, -1).map((item) => item.value));
+      const dailyMinimaByDay = new Map(dailyMinimaRows.map((row) => [row.day, row.min_bpm]));
+      const weeklyResting = buildFilledDailySeries(range, latestHeartDate, (day) => dailyMinimaByDay.get(day) ?? null);
+      const previousMedian = median(trendValues(weeklyResting.slice(0, -1)));
 
       return {
         restingHr,
         averageHr: Math.round(mean(intradaySource.map((row) => row.bpm))),
         maxHr: sustainedPeakBpm(intradaySource.map((row) => row.bpm)),
-        intraday: createTimeBuckets(intradaySource, HEART_INTRADAY_BUCKET_MINUTES),
+        intraday: createTimeBuckets(
+          intradaySource,
+          HEART_INTRADAY_BUCKET_MINUTES,
+          intradayStart,
+          latestHeartDate,
+        ),
         weeklyResting,
         recoveryShift: previousMedian === null ? null : restingHr - previousMedian,
       };
@@ -1768,13 +1829,16 @@ export class SQLiteHealthRepository implements HealthRepository {
       const latestSleep = recentSleepCycles.at(-1) ?? null;
       const restingHr = personalizeRestingHr(recentSleepCycles, dailyMinimaRows.map((row) => row.min_bpm));
       const maxHr = personalizeMaxHr(allBpms, restingHr);
-      const recoveryTrend = recentSleepCycles.map((sleep, index, sleeps) => {
-        const score = estimateRecoveryScore(sleep, sleeps.slice(0, index + 1), heartRows).score;
-        return {
-          label: formatShortDate(sleep.end),
-          value: score ?? 0,
-        };
-      });
+      const recoveryByDay = new Map(
+        recentSleepCycles.map((sleep, index, sleeps) => [
+          dateKey(sleep.end),
+          estimateRecoveryScore(sleep, sleeps.slice(0, index + 1), heartRows).score,
+        ]),
+      );
+      const recoveryTrend =
+        latestSleep === null
+          ? []
+          : buildFilledDailySeries(range, latestSleep.end, (day) => recoveryByDay.get(day) ?? null);
 
       const stressRows = heartRows.filter((row) => row.stress !== null);
       const spo2Rows = heartRows.filter((row) => row.spo2 !== null);
@@ -1836,8 +1900,8 @@ export class SQLiteHealthRepository implements HealthRepository {
         recoveryIndex: {
           title: 'Recovery Index',
           latest: recovery.score,
-          average: recoveryTrend.length === 0 ? null : mean(recoveryTrend.map((point) => point.value)),
-          delta: recoveryTrend.length < 2 ? null : recoveryTrend.at(-1)!.value - recoveryTrend[Math.max(0, recoveryTrend.length - 2)].value,
+          average: trendValues(recoveryTrend).length === 0 ? null : mean(trendValues(recoveryTrend)),
+          delta: trendValues(recoveryTrend).length < 2 ? null : trendValues(recoveryTrend).at(-1)! - trendValues(recoveryTrend).at(-2)!,
           unit: '',
           detail: recovery.score === null ? NO_SLEEP_REASON : 'Transparent readiness heuristic from sleep, HRV, resting HR, stress, and temperature.',
           accent: 'green',

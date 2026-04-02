@@ -275,6 +275,19 @@ describe('BLE codec', () => {
         bodyStatus: 'off-body',
       },
     });
+
+    expect(parseNotification({
+      packetType: PacketType.Event,
+      seq: 0,
+      cmd: EventNumber.StrapDrivenAlarmExecuted,
+      data: simpleEventData,
+    })).toEqual({
+      type: 'event',
+      event: {
+        event: EventNumber.StrapDrivenAlarmExecuted,
+        unix: 1_710_000_000_000,
+      },
+    });
   });
 
   it('builds alarm command packets', () => {

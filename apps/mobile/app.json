@@ -40,7 +40,8 @@
         {
           "bluetoothAlwaysPermission": "BtWearable uses Bluetooth to connect to your wearable and sync health data directly to this iPhone."
         }
-      ]
+      ],
+      "expo-sharing"
     ],
     "experiments": {
       "typedRoutes": true

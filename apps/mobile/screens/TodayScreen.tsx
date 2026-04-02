@@ -59,6 +59,18 @@ export function TodayScreen() {
         )}`;
   const strainSelectionValue =
     strainSelection === null ? null : `${formatMetricValue(strainSelection.point.value, 1)} strain`;
+  const heartSelectionDetail =
+    heartSelection === null
+      ? null
+      : heartSelection.point.value === null
+        ? 'No data in this 5-minute window'
+        : 'Selected 5-minute window';
+  const strainSelectionDetail =
+    strainSelection === null
+      ? null
+      : strainSelection.point.value === null
+        ? 'No strain data for this point'
+        : 'Selected strain point';
 
   return (
     <ScreenShell>
@@ -105,7 +117,7 @@ export function TodayScreen() {
         {heartSelection ? (
           <ChartReadout
             accentColor={colors.primary}
-            detail="Selected 5-minute window"
+            detail={heartSelectionDetail ?? undefined}
             label={heartSelection.point.label}
             style={styles.chartReadout}
             value={heartSelectionValue ?? '--'}
@@ -190,7 +202,7 @@ export function TodayScreen() {
           {strainSelection ? (
             <ChartReadout
               accentColor={colors.cyan}
-              detail="Selected strain point"
+              detail={strainSelectionDetail ?? undefined}
               label={strainSelection.point.label}
               size="compact"
               style={styles.compactReadout}

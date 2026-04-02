@@ -1,18 +1,22 @@
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useSQLiteContext } from 'expo-sqlite';
 
 import { useHealthRepository, useRefreshHealthData } from '@/providers/HealthDataProvider';
 import { WearableSyncService } from '@/services/ble/WearableSyncService';
-import { isBlockingSyncStatus, type DeviceState, type SyncProgress, type SyncResult, type WearableScanResult } from '@/types/device';
+import { isBlockingSyncStatus, type DeviceState, type SyncProgress, type SyncResult, type WearableLiveEvent, type WearableScanResult } from '@/types/device';
+
+const MAX_LIVE_EVENTS = 200;
 
 interface WearableSyncContextValue {
   deviceState: DeviceState;
+  liveEvents: WearableLiveEvent[];
   progress: SyncProgress;
   scanResults: WearableScanResult[];
   scan: () => Promise<void>;
   selectDevice: (device: WearableScanResult) => Promise<void>;
   forgetDevice: () => Promise<void>;
   syncSelected: () => Promise<SyncResult | null>;
+  restartDevice: () => Promise<void>;
   setAlarm: (unixSeconds: number) => Promise<void>;
   disableAlarm: () => Promise<void>;
 }
@@ -31,6 +35,7 @@ export const emptyDeviceState: DeviceState = {
 
 export const defaultWearableSyncContextValue: WearableSyncContextValue = {
   deviceState: emptyDeviceState,
+  liveEvents: [],
   progress: {
     status: 'idle',
     message: 'Select a wearable and run a manual sync.',
@@ -40,6 +45,7 @@ export const defaultWearableSyncContextValue: WearableSyncContextValue = {
   selectDevice: async () => {},
   forgetDevice: async () => {},
   syncSelected: async () => null,
+  restartDevice: async () => {},
   setAlarm: async () => {},
   disableAlarm: async () => {},
 };
@@ -66,8 +72,17 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
   const refreshHealthData = useRefreshHealthData();
   const [service] = useState(() => new WearableSyncService(db));
   const [deviceState, setDeviceState] = useState<DeviceState>(emptyDeviceState);
+  const [liveEvents, setLiveEvents] = useState<WearableLiveEvent[]>([]);
   const [progress, setProgress] = useState<SyncProgress>(defaultWearableSyncContextValue.progress);
   const [scanResults, setScanResults] = useState<WearableScanResult[]>([]);
+
+  const appendLiveEvent = useCallback((event: WearableLiveEvent) => {
+    setLiveEvents((current) => [event, ...current].slice(0, MAX_LIVE_EVENTS));
+  }, []);
+
+  const resetLiveEvents = useCallback(() => {
+    setLiveEvents([]);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -96,21 +111,25 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    void service.startLiveUpdates((nextState) => {
-      if (!cancelled) {
-        setDeviceState(nextState);
-      }
-    }).catch(() => {});
+    void service.startLiveUpdates(
+      (nextState) => {
+        if (!cancelled) {
+          setDeviceState(nextState);
+        }
+      },
+      appendLiveEvent,
+    ).catch(() => {});
 
     return () => {
       cancelled = true;
       void service.stopLiveUpdates();
     };
-  }, [deviceState.id, progress.status, service]);
+  }, [appendLiveEvent, deviceState.id, progress.status, service]);
 
   const value = useMemo<WearableSyncContextValue>(
     () => ({
       deviceState,
+      liveEvents,
       progress,
       scanResults,
       scan: async () => {
@@ -135,6 +154,7 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
       },
       selectDevice: async (device) => {
         await service.selectDevice(device);
+        resetLiveEvents();
         setDeviceState(await service.getDeviceState());
         setProgress({
           status: 'idle',
@@ -143,6 +163,7 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
       },
       forgetDevice: async () => {
         await service.forgetDevice();
+        resetLiveEvents();
         setDeviceState(emptyDeviceState);
         setScanResults([]);
         setProgress({
@@ -152,9 +173,12 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
       },
       syncSelected: async () => {
         try {
-          const result = await service.syncSelected((next) => {
-            setProgress(next);
-          });
+          const result = await service.syncSelected(
+            (next) => {
+              setProgress(next);
+            },
+            appendLiveEvent,
+          );
           setDeviceState(await service.getDeviceState());
           healthRepository.invalidateCaches('all');
           refreshHealthData();
@@ -165,11 +189,33 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
           return null;
         }
       },
+      restartDevice: async () => {
+        try {
+          await service.restartDevice(
+            (next) => {
+              setProgress(next);
+            },
+            appendLiveEvent,
+          );
+          setDeviceState(await service.getDeviceState());
+        } catch (error) {
+          setDeviceState(await service.getDeviceState());
+          setProgress({
+            status: 'error',
+            message: error instanceof Error ? error.message : 'Unable to restart the wearable.',
+          });
+          throw error;
+        }
+      },
       setAlarm: async (unixSeconds) => {
         try {
-          await service.setAlarm(unixSeconds, (next) => {
-            setProgress(next);
-          });
+          await service.setAlarm(
+            unixSeconds,
+            (next) => {
+              setProgress(next);
+            },
+            appendLiveEvent,
+          );
           setDeviceState(await service.getDeviceState());
         } catch (error) {
           setDeviceState(await service.getDeviceState());
@@ -182,9 +228,12 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
       },
       disableAlarm: async () => {
         try {
-          await service.disableAlarm((next) => {
-            setProgress(next);
-          });
+          await service.disableAlarm(
+            (next) => {
+              setProgress(next);
+            },
+            appendLiveEvent,
+          );
           setDeviceState(await service.getDeviceState());
         } catch (error) {
           setDeviceState(await service.getDeviceState());
@@ -196,7 +245,7 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
         }
       },
     }),
-    [deviceState, healthRepository, progress, refreshHealthData, scanResults, service],
+    [appendLiveEvent, deviceState, healthRepository, liveEvents, progress, refreshHealthData, resetLiveEvents, scanResults, service],
   );
 
   return (

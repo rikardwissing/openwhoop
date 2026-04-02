@@ -2,11 +2,11 @@ import type { SQLiteDatabase } from 'expo-sqlite';
 import { BleManager, type Device, type Subscription } from 'react-native-ble-plx';
 
 import { refreshDerivedData } from '@/data/sqlite/SQLiteHealthRepository';
-import { CMD_FROM_STRAP_UUID, CMD_TO_STRAP_UUID, DATA_FROM_STRAP_UUID, EVENTS_FROM_STRAP_UUID, MEMFAULT_UUID, WEARABLE_SERVICE_UUID } from '@/services/ble/constants';
+import { CMD_FROM_STRAP_UUID, CMD_TO_STRAP_UUID, DATA_FROM_STRAP_UUID, EVENTS_FROM_STRAP_UUID, EventNumber, MEMFAULT_UUID, WEARABLE_SERVICE_UUID } from '@/services/ble/constants';
 import { resolveScanDeviceName } from '@/services/ble/deviceNaming';
-import { PacketAssembler, base64ToBytes, bytesToBase64, disableAlarmPacket, enterHighFrequencySyncPacket, exitHighFrequencySyncPacket, getBatteryLevelPacket, getBodyLocationAndStatusPacket, getNamePacket, helloHarvardPacket, historyEndPacket, historyStartPacket, parseNotification, setAlarmPacket, setClockPacket, type SensorDataPacket, versionInfoPacket } from '@/services/ble/codec';
+import { PacketAssembler, base64ToBytes, bytesToBase64, disableAlarmPacket, enterHighFrequencySyncPacket, exitHighFrequencySyncPacket, getBatteryLevelPacket, getBodyLocationAndStatusPacket, getNamePacket, helloHarvardPacket, historyEndPacket, historyStartPacket, parseNotification, restartPacket, setAlarmPacket, setClockPacket, type SensorDataPacket, versionInfoPacket } from '@/services/ble/codec';
 import { HistorySyncWatchdog } from '@/services/ble/syncWatchdog';
-import type { ChargingState, DeviceState, SyncProgress, SyncResult, WearState, WearableScanResult } from '@/types/device';
+import type { ChargingState, DeviceState, SyncProgress, SyncResult, WearState, WearableLiveEvent, WearableScanResult } from '@/types/device';
 import { formatSqliteDateTime } from '@/utils/dateTime';
 
 const SELECTED_DEVICE_SQL = `
@@ -53,6 +53,8 @@ interface DeviceStateUpdate {
   syncError?: string | null;
 }
 
+type LiveEventRecorder = (event: WearableLiveEvent) => void;
+
 function formatBleError(error: unknown) {
   if (!(error instanceof Error)) {
     return 'Sync failed.';
@@ -91,8 +93,13 @@ function formatBleError(error: unknown) {
   return details.length > 0 ? `${error.message} (${details.join(', ')})` : error.message;
 }
 
+function wearDetail(bodyStatus: WearState) {
+  return bodyStatus === 'on-body' ? 'On body' : 'Off body';
+}
+
 export class WearableSyncService {
   private liveUpdatesCleanup: (() => Promise<void>) | null = null;
+  private nextLiveEventId = 0;
 
   constructor(
     private readonly db: SQLiteDatabase,
@@ -206,7 +213,99 @@ export class WearableSyncService {
     );
   }
 
-  async startLiveUpdates(onDeviceState: (state: DeviceState) => void) {
+  private async clearLiveChargingStatus(deviceId: string) {
+    await this.db.runAsync(
+      'UPDATE device_state SET charging_status = NULL, last_seen_at = ? WHERE id = ?',
+      formatSqliteDateTime(new Date()),
+      deviceId,
+    );
+  }
+
+  private createLiveEvent(
+    source: WearableLiveEvent['source'],
+    kind: string,
+    title: string,
+    detail: string | null,
+    deviceUnixMs: number | null = null,
+  ): WearableLiveEvent {
+    this.nextLiveEventId += 1;
+
+    return {
+      id: `live-event-${this.nextLiveEventId}`,
+      observedAt: formatSqliteDateTime(new Date()),
+      deviceUnixMs,
+      source,
+      kind,
+      title,
+      detail,
+    };
+  }
+
+  private toLiveEvent(parsed: ReturnType<typeof parseNotification>): WearableLiveEvent | null {
+    if (parsed.type === 'battery') {
+      return this.createLiveEvent('command', 'battery-reply', 'Battery reply', `${parsed.battery.percent}%`);
+    }
+
+    if (parsed.type === 'bodyStatus') {
+      return this.createLiveEvent('command', 'wear-reply', 'Wear reply', wearDetail(parsed.body.bodyStatus));
+    }
+
+    if (parsed.type === 'version') {
+      return this.createLiveEvent(
+        'command',
+        'firmware-reply',
+        'Firmware reply',
+        `Harvard ${parsed.version.harvard} · Boylston ${parsed.version.boylston}`,
+      );
+    }
+
+    if (parsed.type === 'deviceName') {
+      return this.createLiveEvent('command', 'name-reply', 'Name reply', parsed.device.name);
+    }
+
+    if (parsed.type !== 'event') {
+      return null;
+    }
+
+    switch (parsed.event.event) {
+      case EventNumber.BatteryLevel:
+        return this.createLiveEvent('event', 'battery-event', 'Battery event', `${parsed.event.percent}%`, parsed.event.unix);
+      case EventNumber.External5vOn:
+        return this.createLiveEvent('event', 'external-power-on', 'External power connected', null, parsed.event.unix);
+      case EventNumber.External5vOff:
+        return this.createLiveEvent('event', 'external-power-off', 'External power disconnected', null, parsed.event.unix);
+      case EventNumber.ChargingOn:
+        return this.createLiveEvent('event', 'charging-on', 'Charging started', null, parsed.event.unix);
+      case EventNumber.ChargingOff:
+        return this.createLiveEvent('event', 'charging-off', 'Charging stopped', null, parsed.event.unix);
+      case EventNumber.WristOn:
+      case EventNumber.WristOff:
+        return this.createLiveEvent('event', 'wear-changed', 'Wear changed', wearDetail(parsed.event.bodyStatus), parsed.event.unix);
+      case EventNumber.StrapDrivenAlarmSet:
+        return this.createLiveEvent('event', 'strap-alarm-set', 'Strap alarm set', null, parsed.event.unix);
+      case EventNumber.StrapDrivenAlarmExecuted:
+        return this.createLiveEvent('event', 'strap-alarm-executed', 'Strap alarm executed', null, parsed.event.unix);
+      case EventNumber.AppDrivenAlarmExecuted:
+        return this.createLiveEvent('event', 'app-alarm-executed', 'App alarm executed', null, parsed.event.unix);
+      case EventNumber.StrapDrivenAlarmDisabled:
+        return this.createLiveEvent('event', 'strap-alarm-disabled', 'Strap alarm disabled', null, parsed.event.unix);
+    }
+
+    return null;
+  }
+
+  private recordLiveEvent(parsed: ReturnType<typeof parseNotification>, onLiveEvent?: LiveEventRecorder) {
+    if (!onLiveEvent) {
+      return;
+    }
+
+    const event = this.toLiveEvent(parsed);
+    if (event) {
+      onLiveEvent(event);
+    }
+  }
+
+  async startLiveUpdates(onDeviceState: (state: DeviceState) => void, onLiveEvent?: LiveEventRecorder) {
     await this.stopLiveUpdates();
 
     const selected = await this.getDeviceState();
@@ -269,6 +368,8 @@ export class WearableSyncService {
     };
 
     const handleNotification = async (parsed: ReturnType<typeof parseNotification>) => {
+      this.recordLiveEvent(parsed, onLiveEvent);
+
       if (parsed.type === 'battery') {
         await pushState({ batteryPercent: parsed.battery.percent });
         return;
@@ -315,6 +416,7 @@ export class WearableSyncService {
           id: resolvedDeviceId,
           name: resolvedDeviceName,
         });
+        await this.clearLiveChargingStatus(resolvedDeviceId);
         onDeviceState(await this.getDeviceState());
 
         const commandAssembler = new PacketAssembler();
@@ -346,6 +448,8 @@ export class WearableSyncService {
         await this.sendCommand(device, helloHarvardPacket());
         await this.sendCommand(device, getBatteryLevelPacket());
         await this.sendCommand(device, getBodyLocationAndStatusPacket());
+        await this.sendCommand(device, getNamePacket());
+        await this.sendCommand(device, versionInfoPacket());
       } catch {
         await teardownConnection();
         scheduleReconnect();
@@ -375,13 +479,22 @@ export class WearableSyncService {
     await cleanup();
   }
 
-  async setAlarm(unixSeconds: number, onProgress?: (progress: SyncProgress) => void) {
+  async setAlarm(
+    unixSeconds: number,
+    onProgress?: (progress: SyncProgress) => void,
+    onLiveEvent?: LiveEventRecorder,
+  ) {
     const alarmAt = new Date(unixSeconds * 1000);
-    await this.runDeviceCommand(onProgress, `Setting alarm for ${formatSqliteDateTime(alarmAt)}...`, async (device) => {
-      await this.sendCommand(device, helloHarvardPacket());
-      await this.sendCommand(device, setClockPacket(Math.floor(Date.now() / 1000)));
-      await this.sendCommand(device, setAlarmPacket(unixSeconds));
-    });
+    await this.runDeviceCommand(
+      onProgress,
+      `Setting alarm for ${formatSqliteDateTime(alarmAt)}...`,
+      async (device) => {
+        await this.sendCommand(device, helloHarvardPacket());
+        await this.sendCommand(device, setClockPacket(Math.floor(Date.now() / 1000)));
+        await this.sendCommand(device, setAlarmPacket(unixSeconds));
+      },
+      onLiveEvent,
+    );
 
     onProgress?.({
       status: 'complete',
@@ -389,11 +502,16 @@ export class WearableSyncService {
     });
   }
 
-  async disableAlarm(onProgress?: (progress: SyncProgress) => void) {
-    await this.runDeviceCommand(onProgress, 'Disabling alarm on the wearable...', async (device) => {
-      await this.sendCommand(device, helloHarvardPacket());
-      await this.sendCommand(device, disableAlarmPacket());
-    });
+  async disableAlarm(onProgress?: (progress: SyncProgress) => void, onLiveEvent?: LiveEventRecorder) {
+    await this.runDeviceCommand(
+      onProgress,
+      'Disabling alarm on the wearable...',
+      async (device) => {
+        await this.sendCommand(device, helloHarvardPacket());
+        await this.sendCommand(device, disableAlarmPacket());
+      },
+      onLiveEvent,
+    );
 
     onProgress?.({
       status: 'complete',
@@ -401,7 +519,27 @@ export class WearableSyncService {
     });
   }
 
-  async syncSelected(onProgress?: (progress: SyncProgress) => void): Promise<SyncResult> {
+  async restartDevice(onProgress?: (progress: SyncProgress) => void, onLiveEvent?: LiveEventRecorder) {
+    await this.runDeviceCommand(
+      onProgress,
+      'Restarting the wearable...',
+      async (device) => {
+        await this.sendCommand(device, helloHarvardPacket());
+        await this.sendCommand(device, restartPacket());
+      },
+      onLiveEvent,
+    );
+
+    onProgress?.({
+      status: 'complete',
+      message: 'Restart command sent. The wearable may disappear briefly while it boots back up.',
+    });
+  }
+
+  async syncSelected(
+    onProgress?: (progress: SyncProgress) => void,
+    onLiveEvent?: LiveEventRecorder,
+  ): Promise<SyncResult> {
     await this.stopLiveUpdates();
     const selected = await this.getDeviceState();
     if (!selected.id) {
@@ -519,6 +657,7 @@ export class WearableSyncService {
             const frames = assembler.push(base64ToBytes(value.value));
             for (const frame of frames) {
               const parsed = parseNotification(frame);
+              this.recordLiveEvent(parsed, onLiveEvent);
 
               if (parsed.type === 'history') {
                 importedReadings += 1;
@@ -654,7 +793,7 @@ export class WearableSyncService {
     await delay(120);
   }
 
-  private async requestBatteryPercent(device: Device): Promise<number | null> {
+  private async requestBatteryPercent(device: Device, onLiveEvent?: LiveEventRecorder): Promise<number | null> {
     const assembler = new PacketAssembler();
 
     return new Promise<number | null>((resolve) => {
@@ -692,6 +831,7 @@ export class WearableSyncService {
           const frames = assembler.push(base64ToBytes(value.value));
           for (const frame of frames) {
             const parsed = parseNotification(frame);
+            this.recordLiveEvent(parsed, onLiveEvent);
             if (parsed.type === 'battery') {
               finish(parsed.battery.percent);
               return;
@@ -706,8 +846,8 @@ export class WearableSyncService {
     });
   }
 
-  private async refreshBatteryPercent(device: Device, deviceId: string): Promise<number | null> {
-    const batteryPercent = await this.requestBatteryPercent(device);
+  private async refreshBatteryPercent(device: Device, deviceId: string, onLiveEvent?: LiveEventRecorder): Promise<number | null> {
+    const batteryPercent = await this.requestBatteryPercent(device, onLiveEvent);
 
     if (batteryPercent === null) {
       return null;
@@ -749,11 +889,12 @@ export class WearableSyncService {
     onProgress: ((progress: SyncProgress) => void) | undefined,
     workingMessage: string,
     task: (device: Device) => Promise<void>,
+    onLiveEvent?: LiveEventRecorder,
   ) {
     await this.stopLiveUpdates();
     const selected = await this.getDeviceState();
     if (!selected.id) {
-      throw new Error('Select a wearable before updating the alarm.');
+      throw new Error('Select a wearable before sending a device command.');
     }
 
     await this.ensurePoweredOn();
@@ -767,7 +908,7 @@ export class WearableSyncService {
       ({ device, resolvedDeviceId, resolvedDeviceName } = await this.connectSelectedWearable(selected, onProgress));
       onProgress?.({ status: 'updating', message: workingMessage });
       await task(device);
-      const batteryPercent = await this.refreshBatteryPercent(device, resolvedDeviceId);
+      const batteryPercent = await this.refreshBatteryPercent(device, resolvedDeviceId, onLiveEvent);
 
       await this.persistDeviceState({
         id: resolvedDeviceId,

@@ -4,9 +4,14 @@ jest.mock('react-native-ble-plx', () => ({
   },
 }));
 
-import { CMD_FROM_STRAP_UUID, CommandNumber, EVENTS_FROM_STRAP_UUID, EventNumber, PacketType } from '@/services/ble/constants';
+jest.mock('@/data/sqlite/SQLiteHealthRepository', () => ({
+  refreshDerivedData: jest.fn(async () => {}),
+}));
+
+import { CMD_FROM_STRAP_UUID, CommandNumber, DATA_FROM_STRAP_UUID, EVENTS_FROM_STRAP_UUID, EventNumber, MetadataType, PacketType } from '@/services/ble/constants';
 import { PacketAssembler, base64ToBytes, bytesToBase64, framePacket } from '@/services/ble/codec';
 import { WearableSyncService } from '@/services/ble/WearableSyncService';
+import type { WearableLiveEvent } from '@/types/device';
 
 function writeU16LE(bytes: Uint8Array, offset: number, value: number) {
   bytes[offset] = value & 0xff;
@@ -20,6 +25,33 @@ function writeU32LE(bytes: Uint8Array, offset: number, value: number) {
   bytes[offset + 3] = (value >> 24) & 0xff;
 }
 
+function encodeAscii(value: string) {
+  return Array.from(value, (character) => character.charCodeAt(0));
+}
+
+function createVersionPayload(harvard = [1, 2, 3, 4], boylston = [5, 6, 7, 8]) {
+  const payload = new Uint8Array(35);
+  [...harvard, ...boylston].forEach((value, index) => {
+    writeU32LE(payload, 3 + index * 4, value);
+  });
+  return payload;
+}
+
+function createHistoryPayload(unixSeconds: number) {
+  const payload = new Uint8Array(24);
+  writeU32LE(payload, 4, unixSeconds);
+  payload[14] = 64;
+  payload[15] = 0;
+  return payload;
+}
+
+function createMetadataPayload(unixSeconds: number, data: number) {
+  const payload = new Uint8Array(8);
+  writeU32LE(payload, 0, unixSeconds);
+  writeU32LE(payload, 4, data);
+  return payload;
+}
+
 type DeviceMonitor = (error: Error | null, value: { value: string } | null) => void;
 
 class MockDevice {
@@ -30,6 +62,8 @@ class MockDevice {
   batteryTenthsPercent: number | null = null;
   bodyStatusRaw: 0 | 1 | null = null;
   failBatteryRequest = false;
+  historyFrames: Array<{ characteristic: string; frame: Uint8Array }> = [];
+  sentCommands: number[] = [];
   private readonly monitors = new Map<string, Set<DeviceMonitor>>();
 
   async discoverAllServicesAndCharacteristics() {
@@ -58,6 +92,8 @@ class MockDevice {
       return;
     }
 
+    this.sentCommands.push(packet.cmd);
+
     if (packet.cmd === CommandNumber.GetBatteryLevel) {
       if (this.failBatteryRequest) {
         throw new Error('Battery request failed.');
@@ -75,10 +111,27 @@ class MockDevice {
 
     if (packet.cmd === CommandNumber.GetBodyLocationAndStatus && this.bodyStatusRaw !== null) {
       const payload = Uint8Array.from([0x00, 0x00, this.bodyStatusRaw]);
-      this.emitFrame(
-        CMD_FROM_STRAP_UUID,
-        framePacket(PacketType.CommandResponse, 0, CommandNumber.GetBodyLocationAndStatus, payload),
-      );
+      this.emitCommandResponse(CommandNumber.GetBodyLocationAndStatus, payload);
+      return;
+    }
+
+    if (
+      packet.cmd === CommandNumber.GetAdvertisingNameHarvard ||
+      packet.cmd === CommandNumber.GetAdvertisingName
+    ) {
+      this.emitCommandResponse(packet.cmd, Uint8Array.from([...encodeAscii(this.name), 0x00]));
+      return;
+    }
+
+    if (packet.cmd === CommandNumber.ReportVersionInfo) {
+      this.emitCommandResponse(CommandNumber.ReportVersionInfo, createVersionPayload());
+      return;
+    }
+
+    if (packet.cmd === CommandNumber.SendHistoricalData) {
+      for (const entry of this.historyFrames) {
+        this.emitFrame(entry.characteristic, entry.frame);
+      }
     }
   }
 
@@ -88,6 +141,18 @@ class MockDevice {
     writeU32LE(data, 1, 1_710_000_000);
     data.set(payload, 5);
     this.emitFrame(EVENTS_FROM_STRAP_UUID, framePacket(PacketType.Event, 0, event, data));
+  }
+
+  emitCommandResponse(command: number, payload: Uint8Array) {
+    this.emitFrame(CMD_FROM_STRAP_UUID, framePacket(PacketType.CommandResponse, 0, command, payload));
+  }
+
+  emitHistoryFrame(payload: Uint8Array) {
+    this.emitFrame(DATA_FROM_STRAP_UUID, framePacket(PacketType.HistoricalData, 0, 0, payload));
+  }
+
+  emitMetadata(kind: MetadataType, payload: Uint8Array) {
+    this.emitFrame(DATA_FROM_STRAP_UUID, framePacket(PacketType.Metadata, 0, kind, payload));
   }
 
   private emitFrame(characteristic: string, frame: Uint8Array) {
@@ -143,7 +208,10 @@ class MockDb {
     sync_error: string | null;
   } | null;
 
-  constructor(initialBatteryPercent: number | null) {
+  constructor(
+    initialBatteryPercent: number | null,
+    initialChargingStatus: 'charging' | 'not_charging' | null = null,
+  ) {
     this.row = {
       id: 'strap-1',
       name: 'Neo Strap',
@@ -151,7 +219,7 @@ class MockDb {
       last_synced_at: '2026-04-02 07:00:00',
       firmware: '1.2.3',
       battery_percent: initialBatteryPercent,
-      charging_status: null,
+      charging_status: initialChargingStatus,
       body_status: null,
       sync_error: null,
     };
@@ -178,6 +246,12 @@ class MockDb {
       return;
     }
 
+    if (sql.startsWith('UPDATE device_state SET charging_status = NULL')) {
+      this.row.charging_status = null;
+      this.row.last_seen_at = args[0] as string;
+      return;
+    }
+
     if (!sql.includes('INSERT INTO device_state')) {
       return;
     }
@@ -197,6 +271,18 @@ class MockDb {
 }
 
 describe('WearableSyncService battery refresh', () => {
+  it('sends the reboot command to the wearable', async () => {
+    const device = new MockDevice();
+    const db = new MockDb(71);
+    const manager = new MockBleManager(device);
+    const service = new WearableSyncService(db as never, manager as never);
+
+    await expect(service.restartDevice()).resolves.toBeUndefined();
+    expect(device.sentCommands).toEqual(
+      expect.arrayContaining([CommandNumber.GetHelloHarvard, CommandNumber.RebootStrap, CommandNumber.GetBatteryLevel]),
+    );
+  });
+
   it('updates stored battery percent after setting an alarm', async () => {
     const device = new MockDevice();
     device.batteryTenthsPercent = 845;
@@ -272,5 +358,148 @@ describe('WearableSyncService battery refresh', () => {
     expect(updates.some((state) => state.bodyStatus === 'on-body')).toBe(true);
 
     await service.stopLiveUpdates();
+  });
+
+  it('updates charging status to not_charging when charging stops', async () => {
+    const device = new MockDevice();
+    const db = new MockDb(null);
+    const manager = new MockBleManager(device);
+    const service = new WearableSyncService(db as never, manager as never);
+
+    await service.startLiveUpdates(() => {});
+
+    device.emitEvent(EventNumber.ChargingOn);
+    device.emitEvent(EventNumber.ChargingOff);
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    await expect(service.getDeviceState()).resolves.toMatchObject({
+      chargingStatus: 'not_charging',
+    });
+
+    await service.stopLiveUpdates();
+  });
+
+  it('clears stale charging state when live updates reconnect before a fresh event arrives', async () => {
+    const device = new MockDevice();
+    const db = new MockDb(71, 'charging');
+    const manager = new MockBleManager(device);
+    const service = new WearableSyncService(db as never, manager as never);
+
+    const updates: Array<Awaited<ReturnType<typeof service.getDeviceState>>> = [];
+    await service.startLiveUpdates((nextState) => {
+      updates.push(nextState);
+    });
+
+    await expect(service.getDeviceState()).resolves.toMatchObject({
+      chargingStatus: null,
+    });
+    expect(updates[0]?.chargingStatus ?? null).toBeNull();
+
+    await service.stopLiveUpdates();
+  });
+
+  it('records meaningful command replies during live updates', async () => {
+    const device = new MockDevice();
+    device.batteryTenthsPercent = 845;
+    device.bodyStatusRaw = 1;
+    const db = new MockDb(null);
+    const manager = new MockBleManager(device);
+    const service = new WearableSyncService(db as never, manager as never);
+    const liveEvents: WearableLiveEvent[] = [];
+
+    await service.startLiveUpdates(() => {}, (event) => {
+      liveEvents.push(event);
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(liveEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          title: 'Battery reply',
+          detail: '85%',
+          source: 'command',
+        }),
+        expect.objectContaining({
+          title: 'Wear reply',
+          detail: 'On body',
+          source: 'command',
+        }),
+        expect.objectContaining({
+          title: 'Name reply',
+          detail: 'Neo Strap',
+          source: 'command',
+        }),
+        expect.objectContaining({
+          title: 'Firmware reply',
+          detail: 'Harvard 1.2.3.4 · Boylston 5.6.7.8',
+          source: 'command',
+        }),
+      ]),
+    );
+
+    await service.stopLiveUpdates();
+  });
+
+  it('records alarm events during live monitoring', async () => {
+    const device = new MockDevice();
+    const db = new MockDb(null);
+    const manager = new MockBleManager(device);
+    const service = new WearableSyncService(db as never, manager as never);
+    const liveEvents: WearableLiveEvent[] = [];
+
+    await service.startLiveUpdates(() => {}, (event) => {
+      liveEvents.push(event);
+    });
+
+    device.emitEvent(EventNumber.AppDrivenAlarmExecuted);
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(liveEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          title: 'App alarm executed',
+          kind: 'app-alarm-executed',
+          source: 'event',
+        }),
+      ]),
+    );
+
+    await service.stopLiveUpdates();
+  });
+
+  it('ignores history rows and metadata chatter when recording sync live events', async () => {
+    const device = new MockDevice();
+    device.batteryTenthsPercent = 845;
+    device.historyFrames = [
+      {
+        characteristic: DATA_FROM_STRAP_UUID,
+        frame: framePacket(PacketType.HistoricalData, 0, 0, createHistoryPayload(1_710_000_001)),
+      },
+      {
+        characteristic: DATA_FROM_STRAP_UUID,
+        frame: framePacket(PacketType.Metadata, 0, MetadataType.HistoryComplete, createMetadataPayload(1_710_000_001, 0)),
+      },
+    ];
+    const db = new MockDb(null);
+    const manager = new MockBleManager(device);
+    const service = new WearableSyncService(db as never, manager as never);
+    const liveEvents: WearableLiveEvent[] = [];
+
+    const result = await service.syncSelected(undefined, (event) => {
+      liveEvents.push(event);
+    });
+
+    expect(result.importedReadings).toBe(1);
+    expect(liveEvents.map((event) => event.title)).toEqual([
+      'Name reply',
+      'Firmware reply',
+      'Battery reply',
+    ]);
   });
 });

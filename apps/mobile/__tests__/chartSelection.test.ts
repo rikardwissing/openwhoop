@@ -22,6 +22,23 @@ describe('chart selection helpers', () => {
     });
   });
 
+  it('can select a missing trend bucket without collapsing the gap', () => {
+    const selection = selectTrendPointAtX(
+      [
+        { label: 'A', value: 10 },
+        { label: 'B', value: null },
+        { label: 'C', value: 30 },
+      ],
+      300,
+      150,
+    );
+
+    expect(selection).toEqual({
+      index: 1,
+      point: { label: 'B', value: null },
+    });
+  });
+
   it('builds cumulative sleep-stage offsets', () => {
     expect(
       buildSleepStageFrames([

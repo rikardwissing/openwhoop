@@ -58,6 +58,7 @@ function RootLayoutNav() {
             <StatusBar style="light" />
             <Stack>
               <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+              <Stack.Screen name="live-events" options={{ headerShown: false }} />
               <Stack.Screen name="+not-found" options={{ title: 'Not Found' }} />
             </Stack>
             <WearableProgressOverlay />

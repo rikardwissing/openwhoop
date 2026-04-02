@@ -80,7 +80,9 @@ function takeTail<T>(items: T[], range: HistoryRange): T[] {
 
 const intradayHeartSeries = buildIntradayHeartSeries(5);
 const dashboardHeartSeries = intradayHeartSeries;
-const intradayValues = intradayHeartSeries.map((point) => point.value);
+const intradayValues = intradayHeartSeries
+  .map((point) => point.value)
+  .filter((value): value is number => value !== null);
 const intradayAverageHr = Math.round(mean(intradayValues));
 const intradayMaxHr = sustainedPeakBpm(intradayValues) ?? Math.max(...intradayValues);
 const strainValues = [4.4, 4.8, 5.2, 6.1, 6.8, 7.2, 7.6, 8.1, 9.4, 10.8, 9.9, 10.1, 10.9, 11];

@@ -10,7 +10,7 @@ export const TREND_VIEWBOX_BASELINE = 36;
 
 interface TrendChartCoordinate extends TrendSelection {
   x: number;
-  y: number;
+  y: number | null;
 }
 
 interface SleepStageFrame extends SleepStageSelection {
@@ -27,8 +27,24 @@ export function buildTrendCoordinates(points: TrendPoint[]): TrendChartCoordinat
     return [];
   }
 
-  const min = Math.min(...points.map((point) => point.value));
-  const max = Math.max(...points.map((point) => point.value));
+  const values = points
+    .map((point) => point.value)
+    .filter((value): value is number => value !== null);
+
+  if (values.length === 0) {
+    return points.map((point, index) => ({
+      index,
+      point,
+      x:
+        points.length === 1
+          ? TREND_VIEWBOX_WIDTH / 2
+          : (index / (points.length - 1)) * TREND_VIEWBOX_WIDTH,
+      y: null,
+    }));
+  }
+
+  const min = Math.min(...values);
+  const max = Math.max(...values);
   const span = Math.max(max - min, 1);
 
   return points.map((point, index) => ({
@@ -38,7 +54,7 @@ export function buildTrendCoordinates(points: TrendPoint[]): TrendChartCoordinat
       points.length === 1
         ? TREND_VIEWBOX_WIDTH / 2
         : (index / (points.length - 1)) * TREND_VIEWBOX_WIDTH,
-    y: 4 + ((max - point.value) / span) * 28,
+    y: point.value === null ? null : 4 + ((max - point.value) / span) * 28,
   }));
 }
 

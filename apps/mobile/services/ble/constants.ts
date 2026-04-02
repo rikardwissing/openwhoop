@@ -41,6 +41,7 @@ export enum CommandNumber {
   SendHistoricalData = 22,
   HistoricalDataResult = 23,
   GetBatteryLevel = 26,
+  RebootStrap = 29,
   ReportVersionInfo = 7,
   GetHelloHarvard = 35,
   SetAlarmTime = 66,

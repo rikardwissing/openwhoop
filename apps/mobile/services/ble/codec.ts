@@ -75,10 +75,20 @@ export interface DeviceBodyEventPacket {
   bodyStatus: 'on-body' | 'off-body';
 }
 
+export interface DeviceAlarmEventPacket {
+  event:
+    | EventNumber.StrapDrivenAlarmSet
+    | EventNumber.StrapDrivenAlarmExecuted
+    | EventNumber.AppDrivenAlarmExecuted
+    | EventNumber.StrapDrivenAlarmDisabled;
+  unix: number;
+}
+
 export type DeviceEventPacket =
   | DeviceBatteryEventPacket
   | DeviceChargingEventPacket
-  | DeviceBodyEventPacket;
+  | DeviceBodyEventPacket
+  | DeviceAlarmEventPacket;
 
 export interface RawCommandResponsePacket {
   command: number;
@@ -196,6 +206,10 @@ export function setClockPacket(unixSeconds: number) {
   payload[2] = (unixSeconds >> 16) & 0xff;
   payload[3] = (unixSeconds >> 24) & 0xff;
   return framePacket(PacketType.Command, 0, CommandNumber.SetClock, payload);
+}
+
+export function restartPacket() {
+  return framePacket(PacketType.Command, 0, CommandNumber.RebootStrap, Uint8Array.from([0x00]));
 }
 
 export function getNamePacket() {
@@ -522,6 +536,21 @@ function parseEventPacket(packet: FramedPacket): ParsedNotification {
         event: packet.cmd,
         unix,
         bodyStatus: packet.cmd === EventNumber.WristOn ? 'on-body' : 'off-body',
+      },
+    };
+  }
+
+  if (
+    packet.cmd === EventNumber.StrapDrivenAlarmSet ||
+    packet.cmd === EventNumber.StrapDrivenAlarmExecuted ||
+    packet.cmd === EventNumber.AppDrivenAlarmExecuted ||
+    packet.cmd === EventNumber.StrapDrivenAlarmDisabled
+  ) {
+    return {
+      type: 'event',
+      event: {
+        event: packet.cmd,
+        unix,
       },
     };
   }

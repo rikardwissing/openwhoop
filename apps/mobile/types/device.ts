@@ -16,6 +16,7 @@ export interface WearableScanResult {
 
 export type ChargingState = 'charging' | 'not_charging';
 export type WearState = 'on-body' | 'off-body';
+export type WearableLiveEventSource = 'event' | 'command';
 
 export interface DeviceState {
   id: string | null;
@@ -27,6 +28,16 @@ export interface DeviceState {
   chargingStatus: ChargingState | null;
   bodyStatus: WearState | null;
   syncError: string | null;
+}
+
+export interface WearableLiveEvent {
+  id: string;
+  observedAt: string;
+  deviceUnixMs?: number | null;
+  source: WearableLiveEventSource;
+  kind: string;
+  title: string;
+  detail: string | null;
 }
 
 export interface SyncProgress {

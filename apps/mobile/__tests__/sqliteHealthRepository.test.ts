@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { initializeDatabase } from '@/db/schema';
 import {
   SQLiteHealthRepository,
+  refreshDerivedData,
   shouldRefreshDerivedData,
 } from '@/data/sqlite/SQLiteHealthRepository';
 
@@ -166,6 +167,16 @@ async function createRepositoryFixture() {
   };
 }
 
+function formatTestSqliteDateTime(date: Date) {
+  const year = `${date.getFullYear()}`;
+  const month = `${date.getMonth() + 1}`.padStart(2, '0');
+  const day = `${date.getDate()}`.padStart(2, '0');
+  const hour = `${date.getHours()}`.padStart(2, '0');
+  const minute = `${date.getMinutes()}`.padStart(2, '0');
+  const second = `${date.getSeconds()}`.padStart(2, '0');
+  return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
+}
+
 describe('SQLiteHealthRepository', () => {
   it('skips derived refresh when derived state matches the source history', async () => {
     const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
@@ -249,6 +260,57 @@ describe('SQLiteHealthRepository', () => {
     adapter.close();
   });
 
+  it('does not extend overnight sleep through off-body stillness after waking', async () => {
+    const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
+    await initializeDatabase(adapter as never);
+
+    const heartInsert = `
+      INSERT INTO heart_rate (id, bpm, time, rr_intervals, sensor_data, synced)
+      VALUES (?, ?, ?, ?, ?, 0)
+    `;
+    const start = new Date(2026, 3, 1, 23, 0, 0);
+    const gravity = [0.11, -0.02, 0.98];
+
+    for (let index = 0; index < 60; index += 1) {
+      const sampleDate = new Date(start.getTime() + index * 10 * 60000);
+      const skinContact = sampleDate < new Date(2026, 3, 2, 7, 0, 0) ? 1 : 0;
+      await adapter.runAsync(
+        heartInsert,
+        index + 1,
+        58,
+        formatTestSqliteDateTime(sampleDate),
+        '1000,990,980',
+        JSON.stringify({
+          ppg_green: 15000,
+          skin_contact: skinContact,
+          accel_gravity: gravity,
+        }),
+      );
+    }
+
+    await refreshDerivedData(adapter as never);
+
+    const sleeps = await adapter.getAllAsync<{
+      start: string;
+      end: string;
+    }>(
+      `
+        SELECT start, end
+        FROM sleep_cycles
+        ORDER BY start ASC
+      `,
+    );
+
+    expect(sleeps).toEqual([
+      {
+        start: '2026-04-01 23:00:00',
+        end: '2026-04-02 06:50:00',
+      },
+    ]);
+
+    adapter.close();
+  });
+
   it('loads seeded snapshots without triggering a derived rebuild on startup', async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'btwearable-seed-'));
     const source = path.resolve(process.cwd(), 'assets/databases/btwearable-seed.db');
@@ -275,5 +337,34 @@ describe('SQLiteHealthRepository', () => {
 
     adapter.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('preserves missing intraday buckets as null chart points', async () => {
+    const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
+    await initializeDatabase(adapter as never);
+
+    const heartInsert = `
+      INSERT INTO heart_rate (id, bpm, time, rr_intervals, synced)
+      VALUES (?, ?, ?, ?, 0)
+    `;
+    await adapter.runAsync(heartInsert, 1, 70, '2026-03-20 01:00:00', '1000,990,980');
+    await adapter.runAsync(heartInsert, 2, 72, '2026-03-20 01:05:00', '1000,990,980');
+    await adapter.runAsync(heartInsert, 3, 78, '2026-03-20 04:00:00', '1000,990,980');
+    await adapter.runAsync(heartInsert, 4, 80, '2026-03-20 04:05:00', '1000,990,980');
+    await adapter.runAsync(
+      `
+        INSERT INTO derived_data_state (id, derived_schema_version, source_heart_count, refreshed_at)
+        VALUES (1, 1, 4, '2026-03-20 04:10:00')
+      `,
+    );
+
+    const repository = new SQLiteHealthRepository(adapter as never);
+    const heart = await repository.getHeartHistory('14d');
+
+    expect(heart.intraday.find((point) => point.label === '1 AM')?.value).toBe(70);
+    expect(heart.intraday.find((point) => point.label === '1:10 AM')?.value).toBeNull();
+    expect(heart.intraday.find((point) => point.label === '4 AM')?.value).toBe(78);
+
+    adapter.close();
   });
 });

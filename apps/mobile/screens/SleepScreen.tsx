@@ -374,7 +374,13 @@ export function SleepScreen() {
         <SectionHeader title="Sleep Score Trend" trailing="14 day rhythm" />
         <ChartReadout
           accentColor={colors.violet}
-          detail={scoreSelection ? 'Selected nightly score' : `Latest night ${data.sessions[0]?.dateLabel ?? '--'}`}
+          detail={
+            scoreSelection
+              ? scoreSelection.point.value === null
+                ? 'No sleep score recorded for this day'
+                : 'Selected nightly score'
+              : `Latest night ${data.sessions[0]?.dateLabel ?? '--'}`
+          }
           label={scoreSelection?.point.label ?? 'Latest sleep score'}
           style={styles.readout}
           value={
@@ -395,7 +401,13 @@ export function SleepScreen() {
         <SectionHeader title="Duration Trend" trailing="Hours slept" />
         <ChartReadout
           accentColor={colors.aqua}
-          detail={durationSelection ? 'Selected time asleep' : `Bedtime ${data.bedtime} · Wake ${data.wakeTime}`}
+          detail={
+            durationSelection
+              ? durationSelection.point.value === null
+                ? 'No overnight duration recorded for this day'
+                : 'Selected time asleep'
+              : `Bedtime ${data.bedtime} · Wake ${data.wakeTime}`
+          }
           label={durationSelection?.point.label ?? 'Latest duration'}
           style={styles.readout}
           value={

@@ -95,6 +95,7 @@ function toHeartRateRecord(row) {
     spo2: row.spo2,
     skinTemp: row.skin_temp,
     sensorData,
+    skinContact: sensorData?.skin_contact ?? null,
     gravity: sensorData?.accel_gravity ?? null,
     ppgGreen: sensorData?.ppg_green ?? null,
   };
@@ -289,7 +290,9 @@ function detectFromGravity(history) {
     return still / window.length;
   });
 
-  const classified = stillFractions.map((fraction) => fraction >= GRAVITY_STILL_FRACTION);
+  const classified = stillFractions.map(
+    (fraction, index) => fraction >= GRAVITY_STILL_FRACTION && history[index].skinContact !== 0,
+  );
   const periods = [];
   let runStart = 0;
 

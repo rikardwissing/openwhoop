@@ -5,7 +5,7 @@ export type PartialDataReason = string;
 
 export interface TrendPoint {
   label: string;
-  value: number;
+  value: number | null;
 }
 
 export interface TrendSelection {

@@ -1,4 +1,6 @@
+import { useState } from 'react';
 import { Image, Pressable, StyleSheet, Switch, Text, View } from 'react-native';
+import { useRouter } from 'expo-router';
 
 import { ScreenShell } from '@/components/layout/ScreenShell';
 import { SectionHeader } from '@/components/layout/SectionHeader';
@@ -6,7 +8,9 @@ import { GlassCard } from '@/components/ui/GlassCard';
 import { StatChip } from '@/components/ui/StatChip';
 import { appIcon } from '@/constants/assets';
 import { colors, typography } from '@/constants/theme';
+import { useOptionalAppDatabase } from '@/providers/AppDatabaseProvider';
 import { useWearableSync } from '@/providers/WearableSyncProvider';
+import { exportAndShareDatabaseSnapshot } from '@/services/databaseExport';
 import { describeBatteryStatus, describeChargingState, describeWearState, isBlockingSyncStatus } from '@/types/device';
 
 function batteryAccent(batteryPercent: number | null) {
@@ -87,12 +91,62 @@ function ActionButton({
   );
 }
 
+function formatBytes(sizeBytes: number) {
+  if (sizeBytes < 1024) {
+    return `${sizeBytes} B`;
+  }
+
+  if (sizeBytes < 1024 * 1024) {
+    return `${(sizeBytes / 1024).toFixed(1)} KB`;
+  }
+
+  return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 export function SettingsScreen() {
-  const { deviceState, progress, scanResults, scan, selectDevice, forgetDevice, syncSelected } = useWearableSync();
+  const router = useRouter();
+  const db = useOptionalAppDatabase();
+  const { deviceState, liveEvents, progress, scanResults, scan, selectDevice, forgetDevice, syncSelected, restartDevice } = useWearableSync();
+  const [exportState, setExportState] = useState<{
+    status: 'idle' | 'running' | 'success' | 'error';
+    message: string;
+  }>({
+    status: 'idle',
+    message: 'Create a portable btwearable.db snapshot and share it straight from the phone.',
+  });
   const deviceBusy = isBlockingSyncStatus(progress.status);
   const batteryChipAccent = batteryAccent(deviceState.batteryPercent);
   const chargingChipAccent = chargingAccent(deviceState.chargingStatus);
   const wearChipAccent = wearAccent(deviceState.bodyStatus);
+  const exportDisabled = deviceBusy || exportState.status === 'running' || !db;
+
+  async function handleExportDatabase() {
+    if (!db) {
+      setExportState({
+        status: 'error',
+        message: 'The local database is not available in this build.',
+      });
+      return;
+    }
+
+    setExportState({
+      status: 'running',
+      message: 'Preparing a fresh btwearable.db snapshot...',
+    });
+
+    try {
+      const result = await exportAndShareDatabaseSnapshot(db);
+      setExportState({
+        status: 'success',
+        message: `Prepared ${result.fileName} (${formatBytes(result.sizeBytes)}). Save or send that file back here and I can inspect the raw data directly.`,
+      });
+    } catch (error) {
+      setExportState({
+        status: 'error',
+        message: error instanceof Error ? error.message : 'Unable to export the local database.',
+      });
+    }
+  }
 
   return (
     <ScreenShell>
@@ -179,6 +233,24 @@ export function SettingsScreen() {
 
           <View style={styles.buttonRow}>
             <ActionButton
+              label="Live events"
+              onPress={() => {
+                router.push('/live-events');
+              }}
+              tone="secondary"
+            />
+            <ActionButton
+              label="Restart wearable"
+              onPress={() => {
+                void restartDevice();
+              }}
+              disabled={!deviceState.id || progress.status === 'scanning' || deviceBusy}
+              tone="secondary"
+            />
+          </View>
+
+          <View style={styles.buttonRow}>
+            <ActionButton
               label="Forget wearable"
               onPress={() => {
                 void forgetDevice();
@@ -187,6 +259,10 @@ export function SettingsScreen() {
               tone="danger"
             />
           </View>
+
+          <Text style={styles.settingSubtitle}>
+            Session log stores the latest {liveEvents.length} meaningful wearable events seen since this app session started.
+          </Text>
         </View>
       </GlassCard>
 
@@ -219,6 +295,36 @@ export function SettingsScreen() {
       <GlassCard accentColor={colors.aqua}>
         <SectionHeader title="Local Sync Status" trailing={progress.status} />
         <Text style={styles.roadmapText}>{progress.message}</Text>
+      </GlassCard>
+
+      <GlassCard accentColor={colors.primary}>
+        <SectionHeader title="Export for Analysis" trailing="SQLite snapshot" />
+        <View style={styles.settingColumn}>
+          <View>
+            <Text style={styles.settingTitle}>Raw database export</Text>
+            <Text style={styles.settingSubtitle}>
+              Generates a shareable copy of btwearable.db so you can send the exact phone data back for analysis.
+            </Text>
+          </View>
+
+          <View style={styles.buttonRow}>
+            <ActionButton
+              label={exportState.status === 'running' ? 'Exporting...' : 'Export Database'}
+              onPress={() => {
+                void handleExportDatabase();
+              }}
+              disabled={exportDisabled}
+            />
+          </View>
+
+          <Text
+            style={[
+              styles.roadmapText,
+              exportState.status === 'error' ? styles.errorText : null,
+            ]}>
+            {db ? exportState.message : 'Database export is only available when the app is running with the local SQLite provider.'}
+          </Text>
+        </View>
       </GlassCard>
     </ScreenShell>
   );

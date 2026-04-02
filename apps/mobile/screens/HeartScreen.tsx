@@ -62,7 +62,9 @@ export function HeartScreen() {
           accentColor={colors.success}
           detail={
             intradaySelection
-              ? 'Selected 5-minute window'
+              ? intradaySelection.point.value === null
+                ? 'No data in this 5-minute window'
+                : 'Selected 5-minute window'
               : `Resting ${formatMetricValue(data.restingHr, 0)} BPM · Max ${formatMetricValue(data.maxHr, 0)} BPM`
           }
           label={intradaySelection?.point.label ?? '24-hour average'}
@@ -87,7 +89,11 @@ export function HeartScreen() {
         <ChartReadout
           accentColor={colors.cyan}
           detail={
-            restingSelection ? 'Selected nightly resting HR' : `Recovery shift ${formatSignedValue(data.recoveryShift, 0)} bpm`
+            restingSelection
+              ? restingSelection.point.value === null
+                ? 'No resting HR recorded for this day'
+                : 'Selected nightly resting HR'
+              : `Recovery shift ${formatSignedValue(data.recoveryShift, 0)} bpm`
           }
           label={restingSelection?.point.label ?? 'Current resting HR'}
           style={styles.chartReadout}

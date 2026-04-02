@@ -39,7 +39,7 @@ function WellnessMetricCard({ metric }: { metric: MetricSeries }) {
       {selection ? (
         <ChartReadout
           accentColor={accentColor}
-          detail="Selected daily average"
+          detail={selection.point.value === null ? 'No data recorded for this day' : 'Selected daily average'}
           label={selection.point.label}
           style={styles.readout}
           value={`${formatMetricValue(selection.point.value, digits)}${metric.unit ? ` ${metric.unit}` : ''}`}
