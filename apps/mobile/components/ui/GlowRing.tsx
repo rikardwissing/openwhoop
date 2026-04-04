@@ -32,6 +32,7 @@ export function GlowRing({
   const circumference = 2 * Math.PI * radius;
   const progress = score === null ? 0.08 : Math.max(0.06, Math.min(score / 100, 0.96));
   const dashOffset = circumference * (1 - progress);
+  const displayScore = score === null ? '--' : `${Math.round(score)}%`;
 
   return (
     <View style={[styles.wrap, { width: size, height: size }]}>
@@ -95,7 +96,7 @@ export function GlowRing({
       </Svg>
       <View style={styles.inner}>
         <Text style={styles.caption}>{caption}</Text>
-        <Text style={styles.score}>{score === null ? '--' : `${score}%`}</Text>
+        <Text style={styles.score}>{displayScore}</Text>
         <Text style={styles.label}>{label}</Text>
       </View>
     </View>

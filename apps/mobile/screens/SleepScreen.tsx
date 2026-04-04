@@ -291,9 +291,26 @@ export function SleepScreen() {
         <MetricCard
           accentColor={colors.aqua}
           style={styles.metricCard}
+          subtitle={`Awake ${data.timeInBedMinutes === null || data.durationMinutes === null ? '--' : formatCompactDuration(Math.max(0, data.timeInBedMinutes - data.durationMinutes))}`}
+          title="Time in Bed"
+          value={formatCompactDuration(data.timeInBedMinutes)}
+        />
+      </View>
+
+      <View style={styles.metricGrid}>
+        <MetricCard
+          accentColor={colors.success}
+          style={styles.metricCard}
           subtitle={`Wake consistency ${formatNullablePercent(data.wakeConsistency)}`}
           title="Bedtime Rhythm"
           value={formatNullablePercent(data.bedtimeConsistency)}
+        />
+        <MetricCard
+          accentColor={colors.indigo}
+          style={styles.metricCard}
+          subtitle={`Bedtime consistency ${formatNullablePercent(data.bedtimeConsistency)}`}
+          title="Wake Rhythm"
+          value={formatNullablePercent(data.wakeConsistency)}
         />
       </View>
 

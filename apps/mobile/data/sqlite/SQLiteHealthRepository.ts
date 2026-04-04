@@ -177,6 +177,7 @@ interface SleepCycleRecord {
   sleepId: string;
   start: Date;
   end: Date;
+  inBedEnd: Date | null;
   minBpm: number;
   maxBpm: number;
   avgBpm: number;
@@ -185,6 +186,7 @@ interface SleepCycleRecord {
   avgHrv: number;
   avgSkinTemp: number | null;
   score: number | null;
+  asleepMinutes: number | null;
 }
 
 interface ActivityRow {
@@ -218,6 +220,17 @@ interface SleepStageRecord {
   end: Date;
   stage: SleepStage;
   isEstimated: boolean;
+}
+
+interface SleepStageSummary {
+  stages: SleepStageSegment[];
+  timeAsleepMinutes: number;
+  timeInBedMinutes: number;
+  remMinutes: number;
+  deepMinutes: number;
+  start: Date;
+  end: Date;
+  inBedEnd: Date;
 }
 
 interface DeviceStateRow {
@@ -457,6 +470,7 @@ function toSleepCycleRecord(row: SleepCycleRow): SleepCycleRecord {
     sleepId: row.sleep_id,
     start: parseSqliteDateTime(row.start),
     end: parseSqliteDateTime(row.end),
+    inBedEnd: null,
     minBpm: row.min_bpm,
     maxBpm: row.max_bpm,
     avgBpm: row.avg_bpm,
@@ -465,6 +479,7 @@ function toSleepCycleRecord(row: SleepCycleRow): SleepCycleRecord {
     avgHrv: row.avg_hrv,
     avgSkinTemp: row.avg_skin_temp,
     score: row.score,
+    asleepMinutes: null,
   };
 }
 
@@ -854,13 +869,23 @@ function buildSleepCycle(period: DetectedPeriod, rows: HeartRateRecord[]): Sleep
     return null;
   }
 
-  const rr = windowRows.flatMap((row) => row.rr);
+  const initialSleepId = dateKey(period.end);
+  const initialStageRows = buildSleepStageRows(initialSleepId, windowRows);
+  const adjustedEnd = trimTrailingAwakeEnd(initialStageRows, period.end);
+  const trimmedRows = filterRowsForSleepEnd(windowRows, adjustedEnd);
+
+  if (trimmedRows.length === 0) {
+    return null;
+  }
+
+  const rr = trimmedRows.flatMap((row) => row.rr);
   const hrvValues = calculateRollingHrv(rr);
-  const bpmValues = windowRows.map((row) => row.bpm);
-  const tempValues = windowRows
+  const bpmValues = trimmedRows.map((row) => row.bpm);
+  const tempValues = trimmedRows
     .map((row) => resolvedSkinTemp(row))
     .filter((value): value is number => value !== null);
-  const sleepId = dateKey(period.end);
+  const sleepId = dateKey(adjustedEnd);
+  const trimmedStageRows = buildSleepStageRows(sleepId, trimmedRows);
   const bpmSummary = summarizeNumbers(bpmValues)!;
   const hrvSummary = summarizeNumbers(hrvValues);
 
@@ -868,7 +893,8 @@ function buildSleepCycle(period: DetectedPeriod, rows: HeartRateRecord[]): Sleep
     id: sleepId,
     sleepId,
     start: period.start,
-    end: period.end,
+    end: adjustedEnd,
+    inBedEnd: period.end,
     minBpm: bpmSummary.min,
     maxBpm: bpmSummary.max,
     avgBpm: Math.round(bpmSummary.average),
@@ -877,6 +903,7 @@ function buildSleepCycle(period: DetectedPeriod, rows: HeartRateRecord[]): Sleep
     avgHrv: hrvSummary ? Math.round(hrvSummary.average) : 0,
     avgSkinTemp: tempValues.length > 0 ? mean(tempValues) : null,
     score: null,
+    asleepMinutes: trimmedStageRows.length === 0 ? minutesBetween(period.start, adjustedEnd) : calculateTimeAsleepMinutes(trimmedStageRows),
   };
 }
 
@@ -895,9 +922,9 @@ function scoreSleepCycles(sleeps: SleepCycleRecord[], naps: ActivityRecord[]): S
   for (const sleep of sleeps) {
     const recentNaps = naps.filter((nap) => nap.activity === 'Nap' && nap.start >= new Date((scored.at(-1)?.end ?? new Date(sleep.start.getTime() - 86400000)).getTime()) && nap.end <= sleep.start);
     const needMinutes = calculateSleepNeedMinutes(
-      scored.map((priorSleep) => minutesBetween(priorSleep.start, priorSleep.end)),
+      scored.map((priorSleep) => priorSleep.asleepMinutes ?? minutesBetween(priorSleep.start, priorSleep.end)),
     );
-    const effectiveSleepMinutes = minutesBetween(sleep.start, sleep.end) + Math.round(napCreditHours(recentNaps) * 60);
+    const effectiveSleepMinutes = (sleep.asleepMinutes ?? minutesBetween(sleep.start, sleep.end)) + Math.round(napCreditHours(recentNaps) * 60);
     scored.push({
       ...sleep,
       score: clamp((effectiveSleepMinutes / needMinutes) * 100, 0, 100),
@@ -960,7 +987,7 @@ function buildSleepPlanSnapshot(
   now = new Date(),
 ): SleepPlanSnapshot {
   const latestSleep = sleeps.at(-1) ?? null;
-  const recentSleepDurations = sleeps.map((sleep) => minutesBetween(sleep.start, sleep.end));
+  const recentSleepDurations = sleeps.map((sleep) => sleep.asleepMinutes ?? minutesBetween(sleep.start, sleep.end));
   const rawSleepDebtMinutes = calculateSleepDebtMinutes(recentSleepDurations);
   const napWindowStart = latestSleep?.end ?? new Date(now.getTime() - 24 * 3600000);
   const napCreditMinutes = Math.round(
@@ -1003,7 +1030,33 @@ function classifyPpgStage(ppgGreen: number): SleepStage {
 }
 
 function buildStageSegments(sleep: SleepCycleRecord, rows: HeartRateRecord[]): SleepStageRecord[] {
-  const windowRows = rowsInRange(rows, sleep.start, sleep.end).filter((row) => row.ppgGreen !== null);
+  return buildSleepStageRows(sleep.sleepId, rowsInRange(rows, sleep.start, sleep.inBedEnd ?? sleep.end));
+}
+
+function filterRowsForSleepEnd(rows: readonly HeartRateRecord[], sleepEnd: Date) {
+  const sleepEndMs = sleepEnd.getTime();
+
+  return rows.filter((row) => {
+    const rowTime = row.date.getTime();
+
+    if (rowTime < sleepEndMs) {
+      return true;
+    }
+
+    if (rowTime > sleepEndMs) {
+      return false;
+    }
+
+    return row.ppgGreen === null || classifyPpgStage(row.ppgGreen) !== 'awake';
+  });
+}
+
+function exactMinutesBetween(start: Date, end: Date): number {
+  return Math.max(0, (end.getTime() - start.getTime()) / 60000);
+}
+
+function buildSleepStageRows(sleepId: string, rows: readonly HeartRateRecord[]): SleepStageRecord[] {
+  const windowRows = rows.filter((row) => row.ppgGreen !== null);
   if (windowRows.length === 0) {
     return [];
   }
@@ -1020,7 +1073,7 @@ function buildStageSegments(sleep: SleepCycleRecord, rows: HeartRateRecord[]): S
 
     if (stage !== currentStage || gapMinutes > 5) {
       segments.push({
-        sleepId: sleep.sleepId,
+        sleepId,
         start,
         end: previous,
         stage: currentStage,
@@ -1034,7 +1087,7 @@ function buildStageSegments(sleep: SleepCycleRecord, rows: HeartRateRecord[]): S
   }
 
   segments.push({
-    sleepId: sleep.sleepId,
+    sleepId,
     start,
     end: previous,
     stage: currentStage,
@@ -1042,6 +1095,38 @@ function buildStageSegments(sleep: SleepCycleRecord, rows: HeartRateRecord[]): S
   });
 
   return segments;
+}
+
+function trimTrailingAwakeEnd(records: readonly SleepStageRecord[], fallbackEnd: Date): Date {
+  if (records.length === 0) {
+    return fallbackEnd;
+  }
+
+  let trailingAwakeMinutes = 0;
+  let trailingAwakeStart: Date | null = null;
+  let index = records.length - 1;
+
+  while (index >= 0 && records[index].stage === 'awake') {
+    trailingAwakeMinutes += exactMinutesBetween(records[index].start, records[index].end);
+    trailingAwakeStart = records[index].start;
+    index -= 1;
+  }
+
+  if (trailingAwakeStart && trailingAwakeMinutes >= ACTIVITY_CHANGE_THRESHOLD_MINUTES && index >= 0) {
+    return trailingAwakeStart;
+  }
+
+  return fallbackEnd;
+}
+
+function calculateTimeAsleepMinutes(records: readonly SleepStageRecord[]): number {
+  const totalMinutes = records.reduce((sum, record) => (
+    record.stage === 'awake'
+      ? sum
+      : sum + exactMinutesBetween(record.start, record.end)
+  ), 0);
+
+  return Math.max(0, Math.round(totalMinutes));
 }
 
 function buildActivityRecords(periods: DetectedPeriod[], sleeps: SleepCycleRecord[]): ActivityRecord[] {
@@ -1345,6 +1430,7 @@ function buildEmptyDashboardSnapshot(now: Date, deviceState: DeviceStateRow | nu
     sleepCard: {
       score: null,
       durationMinutes: null,
+      timeInBedMinutes: null,
       stages: [],
       startLabel: '--',
       middleLabel: '--',
@@ -1604,6 +1690,54 @@ function aggregateSleepStages(records: SleepStageRecord[]): SleepStageSegment[] 
     stage: record.stage,
     minutes: Math.max(1, minutesBetween(record.start, record.end)),
   }));
+}
+
+function summarizeSleepStages(
+  records: readonly SleepStageRecord[],
+  start: Date,
+  end: Date,
+): SleepStageSummary {
+  const inBedEnd = records.at(-1)?.end ?? end;
+  const sleepEnd = trimTrailingAwakeEnd(records, inBedEnd);
+  const visibleRecords = records.filter((record) => record.start.getTime() < sleepEnd.getTime());
+  const stages = aggregateSleepStages([...visibleRecords]);
+  const timeInBedMinutes = Math.max(0, Math.round(exactMinutesBetween(start, inBedEnd)));
+
+  if (records.length === 0) {
+    return {
+      stages,
+      timeAsleepMinutes: timeInBedMinutes,
+      timeInBedMinutes,
+      remMinutes: 0,
+      deepMinutes: 0,
+      start,
+      end,
+      inBedEnd,
+    };
+  }
+
+  const timeAsleepMinutes = Math.min(timeInBedMinutes, calculateTimeAsleepMinutes(visibleRecords));
+  const remMinutes = Math.round(
+    visibleRecords.reduce((sum, record) => (
+      record.stage === 'rem' ? sum + exactMinutesBetween(record.start, record.end) : sum
+    ), 0),
+  );
+  const deepMinutes = Math.round(
+    visibleRecords.reduce((sum, record) => (
+      record.stage === 'deep' ? sum + exactMinutesBetween(record.start, record.end) : sum
+    ), 0),
+  );
+
+  return {
+    stages,
+    timeAsleepMinutes,
+    timeInBedMinutes,
+    remMinutes,
+    deepMinutes,
+    start,
+    end: sleepEnd,
+    inBedEnd,
+  };
 }
 
 function axisLabelForMidpoint(start: Date, end: Date): string {
@@ -3334,6 +3468,7 @@ function buildDashboardSleepCard(latestSleep: SleepCycleRecord | null, stageReco
     return {
       score: null,
       durationMinutes: null,
+      timeInBedMinutes: null,
       stages: [],
       startLabel: '--',
       middleLabel: '--',
@@ -3343,13 +3478,16 @@ function buildDashboardSleepCard(latestSleep: SleepCycleRecord | null, stageReco
     };
   }
 
+  const summary = summarizeSleepStages(stageRecords, latestSleep.start, latestSleep.end);
+
   return {
     score: latestSleep.score,
-    durationMinutes: minutesBetween(latestSleep.start, latestSleep.end),
-    stages: aggregateSleepStages(stageRecords),
-    startLabel: formatClock(latestSleep.start),
-    middleLabel: axisLabelForMidpoint(latestSleep.start, latestSleep.end),
-    endLabel: formatClock(latestSleep.end),
+    durationMinutes: summary.timeAsleepMinutes,
+    timeInBedMinutes: summary.timeInBedMinutes,
+    stages: summary.stages,
+    startLabel: formatClock(summary.start),
+    middleLabel: axisLabelForMidpoint(summary.start, summary.end),
+    endLabel: formatClock(summary.end),
     isEstimated: stageRecords.some((stage) => stage.isEstimated),
     missingReason: stageRecords.length === 0 ? LIMITED_SENSOR_REASON : null,
   };
@@ -3440,7 +3578,7 @@ async function buildFullDashboardSnapshot(db: SQLiteDatabase): Promise<Dashboard
       },
       {
         label: 'Sleep',
-        value: latestSleep ? formatMetricNumber(minutesBetween(latestSleep.start, latestSleep.end), '').replace(' ', '') : '--',
+        value: sleepCard.durationMinutes !== null ? formatMetricNumber(sleepCard.durationMinutes, '').replace(' ', '') : '--',
         accent: 'violet',
         missingReason: latestSleep ? null : NO_SLEEP_REASON,
       },
@@ -4200,6 +4338,7 @@ export class SQLiteHealthRepository implements HealthRepository {
             bedtime: '--',
             wakeTime: '--',
             durationMinutes: null,
+            timeInBedMinutes: null,
             bedtimeConsistency: null,
             wakeConsistency: null,
             scoreTrend: [],
@@ -4220,21 +4359,27 @@ export class SQLiteHealthRepository implements HealthRepository {
         const wakeConsistency = clamp(100 - stdDev(wakeValues, wakeMean) / Math.max(1, wakeMean) * 100, 0, 100);
 
         const mappedSessions: SleepSession[] = sessions.map((session) => {
-          const stages = aggregateSleepStages(stageRecords.filter((stage) => stage.sleepId === session.sleepId));
+          const summary = summarizeSleepStages(
+            stageRecords.filter((stage) => stage.sleepId === session.sleepId),
+            session.start,
+            session.end,
+          );
+
           return {
             id: session.id,
             dateLabel: formatShortDate(session.end),
             score: session.score,
-            bedtime: formatClock(session.start),
-            wakeTime: formatClock(session.end),
-            durationMinutes: minutesBetween(session.start, session.end),
+            bedtime: formatClock(summary.start),
+            wakeTime: formatClock(summary.end),
+            durationMinutes: summary.timeAsleepMinutes,
+            timeInBedMinutes: summary.timeInBedMinutes,
             efficiency: session.score,
-            remMinutes: stages.filter((stage) => stage.stage === 'rem').reduce((sum, stage) => sum + stage.minutes, 0),
-            deepMinutes: stages.filter((stage) => stage.stage === 'deep').reduce((sum, stage) => sum + stage.minutes, 0),
+            remMinutes: summary.remMinutes,
+            deepMinutes: summary.deepMinutes,
             consistency: Math.round((bedtimeConsistency + wakeConsistency) / 2),
-            stages,
+            stages: summary.stages,
             isEstimated: true,
-            missingReason: stages.length === 0 ? LIMITED_SENSOR_REASON : null,
+            missingReason: summary.stages.length === 0 ? LIMITED_SENSOR_REASON : null,
             minBpm: session.minBpm,
             maxBpm: session.maxBpm,
             avgHrv: session.avgHrv,
@@ -4242,15 +4387,17 @@ export class SQLiteHealthRepository implements HealthRepository {
         });
         const sleepScoreByDay = new Map(sessions.map((session) => [dateKey(session.end), session.score]));
         const sleepDurationByDay = new Map(
-          sessions.map((session) => [dateKey(session.end), minutesBetween(session.start, session.end)]),
+          sessions.map((session, index) => [dateKey(session.end), mappedSessions[index]?.durationMinutes ?? minutesBetween(session.start, session.end)]),
         );
+        const latestSession = mappedSessions[0] ?? null;
 
         const snapshot = {
-          headlineScore: latestSleep.score,
-          headlineLabel: describeSleepScore(latestSleep.score),
-          bedtime: formatClock(latestSleep.start),
-          wakeTime: formatClock(latestSleep.end),
-          durationMinutes: minutesBetween(latestSleep.start, latestSleep.end),
+          headlineScore: latestSession?.score ?? latestSleep.score,
+          headlineLabel: describeSleepScore(latestSession?.score ?? latestSleep.score),
+          bedtime: latestSession?.bedtime ?? formatClock(latestSleep.start),
+          wakeTime: latestSession?.wakeTime ?? formatClock(latestSleep.end),
+          durationMinutes: latestSession?.durationMinutes ?? minutesBetween(latestSleep.start, latestSleep.end),
+          timeInBedMinutes: latestSession?.timeInBedMinutes ?? minutesBetween(latestSleep.start, latestSleep.end),
           bedtimeConsistency: Math.round(bedtimeConsistency),
           wakeConsistency: Math.round(wakeConsistency),
           scoreTrend: buildFilledDailySeries(range, latestSleep.end, (day) => sleepScoreByDay.get(day) ?? null),

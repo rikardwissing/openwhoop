@@ -62,6 +62,7 @@ export interface HeartCardSnapshot extends EstimatedValueMeta {
 export interface SleepCardSnapshot extends EstimatedValueMeta {
   score: number | null;
   durationMinutes: number | null;
+  timeInBedMinutes: number | null;
   stages: SleepStageSegment[];
   startLabel: string;
   middleLabel: string;
@@ -92,6 +93,7 @@ export interface SleepSession extends EstimatedValueMeta {
   bedtime: string;
   wakeTime: string;
   durationMinutes: number;
+  timeInBedMinutes: number;
   efficiency: number | null;
   remMinutes: number;
   deepMinutes: number;
@@ -119,6 +121,7 @@ export interface SleepHistorySnapshot extends EstimatedValueMeta {
   bedtime: string;
   wakeTime: string;
   durationMinutes: number | null;
+  timeInBedMinutes: number | null;
   bedtimeConsistency: number | null;
   wakeConsistency: number | null;
   scoreTrend: TrendPoint[];

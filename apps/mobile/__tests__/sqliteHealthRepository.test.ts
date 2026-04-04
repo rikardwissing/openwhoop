@@ -501,7 +501,81 @@ describe('SQLiteHealthRepository', () => {
     adapter.close();
   });
 
-  it('loads seeded snapshots without triggering a derived rebuild on startup', async () => {
+  it('trims a sustained trailing awake block and reports time asleep separately from time in bed', async () => {
+    const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
+    await initializeDatabase(adapter as never);
+
+    const heartInsert = `
+      INSERT INTO heart_rate (id, bpm, time, rr_intervals, sensor_data, synced)
+      VALUES (?, ?, ?, ?, ?, 0)
+    `;
+    const start = new Date(2026, 3, 4, 0, 20, 0);
+    const gravity = [0.11, -0.02, 0.98];
+
+    for (let index = 0; index < 90; index += 1) {
+      const sampleDate = new Date(start.getTime() + index * 5 * 60000);
+      const isTrailingWake = sampleDate >= new Date(2026, 3, 4, 4, 30, 0);
+      await adapter.runAsync(
+        heartInsert,
+        index + 1,
+        isTrailingWake ? 66 : 58,
+        formatTestSqliteDateTime(sampleDate),
+        '1000,990,980',
+        JSON.stringify({
+          ppg_green: isTrailingWake ? 25000 : 15000,
+          skin_contact: 1,
+          accel_gravity: gravity,
+        }),
+      );
+    }
+
+    await refreshDerivedData(adapter as never);
+
+    const sleeps = await adapter.getAllAsync<{
+      start: string;
+      end: string;
+    }>(
+      `
+        SELECT start, end
+        FROM sleep_cycles
+        ORDER BY start ASC
+      `,
+    );
+
+    expect(sleeps).toEqual([
+      {
+        start: '2026-04-04 00:20:00',
+        end: '2026-04-04 04:30:00',
+      },
+    ]);
+
+    const stageTail = await adapter.getFirstAsync<{ stage: string }>(
+      `
+        SELECT stage
+        FROM sleep_stage_segments
+        ORDER BY end DESC
+        LIMIT 1
+      `,
+    );
+
+    expect(stageTail?.stage).toBe('awake');
+
+    const repository = new SQLiteHealthRepository(adapter as never);
+    const sleepHistory = await repository.getSleepHistory('14d');
+
+    expect(sleepHistory.wakeTime).toBe('4:30 AM');
+    expect(sleepHistory.durationMinutes).toBe(245);
+    expect(sleepHistory.timeInBedMinutes).toBe(445);
+    expect(sleepHistory.sessions[0]).toMatchObject({
+      wakeTime: '4:30 AM',
+      durationMinutes: 245,
+      timeInBedMinutes: 445,
+    });
+
+    adapter.close();
+  });
+
+  it('loads seeded snapshots and refreshes outdated derived data on startup', async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'btwearable-seed-'));
     const source = path.resolve(process.cwd(), 'assets/databases/btwearable-seed.db');
     const seedCopy = path.join(tempDir, 'btwearable-seed.db');
@@ -509,7 +583,7 @@ describe('SQLiteHealthRepository', () => {
 
     const adapter = new NodeSqliteAdapter(new DatabaseSync(seedCopy));
     await initializeDatabase(adapter as never);
-    await expect(shouldRefreshDerivedData(adapter as never)).resolves.toBe(false);
+    await expect(shouldRefreshDerivedData(adapter as never)).resolves.toBe(true);
 
     const repository = new SQLiteHealthRepository(adapter as never);
     const [dashboard, sleep, heart, wellness] = await Promise.all([

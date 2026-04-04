@@ -211,6 +211,27 @@ describe('screen rendering', () => {
 
     expect(await screen.findByText('Sleep Score Trend')).toBeTruthy();
     expect(await screen.findByText('Recent Nights')).toBeTruthy();
+    expect(await screen.findByText('Time in Bed')).toBeTruthy();
+  });
+
+  it('rounds the sleep score ring to a whole percent', async () => {
+    const repository = new MockHealthRepository({ delayMs: 0 });
+    const sleepHistory = await repository.getSleepHistory('14d');
+    jest.spyOn(repository, 'getSleepHistory').mockResolvedValue({
+      ...sleepHistory,
+      headlineScore: 82.4,
+    });
+
+    const screen = render(
+      <HealthDataProvider repository={repository}>
+        <WearableSyncContextProvider value={createWearableContextValue()}>
+          <SleepScreen />
+        </WearableSyncContextProvider>
+      </HealthDataProvider>,
+    );
+
+    expect(await screen.findByText('82%')).toBeTruthy();
+    expect(screen.queryByText('82.4%')).toBeNull();
   });
 
   it('swaps sleep-stage readout while scrubbing and restores on release', async () => {

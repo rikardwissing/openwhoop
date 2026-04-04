@@ -1,7 +1,7 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 
 export const APP_DATABASE_NAME = 'btwearable.db';
-export const DERIVED_DATA_SCHEMA_VERSION = 2;
+export const DERIVED_DATA_SCHEMA_VERSION = 4;
 
 export async function initializeDatabase(db: SQLiteDatabase) {
   await db.execAsync(`
