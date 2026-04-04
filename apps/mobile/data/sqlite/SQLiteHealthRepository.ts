@@ -347,6 +347,41 @@ interface PreparedDataBundle {
   deviceState: DeviceStateRow | null;
 }
 
+interface HeartMetricUpdate {
+  id: number;
+  stress: number | null;
+  spo2: number | null;
+  skinTemp: number | null;
+}
+
+interface RollingStressValue {
+  id: number;
+  value: number;
+  bin: number;
+}
+
+interface RollingStressOccurrenceQueue {
+  ids: number[];
+  start: number;
+}
+
+interface RollingStressState {
+  count: number;
+  nextId: number;
+  binCounts: Map<number, number>;
+  binOccurrences: Map<number, RollingStressOccurrenceQueue>;
+  minDeque: RollingStressValue[];
+  minStart: number;
+  maxDeque: RollingStressValue[];
+  maxStart: number;
+}
+
+interface RowStressContribution {
+  rawRrLength: number;
+  rrValues: RollingStressValue[];
+  fallbackValue: RollingStressValue | null;
+}
+
 type PerformanceLogValue = string | number | boolean | null;
 
 function logMobilePerf(label: string, startedAt: number, details?: Record<string, PerformanceLogValue>) {
@@ -378,6 +413,7 @@ function logMobilePerfError(label: string, error: unknown, details?: Record<stri
 }
 
 const aggregateAccessLocks = new WeakMap<object, Promise<void>>();
+const HEART_METRIC_UPDATE_BATCH_SIZE = 200;
 
 async function withAggregateAccessLock<T>(db: SQLiteDatabase, callback: () => Promise<T>): Promise<T> {
   const key = db as object;
@@ -1217,29 +1253,149 @@ function estimateCalories<T extends { bpm: number; date: Date }>(rows: T[], maxH
   return Math.round(calories);
 }
 
-function trackStressValue(
-  value: number,
-  bins: Map<number, number>,
-  state: {
-    count: number;
-    min: number;
-    max: number;
-    modeBin: number;
-    modeFreq: number;
-  },
-) {
-  state.count += 1;
-  state.min = Math.min(state.min, value);
-  state.max = Math.max(state.max, value);
+function createRollingStressState(): RollingStressState {
+  return {
+    count: 0,
+    nextId: 0,
+    binCounts: new Map<number, number>(),
+    binOccurrences: new Map<number, RollingStressOccurrenceQueue>(),
+    minDeque: [],
+    minStart: 0,
+    maxDeque: [],
+    maxStart: 0,
+  };
+}
 
-  const bin = Math.floor(value / 50);
-  const frequency = (bins.get(bin) ?? 0) + 1;
-  bins.set(bin, frequency);
-
-  if (frequency > state.modeFreq) {
-    state.modeFreq = frequency;
-    state.modeBin = bin;
+function compactRollingStressDeque(state: RollingStressState, key: 'minDeque' | 'maxDeque', startKey: 'minStart' | 'maxStart') {
+  if (state[startKey] > 64 && state[startKey] * 2 >= state[key].length) {
+    state[key] = state[key].slice(state[startKey]);
+    state[startKey] = 0;
   }
+}
+
+function compactRollingStressOccurrenceQueue(queue: RollingStressOccurrenceQueue) {
+  if (queue.start > 64 && queue.start * 2 >= queue.ids.length) {
+    queue.ids = queue.ids.slice(queue.start);
+    queue.start = 0;
+  }
+}
+
+function appendRollingStressValue(state: RollingStressState, value: number): RollingStressValue {
+  const ref = {
+    id: state.nextId,
+    value,
+    bin: Math.floor(value / 50),
+  };
+  state.nextId += 1;
+  state.count += 1;
+
+  while (state.minDeque.length > state.minStart && state.minDeque[state.minDeque.length - 1]!.value > value) {
+    state.minDeque.pop();
+  }
+  state.minDeque.push(ref);
+
+  while (state.maxDeque.length > state.maxStart && state.maxDeque[state.maxDeque.length - 1]!.value < value) {
+    state.maxDeque.pop();
+  }
+  state.maxDeque.push(ref);
+
+  state.binCounts.set(ref.bin, (state.binCounts.get(ref.bin) ?? 0) + 1);
+  const occurrences = state.binOccurrences.get(ref.bin) ?? {
+    ids: [],
+    start: 0,
+  };
+  occurrences.ids.push(ref.id);
+  state.binOccurrences.set(ref.bin, occurrences);
+
+  return ref;
+}
+
+function removeRollingStressValue(state: RollingStressState, ref: RollingStressValue) {
+  state.count -= 1;
+
+  const nextBinCount = (state.binCounts.get(ref.bin) ?? 0) - 1;
+  if (nextBinCount <= 0) {
+    state.binCounts.delete(ref.bin);
+  } else {
+    state.binCounts.set(ref.bin, nextBinCount);
+  }
+
+  const occurrences = state.binOccurrences.get(ref.bin);
+  if (occurrences) {
+    while (occurrences.start < occurrences.ids.length && occurrences.ids[occurrences.start]! < ref.id) {
+      occurrences.start += 1;
+    }
+    if (occurrences.start < occurrences.ids.length && occurrences.ids[occurrences.start] === ref.id) {
+      occurrences.start += 1;
+    }
+
+    if (occurrences.start >= occurrences.ids.length) {
+      state.binOccurrences.delete(ref.bin);
+    } else {
+      compactRollingStressOccurrenceQueue(occurrences);
+    }
+  }
+
+  if (state.minStart < state.minDeque.length && state.minDeque[state.minStart]!.id === ref.id) {
+    state.minStart += 1;
+    compactRollingStressDeque(state, 'minDeque', 'minStart');
+  }
+
+  if (state.maxStart < state.maxDeque.length && state.maxDeque[state.maxStart]!.id === ref.id) {
+    state.maxStart += 1;
+    compactRollingStressDeque(state, 'maxDeque', 'maxStart');
+  }
+}
+
+function resolveRollingStressMode(state: RollingStressState) {
+  let modeBin = 0;
+  let modeFreq = 0;
+  let modeReachedAt = Number.POSITIVE_INFINITY;
+
+  for (const [bin, frequency] of state.binCounts) {
+    if (frequency <= 0) {
+      continue;
+    }
+
+    const occurrences = state.binOccurrences.get(bin);
+    if (!occurrences) {
+      continue;
+    }
+
+    const reachedAt = occurrences.ids[occurrences.start + frequency - 1] ?? Number.POSITIVE_INFINITY;
+    if (frequency > modeFreq || (frequency === modeFreq && reachedAt < modeReachedAt)) {
+      modeBin = bin;
+      modeFreq = frequency;
+      modeReachedAt = reachedAt;
+    }
+  }
+
+  return {
+    modeBin,
+    modeFreq,
+  };
+}
+
+function calculateStressScoreFromRollingState(state: RollingStressState): number | null {
+  if (state.count < STRESS_WINDOW) {
+    return null;
+  }
+
+  const min = state.minDeque[state.minStart]?.value;
+  const max = state.maxDeque[state.maxStart]?.value;
+  if (min === undefined || max === undefined) {
+    return null;
+  }
+
+  const variabilityRange = (max - min) / 1000;
+  if (variabilityRange < 0.0001) {
+    return 10;
+  }
+
+  const { modeBin, modeFreq } = resolveRollingStressMode(state);
+  const mode = modeBin * 50 + 25;
+  const aMode = modeFreq / state.count * 100;
+  return Math.min(10, Math.round((aMode / (2 * variabilityRange * mode / 1000)) * 100) / 100);
 }
 
 function calculateStressScoreForRange(
@@ -1251,49 +1407,29 @@ function calculateStressScoreForRange(
     return null;
   }
 
+  const rrState = createRollingStressState();
+  const fallbackState = createRollingStressState();
   let realRrLength = 0;
+
   for (let index = startIndex; index < endIndex; index += 1) {
-    realRrLength += heartRows[index].rr.length;
-  }
+    const row = heartRows[index];
+    realRrLength += row.rr.length;
 
-  const bins = new Map<number, number>();
-  const state = {
-    count: 0,
-    min: Number.POSITIVE_INFINITY,
-    max: Number.NEGATIVE_INFINITY,
-    modeBin: 0,
-    modeFreq: 0,
-  };
-
-  if (realRrLength >= STRESS_WINDOW) {
-    for (let index = startIndex; index < endIndex; index += 1) {
-      for (const value of heartRows[index].rr) {
-        if (value > 0) {
-          trackStressValue(value, bins, state);
-        }
-      }
-    }
-  } else {
-    for (let index = startIndex; index < endIndex; index += 1) {
-      const value = Math.round((60 / heartRows[index].bpm) * 1000);
+    for (const value of row.rr) {
       if (value > 0) {
-        trackStressValue(value, bins, state);
+        appendRollingStressValue(rrState, value);
       }
+    }
+
+    const fallbackValue = Math.round((60 / row.bpm) * 1000);
+    if (fallbackValue > 0) {
+      appendRollingStressValue(fallbackState, fallbackValue);
     }
   }
 
-  if (state.count < STRESS_WINDOW) {
-    return null;
-  }
-
-  const variabilityRange = (state.max - state.min) / 1000;
-  if (variabilityRange < 0.0001) {
-    return 10;
-  }
-
-  const mode = state.modeBin * 50 + 25;
-  const aMode = state.modeFreq / state.count * 100;
-  return Math.min(10, Math.round((aMode / (2 * variabilityRange * mode / 1000)) * 100) / 100);
+  return realRrLength >= STRESS_WINDOW
+    ? calculateStressScoreFromRollingState(rrState)
+    : calculateStressScoreFromRollingState(fallbackState);
 }
 
 function calculateStressScore(window: HeartRateRecord[]): number | null {
@@ -2287,9 +2423,11 @@ async function resolveMetricWindowStartTime(db: SQLiteDatabase, fromTime: string
 }
 
 function buildDerivedMetricMaps(heartRows: HeartRateRecord[]) {
-  const stressByTime = new Map<string, number | null>();
-  const spo2ByTime = new Map<string, number | null>();
-  const tempByTime = new Map<string, number | null>();
+  const updates: HeartMetricUpdate[] = [];
+  const rrStressState = createRollingStressState();
+  const fallbackStressState = createRollingStressState();
+  const stressWindow = new Array<RowStressContribution | null>(STRESS_WINDOW).fill(null);
+  let stressRawRrLength = 0;
   const spo2Window: Array<{ red: number; ir: number; valid: boolean }> = [];
   let spo2ValidCount = 0;
   let spo2RedSum = 0;
@@ -2299,8 +2437,44 @@ function buildDerivedMetricMaps(heartRows: HeartRateRecord[]) {
 
   for (let index = 0; index < heartRows.length; index += 1) {
     const row = heartRows[index];
-    const stressWindowStart = Math.max(0, index - STRESS_WINDOW + 1);
-    stressByTime.set(row.time, calculateStressScoreForRange(heartRows, stressWindowStart, index + 1));
+    const stressSlot = index % STRESS_WINDOW;
+    if (index >= STRESS_WINDOW) {
+      const removed = stressWindow[stressSlot];
+      if (removed) {
+        stressRawRrLength -= removed.rawRrLength;
+
+        for (const value of removed.rrValues) {
+          removeRollingStressValue(rrStressState, value);
+        }
+
+        if (removed.fallbackValue) {
+          removeRollingStressValue(fallbackStressState, removed.fallbackValue);
+        }
+      }
+    }
+
+    const rrValues: RollingStressValue[] = [];
+    for (const value of row.rr) {
+      if (value > 0) {
+        rrValues.push(appendRollingStressValue(rrStressState, value));
+      }
+    }
+
+    const fallbackRrValue = Math.round((60 / row.bpm) * 1000);
+    const fallbackValue = fallbackRrValue > 0 ? appendRollingStressValue(fallbackStressState, fallbackRrValue) : null;
+    stressWindow[stressSlot] = {
+      rawRrLength: row.rr.length,
+      rrValues,
+      fallbackValue,
+    };
+    stressRawRrLength += row.rr.length;
+
+    const stress =
+      index + 1 < STRESS_WINDOW
+        ? null
+        : stressRawRrLength >= STRESS_WINDOW
+          ? calculateStressScoreFromRollingState(rrStressState)
+          : calculateStressScoreFromRollingState(fallbackStressState);
 
     const red = row.sensorData?.spo2_red ?? 0;
     const ir = row.sensorData?.spo2_ir ?? 0;
@@ -2326,26 +2500,25 @@ function buildDerivedMetricMaps(heartRows: HeartRateRecord[]) {
       }
     }
 
-    spo2ByTime.set(
-      row.time,
-      calculateSpo2ScoreFromState(
-        spo2Window.length,
-        spo2ValidCount,
-        spo2RedSum,
-        spo2RedSquares,
-        spo2IrSum,
-        spo2IrSquares,
-      ),
+    const spo2 = calculateSpo2ScoreFromState(
+      spo2Window.length,
+      spo2ValidCount,
+      spo2RedSum,
+      spo2RedSquares,
+      spo2IrSum,
+      spo2IrSquares,
     );
+    const skinTemp = calculateSkinTempValue(row);
 
-    tempByTime.set(row.time, calculateSkinTempValue(row));
+    updates.push({
+      id: row.id,
+      stress,
+      spo2,
+      skinTemp,
+    });
   }
 
-  return {
-    stressByTime,
-    spo2ByTime,
-    tempByTime,
-  };
+  return updates;
 }
 
 function buildDerivedDetectionArtifacts(heartRows: HeartRateRecord[]) {
@@ -2374,18 +2547,50 @@ function buildDerivedDetectionArtifacts(heartRows: HeartRateRecord[]) {
 
 async function updateHeartMetricRows(
   tx: TransactionWriter,
-  heartRows: HeartRateRecord[],
-  metricMaps: ReturnType<typeof buildDerivedMetricMaps>,
+  metricUpdates: ReturnType<typeof buildDerivedMetricMaps>,
 ) {
-  for (const row of heartRows) {
+  if (metricUpdates.length === 0) {
+    return;
+  }
+
+  await tx.execAsync(`
+    CREATE TEMP TABLE IF NOT EXISTS heart_metric_updates (
+      id INTEGER PRIMARY KEY NOT NULL,
+      stress REAL,
+      spo2 REAL,
+      skin_temp REAL
+    );
+    DELETE FROM heart_metric_updates;
+  `);
+
+  for (let index = 0; index < metricUpdates.length; index += HEART_METRIC_UPDATE_BATCH_SIZE) {
+    const batch = metricUpdates.slice(index, index + HEART_METRIC_UPDATE_BATCH_SIZE);
+    const placeholders = batch.map(() => '(?, ?, ?, ?)').join(', ');
+    const args: Array<number | null> = [];
+
+    for (const update of batch) {
+      args.push(update.id, update.stress, update.spo2, update.skinTemp);
+    }
+
     await tx.runAsync(
-      'UPDATE heart_rate SET stress = ?, spo2 = ?, skin_temp = ? WHERE time = ?',
-      metricMaps.stressByTime.get(row.time) ?? null,
-      metricMaps.spo2ByTime.get(row.time) ?? null,
-      metricMaps.tempByTime.get(row.time) ?? null,
-      row.time,
+      `
+        INSERT INTO heart_metric_updates (id, stress, spo2, skin_temp)
+        VALUES ${placeholders}
+      `,
+      ...args,
     );
   }
+
+  await tx.execAsync(`
+    UPDATE heart_rate
+    SET
+      stress = (SELECT heart_metric_updates.stress FROM heart_metric_updates WHERE heart_metric_updates.id = heart_rate.id),
+      spo2 = (SELECT heart_metric_updates.spo2 FROM heart_metric_updates WHERE heart_metric_updates.id = heart_rate.id),
+      skin_temp = (SELECT heart_metric_updates.skin_temp FROM heart_metric_updates WHERE heart_metric_updates.id = heart_rate.id)
+    WHERE id IN (SELECT id FROM heart_metric_updates);
+
+    DELETE FROM heart_metric_updates;
+  `);
 }
 
 async function insertDerivedArtifacts(
@@ -2919,7 +3124,7 @@ export async function refreshDerivedDataRange(
   });
 
   const metricBuildStartedAt = Date.now();
-  const metricMaps = buildDerivedMetricMaps(metricRows);
+  const metricUpdates = buildDerivedMetricMaps(metricRows);
   logMobilePerf('derived.range.buildMetrics', metricBuildStartedAt, {
     rows: metricRows.length,
   });
@@ -2950,7 +3155,7 @@ export async function refreshDerivedDataRange(
 
   await withExclusiveTransaction(db, async (tx) => {
     const metricWriteStartedAt = Date.now();
-    await updateHeartMetricRows(tx, metricRows, metricMaps);
+    await updateHeartMetricRows(tx, metricUpdates);
     logMobilePerf('derived.range.writeMetrics', metricWriteStartedAt, {
       rows: metricRows.length,
     });
@@ -2994,7 +3199,7 @@ export async function refreshDerivedData(db: SQLiteDatabase) {
   });
 
   const metricBuildStartedAt = Date.now();
-  const metricMaps = buildDerivedMetricMaps(heartRows);
+  const metricUpdates = buildDerivedMetricMaps(heartRows);
   logMobilePerf('derived.full.buildMetrics', metricBuildStartedAt, {
     rows: heartRows.length,
   });
@@ -3011,7 +3216,7 @@ export async function refreshDerivedData(db: SQLiteDatabase) {
 
   await withExclusiveTransaction(db, async (tx) => {
     const metricWriteStartedAt = Date.now();
-    await updateHeartMetricRows(tx, heartRows, metricMaps);
+    await updateHeartMetricRows(tx, metricUpdates);
     logMobilePerf('derived.full.writeMetrics', metricWriteStartedAt, {
       rows: heartRows.length,
     });

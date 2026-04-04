@@ -1,7 +1,7 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 
 import type { HealthCacheScope, HealthRepository } from '@/data/HealthRepository';
-import { rebuildAggregateTablesForDebug } from '@/data/sqlite/SQLiteHealthRepository';
+import { rebuildAggregateTablesForDebug, refreshDerivedData } from '@/data/sqlite/SQLiteHealthRepository';
 import type { BackgroundSyncState } from '@/types/device';
 import type {
   DashboardSnapshot,
@@ -408,6 +408,21 @@ export async function runFullPerformanceSweep({
   const derivedState = await repository.getDerivedRefreshState();
 
   try {
+    await measureBooleanStep(
+      steps,
+      'derived.full.rebuild',
+      'Full derived data rebuild',
+      async () => {
+        if (heartRowCount === 0) {
+          return false;
+        }
+
+        await refreshDerivedData(db);
+        repository.invalidateCaches(['dashboard', 'sleep', 'heart', 'wellness', 'derived']);
+        return true;
+      },
+    );
+
     await runWarmAndColdReadPair({
       steps,
       repository,

@@ -266,6 +266,61 @@ async function insertSyntheticHeartSeries(
   });
 }
 
+function calculateExpectedStressValues(samples: Array<{ bpm: number; rr: number[] }>) {
+  const stressWindow = 120;
+
+  return samples.map((_, index) => {
+    const start = Math.max(0, index - stressWindow + 1);
+    const window = samples.slice(start, index + 1);
+    if (window.length < stressWindow) {
+      return null;
+    }
+
+    const realRrLength = window.reduce(
+      (sum, row) => sum + row.rr.filter((value) => value > 0).length,
+      0,
+    );
+    const values = realRrLength >= stressWindow
+      ? window.flatMap((row) => row.rr.filter((value) => value > 0))
+      : window
+          .map((row) => Math.round((60 / row.bpm) * 1000))
+          .filter((value) => value > 0);
+
+    if (values.length < stressWindow) {
+      return null;
+    }
+
+    let min = Number.POSITIVE_INFINITY;
+    let max = Number.NEGATIVE_INFINITY;
+    let modeBin = 0;
+    let modeFreq = 0;
+    const bins = new Map<number, number>();
+
+    for (const value of values) {
+      min = Math.min(min, value);
+      max = Math.max(max, value);
+
+      const bin = Math.floor(value / 50);
+      const frequency = (bins.get(bin) ?? 0) + 1;
+      bins.set(bin, frequency);
+
+      if (frequency > modeFreq) {
+        modeBin = bin;
+        modeFreq = frequency;
+      }
+    }
+
+    const variabilityRange = (max - min) / 1000;
+    if (variabilityRange < 0.0001) {
+      return 10;
+    }
+
+    const mode = modeBin * 50 + 25;
+    const aMode = modeFreq / values.length * 100;
+    return Math.min(10, Math.round((aMode / (2 * variabilityRange * mode / 1000)) * 100) / 100);
+  });
+}
+
 describe('SQLiteHealthRepository', () => {
   it('skips derived refresh when derived state matches the source history', async () => {
     const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
@@ -429,6 +484,7 @@ describe('SQLiteHealthRepository', () => {
 
     expect(run.runKind).toBe('full_sweep');
     expect(run.id).toBeGreaterThan(0);
+    expect(run.steps.some((step) => step.key === 'derived.full.rebuild')).toBe(true);
     expect(run.steps.some((step) => step.key === 'dashboard.read.cold')).toBe(true);
     expect(run.steps.some((step) => step.key === 'aggregates.rebuild')).toBe(true);
     expect(run.steps.some((step) => step.key === 'dashboard.snapshot.warm')).toBe(true);
@@ -440,6 +496,7 @@ describe('SQLiteHealthRepository', () => {
     expect(recentRuns[0]?.lastSyncImportedReadings).toBe(42);
     expect(recentRuns[0]?.steps.map((step) => step.key)).toEqual(
       expect.arrayContaining([
+        'derived.full.rebuild',
         'dashboard.read.warm',
         'dashboard.read.cold',
         'aggregates.rebuild',
@@ -497,6 +554,108 @@ describe('SQLiteHealthRepository', () => {
         end: '2026-04-02 06:50:00',
       },
     ]);
+
+    adapter.close();
+  });
+
+  it('batches heart metric writes during a full derived refresh', async () => {
+    const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
+    await initializeDatabase(adapter as never);
+
+    await insertSyntheticHeartSeries(adapter, {
+      count: 600,
+      start: new Date(2026, 3, 1, 0, 0, 0),
+      intervalMinutes: 1,
+    });
+
+    adapter.calls.length = 0;
+    await refreshDerivedData(adapter as never);
+
+    expect(
+      adapter.calls.some((sql) => sql.includes('CREATE TEMP TABLE IF NOT EXISTS heart_metric_updates')),
+    ).toBe(true);
+    expect(
+      adapter.calls.some((sql) => sql.includes('INSERT INTO heart_metric_updates')),
+    ).toBe(true);
+    expect(
+      adapter.calls.some(
+        (sql) => sql.includes('UPDATE heart_rate SET stress = ?, spo2 = ?, skin_temp = ? WHERE time = ?'),
+      ),
+    ).toBe(false);
+
+    adapter.close();
+  });
+
+  it('matches legacy stress scoring across bpm fallback and rr-driven windows', async () => {
+    const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
+    await initializeDatabase(adapter as never);
+
+    const samples = Array.from({ length: 140 }, (_, index) => {
+      if (index < 60) {
+        return {
+          bpm: 56 + (index % 7),
+          rr: [],
+        };
+      }
+
+      if (index < 120) {
+        return {
+          bpm: 58 + (index % 9),
+          rr: [1020 - (index % 40)],
+        };
+      }
+
+      return {
+        bpm: 60 + (index % 11),
+        rr: [
+          980 - (index % 25),
+          995 - (index % 20),
+          1010 - (index % 15),
+        ],
+      };
+    });
+
+    const heartInsert = `
+      INSERT INTO heart_rate (id, bpm, time, rr_intervals, sensor_data, synced)
+      VALUES (?, ?, ?, ?, ?, 0)
+    `;
+    const gravity = [0.05, -0.01, 0.99];
+
+    await adapter.withExclusiveTransactionAsync(async (tx) => {
+      for (let index = 0; index < samples.length; index += 1) {
+        const sample = samples[index];
+        const sampleDate = new Date(2026, 3, 3, 0, index, 0);
+        await tx.runAsync(
+          heartInsert,
+          index + 1,
+          sample.bpm,
+          formatTestSqliteDateTime(sampleDate),
+          sample.rr.join(','),
+          JSON.stringify({
+            ppg_green: 15_000 + ((index % 10) * 400),
+            spo2_red: 12_000 + index,
+            spo2_ir: 14_000 + index,
+            skin_contact: 1,
+            skin_temp_raw: 830,
+            accel_gravity: gravity,
+          }),
+        );
+      }
+    });
+
+    await refreshDerivedData(adapter as never);
+
+    const rows = await adapter.getAllAsync<{
+      stress: number | null;
+    }>(
+      `
+        SELECT stress
+        FROM heart_rate
+        ORDER BY time ASC
+      `,
+    );
+
+    expect(rows.map((row) => row.stress)).toEqual(calculateExpectedStressValues(samples));
 
     adapter.close();
   });
