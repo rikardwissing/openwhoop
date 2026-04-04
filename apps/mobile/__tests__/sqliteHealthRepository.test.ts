@@ -734,6 +734,59 @@ describe('SQLiteHealthRepository', () => {
     adapter.close();
   });
 
+  it('drops isolated awake spikes from sleep stage summaries while preserving real awake blocks', async () => {
+    const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
+    await initializeDatabase(adapter as never);
+
+    await adapter.runAsync(
+      `
+        INSERT INTO derived_data_state (id, derived_schema_version, source_heart_count, refreshed_at)
+        VALUES (1, ?, 0, '2026-04-04 01:00:00')
+      `,
+      DERIVED_DATA_SCHEMA_VERSION,
+    );
+
+    await adapter.runAsync(
+      `
+        INSERT INTO sleep_cycles (id, sleep_id, start, end, min_bpm, max_bpm, avg_bpm, min_hrv, max_hrv, avg_hrv, score, synced)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+      `,
+      '2026-04-04',
+      '2026-04-04',
+      '2026-04-04 00:00:00',
+      '2026-04-04 00:49:59',
+      54,
+      64,
+      59,
+      40,
+      62,
+      51,
+      88,
+    );
+
+    const stageInsert = `
+      INSERT INTO sleep_stage_segments (sleep_id, start, end, stage, is_estimated)
+      VALUES (?, ?, ?, ?, ?)
+    `;
+    await adapter.runAsync(stageInsert, '2026-04-04', '2026-04-04 00:00:00', '2026-04-04 00:14:59', 'light', 1);
+    await adapter.runAsync(stageInsert, '2026-04-04', '2026-04-04 00:15:00', '2026-04-04 00:15:00', 'awake', 1);
+    await adapter.runAsync(stageInsert, '2026-04-04', '2026-04-04 00:15:01', '2026-04-04 00:29:59', 'light', 1);
+    await adapter.runAsync(stageInsert, '2026-04-04', '2026-04-04 00:30:00', '2026-04-04 00:34:59', 'awake', 1);
+    await adapter.runAsync(stageInsert, '2026-04-04', '2026-04-04 00:35:00', '2026-04-04 00:49:59', 'light', 1);
+
+    const repository = new SQLiteHealthRepository(adapter as never);
+    const sleepHistory = await repository.getSleepHistory('14d');
+
+    expect(sleepHistory.sessions).toHaveLength(1);
+    expect(sleepHistory.sessions[0]?.stages).toEqual([
+      { stage: 'light', minutes: 30 },
+      { stage: 'awake', minutes: 5 },
+      { stage: 'light', minutes: 15 },
+    ]);
+
+    adapter.close();
+  });
+
   it('loads seeded snapshots and refreshes outdated derived data on startup', async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'btwearable-seed-'));
     const source = path.resolve(process.cwd(), 'assets/databases/btwearable-seed.db');

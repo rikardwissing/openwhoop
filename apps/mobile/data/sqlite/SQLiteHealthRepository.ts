@@ -36,6 +36,7 @@ const GRAVITY_MAX_GAP_MINUTES = 20;
 const MIN_SLEEP_DURATION_MINUTES = 60;
 const MAX_SLEEP_PAUSE_MINUTES = 60;
 const ACTIVITY_CHANGE_THRESHOLD_MINUTES = 15;
+const MAX_TRANSIENT_AWAKE_STAGE_MINUTES = 1;
 const STRESS_WINDOW = 120;
 const SPO2_WINDOW = 30;
 const DEFAULT_TARGET_WAKE_MINUTES = 7 * 60 + 30;
@@ -1821,10 +1822,54 @@ function buildWellnessMetricSeries(options: {
   };
 }
 
+function isTransientAwakeStage(records: readonly SleepStageRecord[], index: number) {
+  const record = records[index];
+  if (!record || record.stage !== 'awake') {
+    return false;
+  }
+
+  const previous = records[index - 1];
+  const next = records[index + 1];
+  if (!previous || !next || previous.stage === 'awake' || next.stage === 'awake') {
+    return false;
+  }
+
+  if (previous.stage !== next.stage) {
+    return false;
+  }
+
+  return exactMinutesBetween(record.start, record.end) <= MAX_TRANSIENT_AWAKE_STAGE_MINUTES;
+}
+
 function aggregateSleepStages(records: SleepStageRecord[]): SleepStageSegment[] {
-  return records.map((record) => ({
-    stage: record.stage,
-    minutes: Math.max(1, minutesBetween(record.start, record.end)),
+  const merged: Array<{ stage: SleepStage; exactMinutes: number }> = [];
+
+  for (let index = 0; index < records.length; index += 1) {
+    if (isTransientAwakeStage(records, index)) {
+      continue;
+    }
+
+    const record = records[index];
+    const exactMinutes = exactMinutesBetween(record.start, record.end);
+    if (exactMinutes <= 0) {
+      continue;
+    }
+
+    const previous = merged.at(-1);
+    if (previous?.stage === record.stage) {
+      previous.exactMinutes += exactMinutes;
+      continue;
+    }
+
+    merged.push({
+      stage: record.stage,
+      exactMinutes,
+    });
+  }
+
+  return merged.map((segment) => ({
+    stage: segment.stage,
+    minutes: Math.max(1, Math.round(segment.exactMinutes)),
   }));
 }
 
