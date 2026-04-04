@@ -132,6 +132,16 @@ export async function initializeDatabase(db: SQLiteDatabase) {
       refreshed_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS wellness_day_stats (
+      day TEXT PRIMARY KEY NOT NULL,
+      stress_count INTEGER NOT NULL,
+      avg_stress REAL,
+      spo2_count INTEGER NOT NULL,
+      avg_spo2 REAL,
+      skin_temp_count INTEGER NOT NULL,
+      avg_skin_temp REAL
+    );
+
     CREATE TABLE IF NOT EXISTS background_sync_state (
       id INTEGER PRIMARY KEY NOT NULL CHECK (id = 1),
       paired_device_id TEXT,
@@ -147,6 +157,42 @@ export async function initializeDatabase(db: SQLiteDatabase) {
       lock_owner TEXT,
       lock_started_at TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS performance_diagnostic_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+      run_kind TEXT NOT NULL,
+      status TEXT NOT NULL,
+      started_at TEXT NOT NULL,
+      finished_at TEXT NOT NULL,
+      total_elapsed_ms INTEGER NOT NULL,
+      app_mode TEXT NOT NULL,
+      heart_row_count INTEGER NOT NULL,
+      derived_status TEXT,
+      derived_pending_from_time TEXT,
+      derived_pending_to_time TEXT,
+      last_sync_started_at TEXT,
+      last_sync_finished_at TEXT,
+      last_sync_result TEXT,
+      last_sync_imported_readings INTEGER
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_performance_diagnostic_runs_started_at
+      ON performance_diagnostic_runs(started_at DESC, id DESC);
+
+    CREATE TABLE IF NOT EXISTS performance_diagnostic_steps (
+      id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+      run_id INTEGER NOT NULL,
+      step_index INTEGER NOT NULL,
+      step_key TEXT NOT NULL,
+      label TEXT NOT NULL,
+      status TEXT NOT NULL,
+      elapsed_ms INTEGER,
+      details_json TEXT NOT NULL DEFAULT '{}',
+      FOREIGN KEY (run_id) REFERENCES performance_diagnostic_runs(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_performance_diagnostic_steps_run_id
+      ON performance_diagnostic_steps(run_id, step_index);
 
     CREATE TABLE IF NOT EXISTS delivered_notifications (
       device_id TEXT NOT NULL,
@@ -219,6 +265,56 @@ export async function initializeDatabase(db: SQLiteDatabase) {
   if (!derivedDataStateColumnNames.has('last_error')) {
     await db.execAsync('ALTER TABLE derived_data_state ADD COLUMN last_error TEXT;');
   }
+
+  await db.execAsync(`
+    CREATE TABLE IF NOT EXISTS wellness_day_stats (
+      day TEXT PRIMARY KEY NOT NULL,
+      stress_count INTEGER NOT NULL,
+      avg_stress REAL,
+      spo2_count INTEGER NOT NULL,
+      avg_spo2 REAL,
+      skin_temp_count INTEGER NOT NULL,
+      avg_skin_temp REAL
+    );
+  `);
+
+  await db.execAsync(`
+    CREATE TABLE IF NOT EXISTS performance_diagnostic_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+      run_kind TEXT NOT NULL,
+      status TEXT NOT NULL,
+      started_at TEXT NOT NULL,
+      finished_at TEXT NOT NULL,
+      total_elapsed_ms INTEGER NOT NULL,
+      app_mode TEXT NOT NULL,
+      heart_row_count INTEGER NOT NULL,
+      derived_status TEXT,
+      derived_pending_from_time TEXT,
+      derived_pending_to_time TEXT,
+      last_sync_started_at TEXT,
+      last_sync_finished_at TEXT,
+      last_sync_result TEXT,
+      last_sync_imported_readings INTEGER
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_performance_diagnostic_runs_started_at
+      ON performance_diagnostic_runs(started_at DESC, id DESC);
+
+    CREATE TABLE IF NOT EXISTS performance_diagnostic_steps (
+      id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+      run_id INTEGER NOT NULL,
+      step_index INTEGER NOT NULL,
+      step_key TEXT NOT NULL,
+      label TEXT NOT NULL,
+      status TEXT NOT NULL,
+      elapsed_ms INTEGER,
+      details_json TEXT NOT NULL DEFAULT '{}',
+      FOREIGN KEY (run_id) REFERENCES performance_diagnostic_runs(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_performance_diagnostic_steps_run_id
+      ON performance_diagnostic_steps(run_id, step_index);
+  `);
 
   const activityForeignKeys = await db.getAllAsync<{ table: string }>('PRAGMA foreign_key_list(activities)');
   if (activityForeignKeys.length > 0) {

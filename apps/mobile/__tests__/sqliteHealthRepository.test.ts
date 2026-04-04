@@ -6,13 +6,19 @@ import { DatabaseSync } from 'node:sqlite';
 import { DERIVED_DATA_SCHEMA_VERSION, initializeDatabase } from '@/db/schema';
 import {
   SQLiteHealthRepository,
+  clearDashboardAggregatesForDebug,
   markDerivedRefreshPending,
   primeDashboardSnapshot,
   processPendingDerivedRefresh,
+  rebuildAggregateTablesForDebug,
   refreshDashboardSnapshot,
   refreshDerivedData,
   shouldRefreshDerivedData,
 } from '@/data/sqlite/SQLiteHealthRepository';
+import {
+  listRecentPerformanceDiagnosticRuns,
+  runFullPerformanceSweep,
+} from '@/services/performanceDiagnostics';
 
 type SqlArg = string | number | null;
 
@@ -345,6 +351,105 @@ describe('SQLiteHealthRepository', () => {
     adapter.close();
   });
 
+  it('waits for repository mutations before querying heart history', async () => {
+    const { adapter, repository } = await createRepositoryFixture();
+
+    let releaseMutation!: () => void;
+    const pendingMutation = new Promise<void>((resolve) => {
+      releaseMutation = resolve;
+    });
+
+    (repository as unknown as { mutationPromise: Promise<void> | null }).mutationPromise = pendingMutation;
+
+    const baselineCalls = adapter.calls.length;
+    const heartPromise = repository.getHeartHistory('14d');
+
+    await Promise.resolve();
+    expect(adapter.calls.length).toBe(baselineCalls);
+
+    releaseMutation();
+
+    await expect(heartPromise).resolves.toMatchObject({
+      restingHr: 56,
+    });
+    expect(adapter.calls.length).toBeGreaterThan(baselineCalls);
+
+    adapter.close();
+  });
+
+  it('rebuilds aggregate tables without rebuilding the dashboard snapshot cache', async () => {
+    const { adapter } = await createRepositoryFixture();
+
+    await clearDashboardAggregatesForDebug(adapter as never);
+
+    await expect(rebuildAggregateTablesForDebug(adapter as never)).resolves.toBe(true);
+
+    const aggregateCounts = await adapter.getFirstAsync<{
+      heart_days: number;
+      bucket_rows: number;
+      has_global: number;
+      wellness_days: number;
+    }>(
+      `
+        SELECT
+          (SELECT COUNT(*) FROM heart_day_stats) AS heart_days,
+          (SELECT COUNT(*) FROM heart_intraday_buckets) AS bucket_rows,
+          (SELECT COUNT(*) FROM heart_global_stats) AS has_global,
+          (SELECT COUNT(*) FROM wellness_day_stats) AS wellness_days
+      `,
+    );
+
+    expect(aggregateCounts?.heart_days).toBe(2);
+    expect(aggregateCounts?.bucket_rows).toBeGreaterThan(0);
+    expect(aggregateCounts?.has_global).toBe(1);
+    expect(aggregateCounts?.wellness_days).toBe(2);
+
+    adapter.close();
+  });
+
+  it('records a persisted full performance sweep with step history', async () => {
+    const { adapter, repository } = await createRepositoryFixture();
+
+    const run = await runFullPerformanceSweep({
+      db: adapter as never,
+      repository,
+      backgroundSyncState: {
+        pairedDeviceId: 'strap-1',
+        lastRunStartedAt: '2026-03-19 07:10:00',
+        lastRunFinishedAt: '2026-03-19 07:11:00',
+        lastSuccessAt: '2026-03-19 07:11:00',
+        lastSource: 'background',
+        lastResult: 'success',
+        lastError: null,
+        lastImportedReadings: 42,
+        notificationPermission: 'granted',
+        notificationBaselineAt: '2026-03-18 08:00:00',
+      },
+    });
+
+    expect(run.runKind).toBe('full_sweep');
+    expect(run.id).toBeGreaterThan(0);
+    expect(run.steps.some((step) => step.key === 'dashboard.read.cold')).toBe(true);
+    expect(run.steps.some((step) => step.key === 'aggregates.rebuild')).toBe(true);
+    expect(run.steps.some((step) => step.key === 'dashboard.snapshot.warm')).toBe(true);
+    expect(run.steps.some((step) => step.key === 'dashboard.snapshot.cold')).toBe(false);
+
+    const recentRuns = await listRecentPerformanceDiagnosticRuns(adapter as never, 5);
+    expect(recentRuns).toHaveLength(1);
+    expect(recentRuns[0]?.id).toBe(run.id);
+    expect(recentRuns[0]?.lastSyncImportedReadings).toBe(42);
+    expect(recentRuns[0]?.steps.map((step) => step.key)).toEqual(
+      expect.arrayContaining([
+        'dashboard.read.warm',
+        'dashboard.read.cold',
+        'aggregates.rebuild',
+        'dashboard.snapshot.warm',
+      ]),
+    );
+
+    adapter.close();
+  });
+
   it('does not extend overnight sleep through off-body stillness after waking', async () => {
     const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
     await initializeDatabase(adapter as never);
@@ -558,6 +663,32 @@ describe('SQLiteHealthRepository', () => {
 
     await adapter.runAsync(
       `
+        INSERT INTO wellness_day_stats (day, stress_count, avg_stress, spo2_count, avg_spo2, skin_temp_count, avg_skin_temp)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `,
+      '2026-03-18',
+      2,
+      3.5,
+      2,
+      98,
+      2,
+      33.3,
+    );
+    await adapter.runAsync(
+      `
+        INSERT INTO wellness_day_stats (day, stress_count, avg_stress, spo2_count, avg_spo2, skin_temp_count, avg_skin_temp)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `,
+      '2026-03-19',
+      2,
+      5.5,
+      2,
+      97,
+      2,
+      33.95,
+    );
+    await adapter.runAsync(
+      `
         INSERT INTO activities (period_id, start, end, activity, synced)
         VALUES (?, ?, ?, ?, 0)
       `,
@@ -572,11 +703,11 @@ describe('SQLiteHealthRepository', () => {
     expect(
       adapter.calls.some(
         (sql) =>
-          sql.includes('AVG(stress) AS avg_stress') &&
-          sql.includes('AVG(spo2) AS avg_spo2') &&
-          sql.includes('AVG(skin_temp) AS avg_skin_temp') &&
-          sql.includes('FROM heart_rate') &&
-          sql.includes('GROUP BY day'),
+          sql.includes('SELECT') &&
+          sql.includes('avg_stress') &&
+          sql.includes('avg_spo2') &&
+          sql.includes('avg_skin_temp') &&
+          sql.includes('FROM wellness_day_stats'),
       ),
     ).toBe(true);
     expect(
@@ -586,6 +717,14 @@ describe('SQLiteHealthRepository', () => {
           sql.includes('WHERE bucket_start >= ? AND bucket_start <= ?'),
       ),
     ).toBe(true);
+    expect(
+      adapter.calls.some(
+        (sql) =>
+          sql.includes('AVG(stress) AS avg_stress') &&
+          sql.includes('FROM heart_rate') &&
+          sql.includes('GROUP BY day'),
+      ),
+    ).toBe(false);
     expect(
       adapter.calls.some(
         (sql) =>
@@ -634,6 +773,26 @@ describe('SQLiteHealthRepository', () => {
       snapshot_kind: 'full',
       source_heart_count: 4,
     });
+
+    adapter.close();
+  });
+
+  it('fills missing wellness day stats while priming an already cached dashboard snapshot', async () => {
+    const { adapter } = await createRepositoryFixture();
+
+    await refreshDashboardSnapshot(adapter as never, 'full');
+    await adapter.runAsync('DELETE FROM wellness_day_stats');
+
+    await expect(primeDashboardSnapshot(adapter as never)).resolves.toBe(false);
+
+    const row = await adapter.getFirstAsync<{ count: number }>(
+      `
+        SELECT COUNT(*) AS count
+        FROM wellness_day_stats
+      `,
+    );
+
+    expect(row?.count).toBeGreaterThan(0);
 
     adapter.close();
   });

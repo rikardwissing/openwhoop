@@ -127,6 +127,16 @@ interface WellnessMetricSummaryRow {
   latest_skin_temp: number | null;
 }
 
+interface WellnessDayStatRow {
+  day: string;
+  stress_count: number;
+  avg_stress: number | null;
+  spo2_count: number;
+  avg_spo2: number | null;
+  skin_temp_count: number;
+  avg_skin_temp: number | null;
+}
+
 interface HeartIntradayBucketRow {
   bucket_start: string;
   sample_count: number;
@@ -354,25 +364,40 @@ function logMobilePerfError(label: string, error: unknown, details?: Record<stri
   console.error(`[mobile-perf] ${label} error=${message}${suffix ? ` ${suffix}` : ''}`);
 }
 
-const aggregateMutationLocks = new WeakMap<object, Promise<void>>();
+const aggregateAccessLocks = new WeakMap<object, Promise<void>>();
 
-async function withAggregateMutationLock<T>(db: SQLiteDatabase, callback: () => Promise<T>): Promise<T> {
+async function withAggregateAccessLock<T>(db: SQLiteDatabase, callback: () => Promise<T>): Promise<T> {
   const key = db as object;
-  const previous = aggregateMutationLocks.get(key) ?? Promise.resolve();
+  const previous = aggregateAccessLocks.get(key) ?? Promise.resolve();
   const next = previous.catch(() => {}).then(callback);
   const settled = next.then(
     () => {},
     () => {},
   );
 
-  aggregateMutationLocks.set(key, settled);
+  aggregateAccessLocks.set(key, settled);
 
   try {
     return await next;
   } finally {
-    if (aggregateMutationLocks.get(key) === settled) {
-      aggregateMutationLocks.delete(key);
+    if (aggregateAccessLocks.get(key) === settled) {
+      aggregateAccessLocks.delete(key);
     }
+  }
+}
+
+async function withAggregateMutationLock<T>(db: SQLiteDatabase, callback: () => Promise<T>): Promise<T> {
+  return withAggregateAccessLock(db, callback);
+}
+
+async function withAggregateReadLock<T>(db: SQLiteDatabase, callback: () => Promise<T>): Promise<T> {
+  return withAggregateAccessLock(db, callback);
+}
+
+async function waitForAggregateMutations(db: SQLiteDatabase) {
+  const pending = aggregateAccessLocks.get(db as object);
+  if (pending) {
+    await pending.catch(() => {});
   }
 }
 
@@ -2395,6 +2420,53 @@ async function replaceHeartDayStatsRange(
   });
 }
 
+async function replaceWellnessDayStatsRange(
+  db: SQLiteDatabase,
+  rangeStartDay: string,
+  rangeEndDay: string,
+  stats: readonly WellnessDayStatRow[],
+  options?: { replaceAll?: boolean },
+) {
+  await withExclusiveTransaction(db, async (tx) => {
+    if (options?.replaceAll) {
+      await tx.execAsync('DELETE FROM wellness_day_stats;');
+    } else {
+      await tx.runAsync(
+        `
+          DELETE FROM wellness_day_stats
+          WHERE day >= ? AND day <= ?
+        `,
+        rangeStartDay,
+        rangeEndDay,
+      );
+    }
+
+    for (const stat of stats) {
+      await tx.runAsync(
+        `
+          INSERT INTO wellness_day_stats (
+            day,
+            stress_count,
+            avg_stress,
+            spo2_count,
+            avg_spo2,
+            skin_temp_count,
+            avg_skin_temp
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `,
+        stat.day,
+        stat.stress_count,
+        stat.avg_stress,
+        stat.spo2_count,
+        stat.avg_spo2,
+        stat.skin_temp_count,
+        stat.avg_skin_temp,
+      );
+    }
+  });
+}
+
 async function replaceHeartIntradayBucketRange(
   db: SQLiteDatabase,
   bucketRangeStart: string,
@@ -2586,6 +2658,45 @@ async function refreshHeartDayStatsForRange(
   });
 }
 
+async function refreshWellnessDayStatsForRange(
+  db: SQLiteDatabase,
+  fromTime: string,
+  toTime: string,
+  options?: { replaceAll?: boolean },
+) {
+  await withAggregateMutationLock(db, async () => {
+    const normalized = normalizeTimeRange(fromTime, toTime);
+    const dayStart = startOfSqliteDay(normalized.fromTime);
+    const dayEndExclusive = nextSqliteDay(normalized.toTime);
+    const dayStats = await db.getAllAsync<WellnessDayStatRow>(
+      `
+        SELECT
+          substr(time, 1, 10) AS day,
+          COUNT(stress) AS stress_count,
+          AVG(stress) AS avg_stress,
+          COUNT(spo2) AS spo2_count,
+          AVG(spo2) AS avg_spo2,
+          COUNT(skin_temp) AS skin_temp_count,
+          AVG(skin_temp) AS avg_skin_temp
+        FROM heart_rate
+        WHERE time >= ? AND time < ?
+        GROUP BY day
+        ORDER BY day ASC
+      `,
+      formatSqliteDateTime(dayStart),
+      formatSqliteDateTime(dayEndExclusive),
+    );
+
+    await replaceWellnessDayStatsRange(
+      db,
+      dateKey(dayStart),
+      dateKey(new Date(dayEndExclusive.getTime() - 1000)),
+      dayStats,
+      options,
+    );
+  });
+}
+
 export async function refreshHeartAggregatesForRange(
   db: SQLiteDatabase,
   fromTime: string,
@@ -2728,6 +2839,9 @@ export async function refreshDerivedDataRange(
   const statsStartedAt = Date.now();
   await refreshHeartDayStatsForRange(db, normalized.fromTime, normalized.toTime);
   logMobilePerf('derived.range.refreshDayStats', statsStartedAt);
+  const wellnessStatsStartedAt = Date.now();
+  await refreshWellnessDayStatsForRange(db, normalized.fromTime, normalized.toTime);
+  logMobilePerf('derived.range.refreshWellnessDayStats', wellnessStatsStartedAt);
   logMobilePerf('derived.range.total', refreshStartedAt, {
     metricRows: metricRows.length,
     detectionRows: detectionRows.length,
@@ -2784,11 +2898,17 @@ export async function refreshDerivedData(db: SQLiteDatabase) {
       replaceAll: true,
     });
     logMobilePerf('derived.full.refreshDayStats', statsStartedAt);
+    const wellnessStatsStartedAt = Date.now();
+    await refreshWellnessDayStatsForRange(db, heartRows[0].time, heartRows.at(-1)!.time, {
+      replaceAll: true,
+    });
+    logMobilePerf('derived.full.refreshWellnessDayStats', wellnessStatsStartedAt);
   } else {
     await withExclusiveTransaction(db, async (tx) => {
       await tx.execAsync(`
         DELETE FROM heart_day_stats;
         DELETE FROM heart_global_stats;
+        DELETE FROM wellness_day_stats;
       `);
     });
   }
@@ -2920,48 +3040,53 @@ async function loadLatestDeviceStateRow(db: SQLiteDatabase) {
 }
 
 async function loadLatestHeartState(db: SQLiteDatabase) {
-  const [global, latestHeart] = await Promise.all([
-    loadHeartGlobalStatsRow(db),
-    db.getFirstAsync<LatestHeartRow>(
-      `
-        SELECT time, stress
-        FROM heart_rate
-        ORDER BY time DESC
-        LIMIT 1
-      `,
-    ),
-  ]);
+  return withAggregateReadLock(db, async () => {
+    const [global, latestHeart] = await Promise.all([
+      loadHeartGlobalStatsRow(db),
+      db.getFirstAsync<LatestHeartRow>(
+        `
+          SELECT time, stress
+          FROM heart_rate
+          ORDER BY time DESC
+          LIMIT 1
+        `,
+      ),
+    ]);
 
-  const latestHeartTime =
-    global?.latest_heart_time && latestHeart?.time
-      ? global.latest_heart_time > latestHeart.time
-        ? global.latest_heart_time
-        : latestHeart.time
-      : global?.latest_heart_time ?? latestHeart?.time ?? null;
-  const latestStress =
-    latestHeartTime === latestHeart?.time
-      ? latestHeart?.stress ?? null
-      : global?.latest_stress ?? null;
+    const latestHeartTime =
+      global?.latest_heart_time && latestHeart?.time
+        ? global.latest_heart_time > latestHeart.time
+          ? global.latest_heart_time
+          : latestHeart.time
+        : global?.latest_heart_time ?? latestHeart?.time ?? null;
+    const latestStress =
+      latestHeartTime === latestHeart?.time
+        ? latestHeart?.stress ?? null
+        : global?.latest_stress ?? null;
 
-  return {
-    observed_peak_bpm: global?.observed_peak_bpm ?? null,
-    latest_heart_time: latestHeartTime,
-    latest_stress: latestStress,
-  } satisfies HeartGlobalStatsRow;
+    return {
+      observed_peak_bpm: global?.observed_peak_bpm ?? null,
+      latest_heart_time: latestHeartTime,
+      latest_stress: latestStress,
+    } satisfies HeartGlobalStatsRow;
+  });
 }
 
 async function ensureDashboardAggregatesReady(db: SQLiteDatabase) {
   const ensureStartedAt = Date.now();
+  await waitForAggregateMutations(db);
   const [heartCount, existingDayStat, global] = await Promise.all([
     countHeartRows(db),
-    db.getFirstAsync<{ day: string }>(
-      `
-        SELECT day
-        FROM heart_day_stats
-        LIMIT 1
-      `,
+    withAggregateReadLock(db, () =>
+      db.getFirstAsync<{ day: string }>(
+        `
+          SELECT day
+          FROM heart_day_stats
+          LIMIT 1
+        `,
+      ),
     ),
-    loadHeartGlobalStatsRow(db),
+    withAggregateReadLock(db, () => loadHeartGlobalStatsRow(db)),
   ]);
 
   if (heartCount === 0) {
@@ -2998,6 +3123,7 @@ async function ensureDashboardAggregatesReady(db: SQLiteDatabase) {
 
 async function ensureHeartIntradayBucketsReady(db: SQLiteDatabase) {
   const ensureStartedAt = Date.now();
+  await waitForAggregateMutations(db);
   const heartCount = await countHeartRows(db);
 
   if (heartCount === 0) {
@@ -3015,7 +3141,7 @@ async function ensureHeartIntradayBucketsReady(db: SQLiteDatabase) {
       LIMIT 1
     `,
   );
-  const state = await loadHeartIntradayBucketStateRow(db);
+  const state = await withAggregateReadLock(db, () => loadHeartIntradayBucketStateRow(db));
 
   if (
     state &&
@@ -3042,6 +3168,54 @@ async function ensureHeartIntradayBucketsReady(db: SQLiteDatabase) {
   }
 
   logMobilePerf('dashboard.full.ensureIntradayBuckets.rebuild', ensureStartedAt, {
+    heartCount,
+  });
+}
+
+async function ensureWellnessDayStatsReady(db: SQLiteDatabase) {
+  const ensureStartedAt = Date.now();
+  await waitForAggregateMutations(db);
+  const [heartCount, existingDayStat] = await Promise.all([
+    countHeartRows(db),
+    withAggregateReadLock(db, () =>
+      db.getFirstAsync<{ day: string }>(
+        `
+          SELECT day
+          FROM wellness_day_stats
+          LIMIT 1
+        `,
+      ),
+    ),
+  ]);
+
+  if (heartCount === 0) {
+    logMobilePerf('wellness.ensureDayStats.empty', ensureStartedAt, {
+      heartCount,
+    });
+    return;
+  }
+
+  if (existingDayStat) {
+    logMobilePerf('wellness.ensureDayStats.hit', ensureStartedAt, {
+      heartCount,
+    });
+    return;
+  }
+
+  const bounds = await db.getFirstAsync<HeartTimeBoundsRow>(
+    `
+      SELECT MIN(time) AS min_time, MAX(time) AS max_time
+      FROM heart_rate
+    `,
+  );
+
+  if (bounds?.min_time && bounds.max_time) {
+    await refreshWellnessDayStatsForRange(db, bounds.min_time, bounds.max_time, {
+      replaceAll: true,
+    });
+  }
+
+  logMobilePerf('wellness.ensureDayStats.rebuild', ensureStartedAt, {
     heartCount,
   });
 }
@@ -3098,23 +3272,25 @@ async function loadIntradayHeartWindow(
   const storedBuckets =
     bucketQueryStart > lastBucketStart
       ? []
-      : await db.getAllAsync<HeartIntradayBucketRow>(
-          `
-            SELECT
-              bucket_start,
-              sample_count,
-              avg_bpm,
-              first_bpm,
-              second_bpm,
-              penultimate_bpm,
-              last_bpm,
-              max_triplet_avg
-            FROM heart_intraday_buckets
-            WHERE bucket_start >= ? AND bucket_start <= ?
-            ORDER BY bucket_start ASC
-          `,
-          bucketQueryStart,
-          lastBucketStart,
+      : await withAggregateReadLock(db, () =>
+          db.getAllAsync<HeartIntradayBucketRow>(
+            `
+              SELECT
+                bucket_start,
+                sample_count,
+                avg_bpm,
+                first_bpm,
+                second_bpm,
+                penultimate_bpm,
+                last_bpm,
+                max_triplet_avg
+              FROM heart_intraday_buckets
+              WHERE bucket_start >= ? AND bucket_start <= ?
+              ORDER BY bucket_start ASC
+            `,
+            bucketQueryStart,
+            lastBucketStart,
+          ),
         );
 
   const bucketRows = [...partialFirstBucket, ...storedBuckets];
@@ -3187,7 +3363,7 @@ async function buildFullDashboardSnapshot(db: SQLiteDatabase): Promise<Dashboard
   const [heartCount, heartState, heartDayStats, sleepCycles, deviceState] = await Promise.all([
     countHeartRows(db),
     loadLatestHeartState(db),
-    loadRecentHeartDayStats(db, 14),
+    withAggregateReadLock(db, () => loadRecentHeartDayStats(db, 14)),
     loadRecentSleepCyclesForDashboard(db, 15),
     loadLatestDeviceStateRow(db),
   ]);
@@ -3379,21 +3555,79 @@ export async function clearDashboardAggregatesForDebug(db: SQLiteDatabase) {
       DELETE FROM heart_global_stats;
       DELETE FROM heart_intraday_buckets;
       DELETE FROM heart_intraday_bucket_state;
+      DELETE FROM wellness_day_stats;
     `);
   });
 }
 
-export async function primeDashboardSnapshot(db: SQLiteDatabase): Promise<boolean> {
-  const existing = await loadDashboardSnapshotCacheRow(db);
-  if (existing && parseDashboardSnapshot(existing.snapshot_json)) {
+export async function rebuildAggregateTablesForDebug(db: SQLiteDatabase): Promise<boolean> {
+  const rebuildStartedAt = Date.now();
+  const heartCount = await countHeartRows(db);
+
+  if (heartCount === 0) {
+    await clearDashboardAggregatesForDebug(db);
+    logMobilePerf('aggregates.debug.rebuild.empty', rebuildStartedAt, {
+      heartCount,
+    });
     return false;
   }
 
-  if (await countHeartRows(db) === 0) {
+  const bounds = await db.getFirstAsync<HeartTimeBoundsRow>(
+    `
+      SELECT MIN(time) AS min_time, MAX(time) AS max_time
+      FROM heart_rate
+    `,
+  );
+
+  if (!bounds?.min_time || !bounds.max_time) {
+    await clearDashboardAggregatesForDebug(db);
+    logMobilePerf('aggregates.debug.rebuild.empty', rebuildStartedAt, {
+      heartCount,
+    });
+    return false;
+  }
+
+  await refreshHeartIntradayBucketsForRange(db, bounds.min_time, bounds.max_time, {
+    replaceAll: true,
+  });
+  await refreshHeartDayStatsForRange(db, bounds.min_time, bounds.max_time, {
+    replaceAll: true,
+  });
+  await refreshWellnessDayStatsForRange(db, bounds.min_time, bounds.max_time, {
+    replaceAll: true,
+  });
+
+  logMobilePerf('aggregates.debug.rebuild', rebuildStartedAt, {
+    heartCount,
+  });
+
+  return true;
+}
+
+export async function primeDashboardSnapshot(db: SQLiteDatabase): Promise<boolean> {
+  const existing = await loadDashboardSnapshotCacheRow(db);
+  const heartCount = await countHeartRows(db);
+
+  if (heartCount === 0) {
     return false;
   }
 
   const derivedState = await loadDerivedDataStateRow(db);
+  const canPrimeSupportingAggregates =
+    !derivedState ||
+    (derivedState.derived_schema_version === DERIVED_DATA_SCHEMA_VERSION &&
+      derivedState.rebuild_status === 'idle' &&
+      derivedState.pending_from_time === null &&
+      derivedState.pending_to_time === null);
+
+  if (existing && parseDashboardSnapshot(existing.snapshot_json)) {
+    if (canPrimeSupportingAggregates) {
+      await ensureWellnessDayStatsReady(db);
+    }
+
+    return false;
+  }
+
   const mode =
     derivedState &&
     derivedState.derived_schema_version === DERIVED_DATA_SCHEMA_VERSION &&
@@ -3403,15 +3637,47 @@ export async function primeDashboardSnapshot(db: SQLiteDatabase): Promise<boolea
       ? 'full'
       : 'post_sync_heart_only';
 
-  return refreshDashboardSnapshot(db, mode);
+  const primed = await refreshDashboardSnapshot(db, mode);
+
+  if (canPrimeSupportingAggregates) {
+    await ensureWellnessDayStatsReady(db);
+  }
+
+  return primed;
 }
 
 export class SQLiteHealthRepository implements HealthRepository {
   private preparePromise: Promise<void> | null = null;
+  private mutationPromise: Promise<void> | null = null;
   private readonly snapshotCache = new Map<string, Promise<unknown>>();
   private readonly queryCache = new Map<string, Promise<unknown>>();
 
   constructor(private readonly db: SQLiteDatabase) {}
+
+  private async runRepositoryMutation<T>(callback: () => Promise<T>): Promise<T> {
+    const previous = this.mutationPromise ?? Promise.resolve();
+    const next = previous.catch(() => {}).then(callback);
+    const settled = next.then(
+      () => {},
+      () => {},
+    );
+
+    this.mutationPromise = settled;
+
+    try {
+      return await next;
+    } finally {
+      if (this.mutationPromise === settled) {
+        this.mutationPromise = null;
+      }
+    }
+  }
+
+  private async waitForRepositoryMutations() {
+    if (this.mutationPromise) {
+      await this.mutationPromise;
+    }
+  }
 
   private async readCached<T>(cache: Map<string, Promise<unknown>>, key: string, loader: () => Promise<T>) {
     const existing = cache.get(key);
@@ -3488,6 +3754,8 @@ export class SQLiteHealthRepository implements HealthRepository {
 
   async getDerivedRefreshState(): Promise<DerivedRefreshState> {
     return this.readQuery('derived:state', async () => {
+      await this.waitForRepositoryMutations();
+
       const state = await loadDerivedDataStateRow(this.db);
 
       if (state) {
@@ -3512,36 +3780,42 @@ export class SQLiteHealthRepository implements HealthRepository {
   }
 
   async primeDashboardSnapshot(): Promise<boolean> {
-    const primed = await primeDashboardSnapshot(this.db);
+    return this.runRepositoryMutation(async () => {
+      const primed = await primeDashboardSnapshot(this.db);
 
-    if (primed) {
-      this.invalidateCaches('dashboard');
-    }
+      if (primed) {
+        this.invalidateCaches('dashboard');
+      }
 
-    return primed;
+      return primed;
+    });
   }
 
   async refreshDashboardSnapshot(mode: 'full' | 'post_sync_heart_only'): Promise<boolean> {
-    const refreshed = await refreshDashboardSnapshot(this.db, mode);
+    return this.runRepositoryMutation(async () => {
+      const refreshed = await refreshDashboardSnapshot(this.db, mode);
 
-    if (refreshed) {
-      this.invalidateCaches('dashboard');
-    }
+      if (refreshed) {
+        this.invalidateCaches('dashboard');
+      }
 
-    return refreshed;
+      return refreshed;
+    });
   }
 
   async processPendingDerivedRefresh(): Promise<boolean> {
-    const processed = await processPendingDerivedRefresh(this.db);
+    return this.runRepositoryMutation(async () => {
+      const processed = await processPendingDerivedRefresh(this.db);
 
-    if (processed) {
-      await refreshDashboardSnapshot(this.db, 'full');
-      this.invalidateCaches(['dashboard', 'sleep', 'wellness', 'derived']);
-    } else {
-      this.invalidateCaches('derived');
-    }
+      if (processed) {
+        await refreshDashboardSnapshot(this.db, 'full');
+        this.invalidateCaches(['dashboard', 'sleep', 'wellness', 'derived']);
+      } else {
+        this.invalidateCaches('derived');
+      }
 
-    return processed;
+      return processed;
+    });
   }
 
   private async loadLatestHeartDate() {
@@ -3577,47 +3851,60 @@ export class SQLiteHealthRepository implements HealthRepository {
   }
 
   private async loadWellnessMetricDayAggregatesSince(start: Date, cacheKey: string) {
-    const startSql = formatSqliteDateTime(start);
+    const startDay = dateKey(start);
     return this.readQuery(cacheKey, () =>
-      this.db.getAllAsync<WellnessMetricDayAggregateRow>(
-        `
-          SELECT
-            substr(time, 1, 10) AS day,
-            AVG(stress) AS avg_stress,
-            AVG(spo2) AS avg_spo2,
-            AVG(skin_temp) AS avg_skin_temp
-          FROM heart_rate
-          WHERE time >= ?
-          GROUP BY day
-          ORDER BY day ASC
-        `,
-        startSql,
+      withAggregateReadLock(this.db, () =>
+        this.db.getAllAsync<WellnessMetricDayAggregateRow>(
+          `
+            SELECT
+              day,
+              avg_stress,
+              avg_spo2,
+              avg_skin_temp
+            FROM wellness_day_stats
+            WHERE day >= ?
+            ORDER BY day ASC
+          `,
+          startDay,
+        ),
       ),
     );
   }
 
   private async loadWellnessMetricSummarySince(start: Date, cacheKey: string) {
     const startSql = formatSqliteDateTime(start);
+    const startDay = dateKey(start);
     return this.readQuery(cacheKey, () =>
-      this.db.getFirstAsync<WellnessMetricSummaryRow>(
-        `
-          SELECT
-            COUNT(stress) AS stress_count,
-            AVG(stress) AS avg_stress,
-            (SELECT stress FROM heart_rate WHERE time >= ? AND stress IS NOT NULL ORDER BY time DESC LIMIT 1) AS latest_stress,
-            COUNT(spo2) AS spo2_count,
-            AVG(spo2) AS avg_spo2,
-            (SELECT spo2 FROM heart_rate WHERE time >= ? AND spo2 IS NOT NULL ORDER BY time DESC LIMIT 1) AS latest_spo2,
-            COUNT(skin_temp) AS skin_temp_count,
-            AVG(skin_temp) AS avg_skin_temp,
-            (SELECT skin_temp FROM heart_rate WHERE time >= ? AND skin_temp IS NOT NULL ORDER BY time DESC LIMIT 1) AS latest_skin_temp
-          FROM heart_rate
-          WHERE time >= ?
-        `,
-        startSql,
-        startSql,
-        startSql,
-        startSql,
+      withAggregateReadLock(this.db, () =>
+        this.db.getFirstAsync<WellnessMetricSummaryRow>(
+          `
+            SELECT
+              COALESCE(SUM(stress_count), 0) AS stress_count,
+              CASE
+                WHEN COALESCE(SUM(stress_count), 0) = 0 THEN NULL
+                ELSE SUM(avg_stress * stress_count) / SUM(stress_count)
+              END AS avg_stress,
+              (SELECT stress FROM heart_rate WHERE time >= ? AND stress IS NOT NULL ORDER BY time DESC LIMIT 1) AS latest_stress,
+              COALESCE(SUM(spo2_count), 0) AS spo2_count,
+              CASE
+                WHEN COALESCE(SUM(spo2_count), 0) = 0 THEN NULL
+                ELSE SUM(avg_spo2 * spo2_count) / SUM(spo2_count)
+              END AS avg_spo2,
+              (SELECT spo2 FROM heart_rate WHERE time >= ? AND spo2 IS NOT NULL ORDER BY time DESC LIMIT 1) AS latest_spo2,
+              COALESCE(SUM(skin_temp_count), 0) AS skin_temp_count,
+              CASE
+                WHEN COALESCE(SUM(skin_temp_count), 0) = 0 THEN NULL
+                ELSE SUM(avg_skin_temp * skin_temp_count) / SUM(skin_temp_count)
+              END AS avg_skin_temp,
+              (SELECT skin_temp FROM heart_rate WHERE time >= ? AND skin_temp IS NOT NULL ORDER BY time DESC LIMIT 1) AS latest_skin_temp
+            FROM wellness_day_stats
+            WHERE day >= ?
+          `,
+          startSql,
+          startSql,
+          startSql,
+          startDay,
+        ),
       ),
     );
   }
@@ -3680,46 +3967,51 @@ export class SQLiteHealthRepository implements HealthRepository {
     const endBucket = bucketStartForDate(end);
 
     return this.readQuery(cacheKey, async () => {
-      await ensureHeartIntradayBucketsReady(this.db);
-      return this.db.getAllAsync<HeartIntradayBucketRow>(
-        `
-          SELECT
-            bucket_start,
-            sample_count,
-            avg_bpm,
-            first_bpm,
-            second_bpm,
-            penultimate_bpm,
-            last_bpm,
-            max_triplet_avg
-          FROM heart_intraday_buckets
-          WHERE bucket_start >= ? AND bucket_start <= ?
-          ORDER BY bucket_start ASC
-        `,
-        startBucket,
-        endBucket,
+      return withAggregateReadLock(this.db, () =>
+        this.db.getAllAsync<HeartIntradayBucketRow>(
+          `
+            SELECT
+              bucket_start,
+              sample_count,
+              avg_bpm,
+              first_bpm,
+              second_bpm,
+              penultimate_bpm,
+              last_bpm,
+              max_triplet_avg
+            FROM heart_intraday_buckets
+            WHERE bucket_start >= ? AND bucket_start <= ?
+            ORDER BY bucket_start ASC
+          `,
+          startBucket,
+          endBucket,
+        ),
       );
     });
   }
 
   private async loadDailyHeartMinima() {
     return this.readQuery('heart:daily-minima', async () => {
-      let rows = await this.db.getAllAsync<DailyMinimaRow>(
-        `
-          SELECT day, min_bpm
-          FROM heart_day_stats
-          ORDER BY day ASC
-        `,
-      );
-
-      if (rows.length === 0 && (await countHeartRows(this.db)) > 0) {
-        await ensureDashboardAggregatesReady(this.db);
-        rows = await this.db.getAllAsync<DailyMinimaRow>(
+      let rows = await withAggregateReadLock(this.db, () =>
+        this.db.getAllAsync<DailyMinimaRow>(
           `
             SELECT day, min_bpm
             FROM heart_day_stats
             ORDER BY day ASC
           `,
+        ),
+      );
+
+      if (rows.length === 0 && (await countHeartRows(this.db)) > 0) {
+        await ensureDashboardAggregatesReady(this.db);
+        rows = await withAggregateReadLock(this.db, () =>
+          this.db.getAllAsync<DailyMinimaRow>(
+            `
+              SELECT day, min_bpm
+              FROM heart_day_stats
+              ORDER BY day ASC
+            `,
+          ),
         );
       }
 
@@ -3809,6 +4101,8 @@ export class SQLiteHealthRepository implements HealthRepository {
     return this.readSnapshot('dashboard', async () => {
       const startedAt = Date.now();
       try {
+        await this.waitForRepositoryMutations();
+
         const cached = await loadDashboardSnapshotCacheRow(this.db);
         const parsed = cached ? parseDashboardSnapshot(cached.snapshot_json) : null;
         if (parsed) {
@@ -3840,45 +4134,52 @@ export class SQLiteHealthRepository implements HealthRepository {
   }
 
   async setTargetWakeMinutes(minutes: number): Promise<void> {
-    const nextTargetWakeMinutes = roundClockMinutes(
-      normalizeClockMinutes(minutes),
-      SLEEP_TARGET_STEP_MINUTES,
-    );
-    await persistSleepPreferences(this.db, {
-      targetWakeMinutes: nextTargetWakeMinutes,
-      alarmEnabled: false,
+    await this.runRepositoryMutation(async () => {
+      const nextTargetWakeMinutes = roundClockMinutes(
+        normalizeClockMinutes(minutes),
+        SLEEP_TARGET_STEP_MINUTES,
+      );
+      await persistSleepPreferences(this.db, {
+        targetWakeMinutes: nextTargetWakeMinutes,
+        alarmEnabled: false,
+      });
+      this.invalidateCaches('sleep');
     });
-    this.invalidateCaches('sleep');
   }
 
   async enableAlarm(targetWakeMinutes: number): Promise<void> {
-    const nextTargetWakeMinutes = roundClockMinutes(
-      normalizeClockMinutes(targetWakeMinutes),
-      SLEEP_TARGET_STEP_MINUTES,
-    );
-    await persistSleepPreferences(this.db, {
-      targetWakeMinutes: nextTargetWakeMinutes,
-      alarmEnabled: true,
+    await this.runRepositoryMutation(async () => {
+      const nextTargetWakeMinutes = roundClockMinutes(
+        normalizeClockMinutes(targetWakeMinutes),
+        SLEEP_TARGET_STEP_MINUTES,
+      );
+      await persistSleepPreferences(this.db, {
+        targetWakeMinutes: nextTargetWakeMinutes,
+        alarmEnabled: true,
+      });
+      this.invalidateCaches('sleep');
     });
-    this.invalidateCaches('sleep');
   }
 
   async disableAlarm(targetWakeMinutes: number): Promise<void> {
-    const nextTargetWakeMinutes = roundClockMinutes(
-      normalizeClockMinutes(targetWakeMinutes),
-      SLEEP_TARGET_STEP_MINUTES,
-    );
-    await persistSleepPreferences(this.db, {
-      targetWakeMinutes: nextTargetWakeMinutes,
-      alarmEnabled: false,
+    await this.runRepositoryMutation(async () => {
+      const nextTargetWakeMinutes = roundClockMinutes(
+        normalizeClockMinutes(targetWakeMinutes),
+        SLEEP_TARGET_STEP_MINUTES,
+      );
+      await persistSleepPreferences(this.db, {
+        targetWakeMinutes: nextTargetWakeMinutes,
+        alarmEnabled: false,
+      });
+      this.invalidateCaches('sleep');
     });
-    this.invalidateCaches('sleep');
   }
 
   async getSleepHistory(range: HistoryRange): Promise<SleepHistorySnapshot> {
     return this.readSnapshot(`sleep:${range}`, async () => {
       const startedAt = Date.now();
       try {
+        await this.waitForRepositoryMutations();
         await this.ensurePrepared();
 
         const sleepCycles = await this.loadRecentSleepCycles(Math.max(rangeDays(range), 15));
@@ -3976,7 +4277,9 @@ export class SQLiteHealthRepository implements HealthRepository {
     return this.readSnapshot(`heart:${range}`, async () => {
       const startedAt = Date.now();
       try {
+        await this.waitForRepositoryMutations();
         await this.ensurePrepared();
+        await waitForAggregateMutations(this.db);
 
         const [latestHeartDate, dailyMinimaRows, sleepCycles] = await Promise.all([
           this.loadLatestHeartDate(),
@@ -4038,7 +4341,10 @@ export class SQLiteHealthRepository implements HealthRepository {
     return this.readSnapshot(`wellness:${range}`, async () => {
       const startedAt = Date.now();
       try {
+        await this.waitForRepositoryMutations();
         await this.ensurePrepared();
+        await waitForAggregateMutations(this.db);
+        await ensureWellnessDayStatsReady(this.db);
 
         const baselineStartedAt = Date.now();
         const [recentSleepCycles, recentActivities, dailyMinimaRows, heartState] = await Promise.all([
@@ -4125,6 +4431,7 @@ export class SQLiteHealthRepository implements HealthRepository {
         });
 
         const activityRowsStartedAt = Date.now();
+        await ensureHeartIntradayBucketsReady(this.db);
         const activityHeartBuckets = await Promise.all(
           recentActivities.map((activity) =>
             this.loadHeartBucketRowsBetween(

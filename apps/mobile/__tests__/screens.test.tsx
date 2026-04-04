@@ -288,6 +288,8 @@ describe('screen rendering', () => {
 
     expect(screen.getByText('Unstrap')).toBeTruthy();
     expect(screen.getByText('Your data. Unlocked.')).toBeTruthy();
+    expect(screen.getByText('Performance Diagnostics')).toBeTruthy();
+    expect(screen.getByText('Run Full Perf Sweep')).toBeTruthy();
     expect(screen.getByText('Selected Wearable')).toBeTruthy();
     expect(screen.getByText('Live events')).toBeTruthy();
     expect(screen.getByText('Restart wearable')).toBeTruthy();
@@ -295,7 +297,9 @@ describe('screen rendering', () => {
     expect(screen.getByText('Export Snapshot')).toBeTruthy();
     expect(screen.getByText('Snapshot Diagnostics')).toBeTruthy();
     expect(screen.getByText('Regenerate Snapshot')).toBeTruthy();
-    expect(screen.getByText('Benchmark Warm vs Cold')).toBeTruthy();
+    expect(screen.getByText('Rebuild Aggregate Tables')).toBeTruthy();
+    expect(screen.getByText('Benchmark Dashboard Warm vs Cold')).toBeTruthy();
+    expect(screen.getByText('Benchmark All Screens Warm vs Cold')).toBeTruthy();
     expect(screen.getByText('Battery')).toBeTruthy();
     expect(screen.getAllByText('Status').length).toBeGreaterThan(0);
     expect(screen.getByText('Charge')).toBeTruthy();
@@ -329,6 +333,31 @@ describe('screen rendering', () => {
       expect(refreshDashboardSnapshot).toHaveBeenCalledWith('full');
     });
     expect(await screen.findByText(/Rebuilt the full dashboard snapshot in \d+ ms\./)).toBeTruthy();
+  });
+
+  it('benchmarks all major screen reads from settings', async () => {
+    const repository = new MockHealthRepository({ delayMs: 0 });
+    const getDashboardSnapshot = jest.spyOn(repository, 'getDashboardSnapshot');
+    const getSleepHistory = jest.spyOn(repository, 'getSleepHistory');
+    const getHeartHistory = jest.spyOn(repository, 'getHeartHistory');
+    const getWellnessSnapshot = jest.spyOn(repository, 'getWellnessSnapshot');
+    const screen = render(
+      <HealthDataProvider repository={repository}>
+        <WearableSyncContextProvider value={createWearableContextValue()}>
+          <SettingsScreen />
+        </WearableSyncContextProvider>
+      </HealthDataProvider>,
+    );
+
+    fireEvent.press(screen.getByText('Benchmark All Screens Warm vs Cold'));
+
+    await waitFor(() => {
+      expect(getDashboardSnapshot).toHaveBeenCalledTimes(2);
+      expect(getSleepHistory).toHaveBeenCalledWith('14d');
+      expect(getHeartHistory).toHaveBeenCalledWith('14d');
+      expect(getWellnessSnapshot).toHaveBeenCalledWith('14d');
+    });
+    expect(await screen.findByText(/Cold reads: Dashboard \d+ ms, Sleep \d+ ms, Heart \d+ ms, Wellness \d+ ms\./)).toBeTruthy();
   });
 
   it('runs the background sync test trigger from settings', () => {

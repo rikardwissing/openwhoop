@@ -1,8 +1,17 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Image, Pressable, StyleSheet, Switch, Text, View } from 'react-native';
 import { useRouter } from 'expo-router';
 
-import { clearDashboardAggregatesForDebug } from '@/data/sqlite/SQLiteHealthRepository';
+import {
+  clearDashboardAggregatesForDebug,
+  rebuildAggregateTablesForDebug,
+} from '@/data/sqlite/SQLiteHealthRepository';
+import {
+  listRecentPerformanceDiagnosticRuns,
+  runFullPerformanceSweep,
+  type PerformanceDiagnosticRun,
+  type PerformanceDiagnosticStep,
+} from '@/services/performanceDiagnostics';
 import { ScreenShell } from '@/components/layout/ScreenShell';
 import { SectionHeader } from '@/components/layout/SectionHeader';
 import { GlassCard } from '@/components/ui/GlassCard';
@@ -167,6 +176,56 @@ function describeBackgroundApiStatus(status: BackgroundTaskApiStatus) {
   }
 }
 
+function describePerformanceRunStatus(status: PerformanceDiagnosticRun['status']) {
+  switch (status) {
+    case 'success':
+      return 'Success';
+    case 'partial':
+      return 'Partial';
+    default:
+      return 'Error';
+  }
+}
+
+function performanceRunAccent(status: PerformanceDiagnosticRun['status']) {
+  switch (status) {
+    case 'success':
+      return colors.success;
+    case 'partial':
+      return colors.violet;
+    default:
+      return colors.alert;
+  }
+}
+
+function formatElapsedMs(value: number | null | undefined) {
+  return value === null || value === undefined ? '--' : `${value} ms`;
+}
+
+function findDiagnosticStep(run: PerformanceDiagnosticRun, key: string) {
+  return run.steps.find((step) => step.key === key) ?? null;
+}
+
+function formatDiagnosticStepOutcome(step: PerformanceDiagnosticStep) {
+  if (step.status === 'success') {
+    return formatElapsedMs(step.elapsedMs);
+  }
+
+  if (step.status === 'not_applicable') {
+    return 'Not applicable';
+  }
+
+  const error = step.details.error;
+  return typeof error === 'string' && error.length > 0 ? error : 'Error';
+}
+
+function summarizeDiagnosticRun(run: PerformanceDiagnosticRun) {
+  const dashboardCold = findDiagnosticStep(run, 'dashboard.read.cold');
+  const aggregateRebuild = findDiagnosticStep(run, 'aggregates.rebuild');
+
+  return `${run.startedAt}: ${describePerformanceRunStatus(run.status)} in ${formatElapsedMs(run.totalElapsedMs)}. Dashboard cold ${dashboardCold ? formatDiagnosticStepOutcome(dashboardCold) : '--'}. Aggregates ${aggregateRebuild ? formatDiagnosticStepOutcome(aggregateRebuild) : '--'}.`;
+}
+
 export function SettingsScreen() {
   const router = useRouter();
   const db = useOptionalAppDatabase();
@@ -196,7 +255,36 @@ export function SettingsScreen() {
     message: string;
   }>({
     status: 'idle',
-    message: 'Benchmark a primed warm snapshot rebuild against a forced cold aggregate-and-snapshot rebuild.',
+    message: 'Benchmark a primed warm dashboard snapshot rebuild against a forced cold aggregate-and-snapshot rebuild.',
+  });
+  const [aggregateState, setAggregateState] = useState<{
+    status: 'idle' | 'running' | 'success' | 'error';
+    message: string;
+  }>({
+    status: 'idle',
+    message: 'Rebuild heart and wellness aggregate tables without touching the cached dashboard snapshot.',
+  });
+  const [viewBenchmarkState, setViewBenchmarkState] = useState<{
+    status: 'idle' | 'running' | 'success' | 'error';
+    message: string;
+  }>({
+    status: 'idle',
+    message: 'Benchmark cold and warm repository reads for the dashboard, sleep, heart, and wellness screens.',
+  });
+  const [performanceSweepState, setPerformanceSweepState] = useState<{
+    status: 'idle' | 'running' | 'success' | 'error';
+    message: string;
+  }>({
+    status: 'idle',
+    message: 'Run one local sweep that records warm and cache-cold screen reads, aggregate rebuilds, and snapshot rebuilds.',
+  });
+  const [performanceRuns, setPerformanceRuns] = useState<PerformanceDiagnosticRun[]>([]);
+  const [performanceHistoryState, setPerformanceHistoryState] = useState<{
+    status: 'idle' | 'loading' | 'error';
+    message: string;
+  }>({
+    status: 'idle',
+    message: 'No performance sweep has been recorded on this phone yet.',
   });
   const deviceBusy = isBlockingSyncStatus(progress.status);
   const batteryChipAccent = batteryAccent(deviceState.batteryPercent);
@@ -204,15 +292,88 @@ export function SettingsScreen() {
   const wearChipAccent = wearAccent(deviceState.bodyStatus);
   const exportDisabled = deviceBusy || exportState.status === 'running' || !db;
   const snapshotDiagnosticsBusy =
-    snapshotState.status === 'running' || snapshotBenchmarkState.status === 'running';
+    performanceSweepState.status === 'running' ||
+    snapshotState.status === 'running' ||
+    snapshotBenchmarkState.status === 'running' ||
+    aggregateState.status === 'running' ||
+    viewBenchmarkState.status === 'running';
   const snapshotDisabled = progress.status === 'scanning' || deviceBusy || snapshotDiagnosticsBusy;
   const snapshotBenchmarkDisabled =
+    progress.status === 'scanning' || deviceBusy || snapshotDiagnosticsBusy || !db;
+  const performanceSweepDisabled =
     progress.status === 'scanning' || deviceBusy || snapshotDiagnosticsBusy || !db;
   const backgroundRunState = describeBackgroundRunState(
     backgroundSyncState.lastRunStartedAt,
     backgroundSyncState.lastRunFinishedAt,
     backgroundSyncState.lastResult,
   );
+  const latestPerformanceRun = performanceRuns[0] ?? null;
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!db) {
+      setPerformanceRuns([]);
+      setPerformanceHistoryState({
+        status: 'idle',
+        message: 'Performance diagnostics needs the local SQLite provider in this build.',
+      });
+      return;
+    }
+
+    setPerformanceHistoryState((current) => ({
+      status: 'loading',
+      message: current.message,
+    }));
+
+    void listRecentPerformanceDiagnosticRuns(db, 5)
+      .then((runs) => {
+        if (cancelled) {
+          return;
+        }
+
+        setPerformanceRuns(runs);
+        setPerformanceHistoryState({
+          status: 'idle',
+          message:
+            runs.length === 0
+              ? 'No performance sweep has been recorded on this phone yet.'
+              : 'Recent sweeps are stored locally on this phone for comparison.',
+        });
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+
+        setPerformanceHistoryState({
+          status: 'error',
+          message: error instanceof Error ? error.message : 'Unable to load performance sweep history.',
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [db]);
+
+  async function refreshPerformanceRuns() {
+    if (!db) {
+      setPerformanceRuns([]);
+      return [];
+    }
+
+    const runs = await listRecentPerformanceDiagnosticRuns(db, 5);
+    setPerformanceRuns(runs);
+    setPerformanceHistoryState({
+      status: 'idle',
+      message:
+        runs.length === 0
+          ? 'No performance sweep has been recorded on this phone yet.'
+          : 'Recent sweeps are stored locally on this phone for comparison.',
+    });
+    return runs;
+  }
 
   async function handleExportDatabase() {
     if (!db) {
@@ -311,6 +472,146 @@ export function SettingsScreen() {
       setSnapshotBenchmarkState({
         status: 'error',
         message: error instanceof Error ? error.message : 'Unable to benchmark snapshot rebuilds.',
+      });
+    }
+  }
+
+  async function handleRebuildAggregates() {
+    if (!db) {
+      setAggregateState({
+        status: 'error',
+        message: 'Aggregate rebuilding needs the local SQLite provider, which is unavailable in this build.',
+      });
+      return;
+    }
+
+    setAggregateState({
+      status: 'running',
+      message: 'Rebuilding aggregate tables for dashboard, heart, and wellness reads...',
+    });
+
+    const startedAt = Date.now();
+
+    try {
+      const rebuilt = await rebuildAggregateTablesForDebug(db);
+      const elapsedMs = Date.now() - startedAt;
+
+      if (!rebuilt) {
+        setAggregateState({
+          status: 'idle',
+          message: 'No local heart history is available yet, so there were no aggregate tables to rebuild.',
+        });
+        return;
+      }
+
+      refreshHealthData(['dashboard', 'heart', 'wellness']);
+      setAggregateState({
+        status: 'success',
+        message: `Rebuilt aggregate tables in ${elapsedMs} ms. Compare that run with the aggregates.debug.rebuild mobile perf log.`,
+      });
+    } catch (error) {
+      setAggregateState({
+        status: 'error',
+        message: error instanceof Error ? error.message : 'Unable to rebuild aggregate tables.',
+      });
+    }
+  }
+
+  async function handleBenchmarkViewReads() {
+    setViewBenchmarkState({
+      status: 'running',
+      message: 'Benchmarking warm and cold reads for dashboard, sleep, heart, and wellness...',
+    });
+
+    try {
+      const benchmarks = [
+        {
+          label: 'Dashboard',
+          scope: 'dashboard' as const,
+          run: () => repository.getDashboardSnapshot(),
+        },
+        {
+          label: 'Sleep',
+          scope: 'sleep' as const,
+          run: () => repository.getSleepHistory('14d'),
+        },
+        {
+          label: 'Heart',
+          scope: 'heart' as const,
+          run: () => repository.getHeartHistory('14d'),
+        },
+        {
+          label: 'Wellness',
+          scope: 'wellness' as const,
+          run: () => repository.getWellnessSnapshot('14d'),
+        },
+      ];
+
+      const results: Array<{ label: string; coldMs: number; warmMs: number }> = [];
+
+      for (const benchmark of benchmarks) {
+        repository.invalidateCaches(benchmark.scope);
+        const coldStartedAt = Date.now();
+        await benchmark.run();
+        const coldMs = Date.now() - coldStartedAt;
+
+        const warmStartedAt = Date.now();
+        await benchmark.run();
+        const warmMs = Date.now() - warmStartedAt;
+
+        results.push({
+          label: benchmark.label,
+          coldMs,
+          warmMs,
+        });
+      }
+
+      setViewBenchmarkState({
+        status: 'success',
+        message: `Cold reads: ${results.map((result) => `${result.label} ${result.coldMs} ms`).join(', ')}. Warm reads: ${results.map((result) => `${result.label} ${result.warmMs} ms`).join(', ')}.`,
+      });
+    } catch (error) {
+      setViewBenchmarkState({
+        status: 'error',
+        message: error instanceof Error ? error.message : 'Unable to benchmark repository view reads.',
+      });
+    }
+  }
+
+  async function handleRunFullPerformanceSweep() {
+    if (!db) {
+      setPerformanceSweepState({
+        status: 'error',
+        message: 'Performance diagnostics needs the local SQLite provider in this build.',
+      });
+      return;
+    }
+
+    setPerformanceSweepState({
+      status: 'running',
+      message: 'Running the full local performance sweep...',
+    });
+
+    try {
+      const run = await runFullPerformanceSweep({
+        db,
+        repository,
+        backgroundSyncState,
+      });
+      await refreshPerformanceRuns();
+      refreshHealthData(['dashboard', 'sleep', 'heart', 'wellness']);
+
+      const dashboardCold = findDiagnosticStep(run, 'dashboard.read.cold');
+      const aggregateRebuild = findDiagnosticStep(run, 'aggregates.rebuild');
+      setPerformanceSweepState({
+        status: 'success',
+        message: `${describePerformanceRunStatus(run.status)} sweep recorded in ${formatElapsedMs(run.totalElapsedMs)}. Dashboard cold ${dashboardCold ? formatDiagnosticStepOutcome(dashboardCold) : '--'}. Aggregates ${aggregateRebuild ? formatDiagnosticStepOutcome(aggregateRebuild) : '--'}.`,
+      });
+    } catch (error) {
+      await refreshPerformanceRuns().catch(() => []);
+      setPerformanceSweepState({
+        status: 'error',
+        message: error instanceof Error ? error.message : 'Unable to run the full performance sweep.',
       });
     }
   }
@@ -438,6 +739,130 @@ export function SettingsScreen() {
         <Text style={styles.roadmapText}>{progress.message}</Text>
       </GlassCard>
 
+      <GlassCard accentColor={colors.success}>
+        <SectionHeader
+          title="Performance Diagnostics"
+          trailing={db ? (latestPerformanceRun ? describePerformanceRunStatus(latestPerformanceRun.status) : 'Ready') : 'Unavailable'}
+        />
+        <View style={styles.settingColumn}>
+          <View>
+            <Text style={styles.settingTitle}>Run full performance sweep</Text>
+            <Text style={styles.settingSubtitle}>
+              Measure warm and cache-cold screen reads, aggregate rebuilds, and dashboard snapshot rebuilds in one pass. The latest recorded sync summary is attached when available.
+            </Text>
+          </View>
+
+          <View style={styles.buttonRow}>
+            <ActionButton
+              label={performanceSweepState.status === 'running' ? 'Running Perf Sweep...' : 'Run Full Perf Sweep'}
+              onPress={() => {
+                void handleRunFullPerformanceSweep();
+              }}
+              disabled={performanceSweepDisabled}
+              tone="secondary"
+            />
+          </View>
+
+          <Text
+            style={[
+              styles.roadmapText,
+              performanceSweepState.status === 'error' ? styles.errorText : null,
+            ]}>
+            {db ? performanceSweepState.message : 'Performance diagnostics needs the local SQLite provider in this build.'}
+          </Text>
+
+          {latestPerformanceRun ? (
+            <>
+              <View>
+                <Text style={styles.settingTitle}>Latest sweep</Text>
+                <Text style={styles.settingSubtitle}>{latestPerformanceRun.startedAt}</Text>
+              </View>
+
+              <View style={styles.chipWrap}>
+                <StatChip
+                  accent={performanceRunAccent(latestPerformanceRun.status)}
+                  label="Status"
+                  value={describePerformanceRunStatus(latestPerformanceRun.status)}
+                />
+                <StatChip
+                  accent={colors.borderStrong}
+                  label="Total"
+                  value={formatElapsedMs(latestPerformanceRun.totalElapsedMs)}
+                />
+                <StatChip
+                  accent={colors.borderStrong}
+                  label="Heart rows"
+                  value={`${latestPerformanceRun.heartRowCount}`}
+                />
+                <StatChip
+                  accent={colors.borderStrong}
+                  label="Dashboard cold"
+                  value={formatDiagnosticStepOutcome(
+                    findDiagnosticStep(latestPerformanceRun, 'dashboard.read.cold') ?? {
+                      key: 'missing',
+                      label: 'Missing',
+                      status: 'not_applicable',
+                      elapsedMs: null,
+                      details: {},
+                    },
+                  )}
+                />
+                <StatChip
+                  accent={colors.borderStrong}
+                  label="Aggregates"
+                  value={formatDiagnosticStepOutcome(
+                    findDiagnosticStep(latestPerformanceRun, 'aggregates.rebuild') ?? {
+                      key: 'missing',
+                      label: 'Missing',
+                      status: 'not_applicable',
+                      elapsedMs: null,
+                      details: {},
+                    },
+                  )}
+                />
+                <StatChip
+                  accent={colors.borderStrong}
+                  label="Last sync"
+                  value={latestPerformanceRun.lastSyncResult ? describeBackgroundRunState(latestPerformanceRun.lastSyncStartedAt, latestPerformanceRun.lastSyncFinishedAt, latestPerformanceRun.lastSyncResult) : 'Unknown'}
+                />
+              </View>
+
+              {latestPerformanceRun.steps.map((step) => (
+                <Text
+                  key={`${latestPerformanceRun.id}-${step.key}`}
+                  style={[
+                    styles.roadmapText,
+                    step.status === 'error' ? styles.errorText : null,
+                  ]}>
+                  {step.label}: {formatDiagnosticStepOutcome(step)}
+                </Text>
+              ))}
+            </>
+          ) : null}
+
+          <View>
+            <Text style={styles.settingTitle}>Recent sweeps</Text>
+            <Text style={styles.settingSubtitle}>{performanceHistoryState.message}</Text>
+          </View>
+
+          {performanceRuns.length === 0 ? (
+            <Text
+              style={[
+                styles.roadmapText,
+                performanceHistoryState.status === 'error' ? styles.errorText : null,
+              ]}>
+              {performanceHistoryState.message}
+            </Text>
+          ) : (
+            performanceRuns.map((run) => (
+              <Text key={run.id} style={styles.roadmapText}>
+                {summarizeDiagnosticRun(run)}
+              </Text>
+            ))
+          )}
+        </View>
+      </GlassCard>
+
       {__DEV__ ? (
         <GlassCard accentColor={colors.cyan}>
           <SectionHeader title="Snapshot Diagnostics" trailing="Debug only" />
@@ -458,12 +883,37 @@ export function SettingsScreen() {
                 disabled={snapshotDisabled}
                 tone="secondary"
               />
+            </View>
+
+            <View style={styles.buttonRow}>
               <ActionButton
-                label={snapshotBenchmarkState.status === 'running' ? 'Benchmarking...' : 'Benchmark Warm vs Cold'}
+                label={aggregateState.status === 'running' ? 'Rebuilding Aggregates...' : 'Rebuild Aggregate Tables'}
+                onPress={() => {
+                  void handleRebuildAggregates();
+                }}
+                disabled={snapshotBenchmarkDisabled}
+                tone="secondary"
+              />
+            </View>
+
+            <View style={styles.buttonRow}>
+              <ActionButton
+                label={snapshotBenchmarkState.status === 'running' ? 'Benchmarking...' : 'Benchmark Dashboard Warm vs Cold'}
                 onPress={() => {
                   void handleBenchmarkSnapshots();
                 }}
                 disabled={snapshotBenchmarkDisabled}
+                tone="secondary"
+              />
+            </View>
+
+            <View style={styles.buttonRow}>
+              <ActionButton
+                label={viewBenchmarkState.status === 'running' ? 'Benchmarking All Screens...' : 'Benchmark All Screens Warm vs Cold'}
+                onPress={() => {
+                  void handleBenchmarkViewReads();
+                }}
+                disabled={snapshotDisabled}
                 tone="secondary"
               />
             </View>
@@ -478,9 +928,23 @@ export function SettingsScreen() {
             <Text
               style={[
                 styles.roadmapText,
+                aggregateState.status === 'error' ? styles.errorText : null,
+              ]}>
+              {aggregateState.message}
+            </Text>
+            <Text
+              style={[
+                styles.roadmapText,
                 snapshotBenchmarkState.status === 'error' ? styles.errorText : null,
               ]}>
               {snapshotBenchmarkState.message}
+            </Text>
+            <Text
+              style={[
+                styles.roadmapText,
+                viewBenchmarkState.status === 'error' ? styles.errorText : null,
+              ]}>
+              {viewBenchmarkState.message}
             </Text>
           </View>
         </GlassCard>
