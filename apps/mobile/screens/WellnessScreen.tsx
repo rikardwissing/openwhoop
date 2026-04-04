@@ -9,7 +9,7 @@ import { GlassCard } from '@/components/ui/GlassCard';
 import { StatChip } from '@/components/ui/StatChip';
 import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
 import { colors, typography } from '@/constants/theme';
-import { useWellnessSnapshot } from '@/hooks/useHealthData';
+import { useDerivedRefreshState, useWellnessSnapshot } from '@/hooks/useHealthData';
 import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
 import type { MetricSeries, TrendSelection } from '@/types/health';
 import { formatMetricValue, formatSignedValue } from '@/utils/formatters';
@@ -75,6 +75,7 @@ function WellnessMetricCard({ metric }: { metric: MetricSeries }) {
 
 export function WellnessScreen() {
   const state = useWellnessSnapshot('14d');
+  const derivedRefresh = useDerivedRefreshState();
   const { onRefresh, refreshing } = useWearableRefreshControl();
   const data = state.data;
 
@@ -98,10 +99,23 @@ export function WellnessScreen() {
     return null;
   }
 
+  const derivedRefreshMessage =
+    derivedRefresh.data?.status === 'pending' || derivedRefresh.data?.status === 'processing'
+      ? derivedRefresh.data.isFirstSync
+        ? 'Preparing insights from your first sync...'
+        : 'Updating wellness insights with your latest sync...'
+      : null;
+
   return (
     <ScreenShell headerIcon="wellness" headerTitle="Wellness" onRefresh={onRefresh} refreshing={refreshing}>
       {state.status === 'error' ? (
         <ErrorState message="Showing the last wellness snapshot while refresh catches up." variant="inline" />
+      ) : null}
+      {derivedRefreshMessage ? (
+        <Text style={styles.syncNotice}>{derivedRefreshMessage}</Text>
+      ) : null}
+      {derivedRefresh.data?.status === 'error' && derivedRefresh.data.lastError ? (
+        <ErrorState message={derivedRefresh.data.lastError} variant="inline" />
       ) : null}
       <View>
         <Text style={styles.subtitle}>Stress, oxygen, temperature, recovery, and recent activity trends.</Text>
@@ -139,6 +153,11 @@ const styles = StyleSheet.create({
     fontFamily: typography.body,
     fontSize: 15,
     marginTop: 6,
+  },
+  syncNotice: {
+    color: colors.primaryBright,
+    fontFamily: typography.bodySemiBold,
+    fontSize: 13,
   },
   metricCard: {
     marginBottom: 0,

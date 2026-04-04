@@ -1,5 +1,5 @@
 import type { ReactElement } from 'react';
-import { act, fireEvent, render } from '@testing-library/react-native';
+import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
 import { ScrollView } from 'react-native';
 
 const mockPush = jest.fn();
@@ -293,6 +293,9 @@ describe('screen rendering', () => {
     expect(screen.getByText('Restart wearable')).toBeTruthy();
     expect(screen.getByText('Export for Analysis')).toBeTruthy();
     expect(screen.getByText('Export Snapshot')).toBeTruthy();
+    expect(screen.getByText('Snapshot Diagnostics')).toBeTruthy();
+    expect(screen.getByText('Regenerate Snapshot')).toBeTruthy();
+    expect(screen.getByText('Benchmark Warm vs Cold')).toBeTruthy();
     expect(screen.getByText('Battery')).toBeTruthy();
     expect(screen.getAllByText('Status').length).toBeGreaterThan(0);
     expect(screen.getByText('Charge')).toBeTruthy();
@@ -307,6 +310,25 @@ describe('screen rendering', () => {
     expect(screen.getAllByText('--').length).toBeGreaterThan(0);
     expect(screen.queryByText('Scan nearby')).toBeNull();
     expect(screen.queryByText('Scan Results')).toBeNull();
+  });
+
+  it('rebuilds the full dashboard snapshot from settings', async () => {
+    const repository = new MockHealthRepository({ delayMs: 0 });
+    const refreshDashboardSnapshot = jest.spyOn(repository, 'refreshDashboardSnapshot');
+    const screen = render(
+      <HealthDataProvider repository={repository}>
+        <WearableSyncContextProvider value={createWearableContextValue()}>
+          <SettingsScreen />
+        </WearableSyncContextProvider>
+      </HealthDataProvider>,
+    );
+
+    fireEvent.press(screen.getByText('Regenerate Snapshot'));
+
+    await waitFor(() => {
+      expect(refreshDashboardSnapshot).toHaveBeenCalledWith('full');
+    });
+    expect(await screen.findByText(/Rebuilt the full dashboard snapshot in \d+ ms\./)).toBeTruthy();
   });
 
   it('runs the background sync test trigger from settings', () => {

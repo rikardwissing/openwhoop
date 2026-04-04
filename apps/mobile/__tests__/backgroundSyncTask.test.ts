@@ -93,6 +93,11 @@ jest.mock('@/services/background/backgroundSyncNotifications', () => ({
   deliverNewBackgroundNotifications: jest.fn(async () => 0),
 }));
 
+jest.mock('@/data/sqlite/SQLiteHealthRepository', () => ({
+  processPendingDerivedRefresh: jest.fn(async () => true),
+  refreshDashboardSnapshot: jest.fn(async () => true),
+}));
+
 jest.mock('@/services/background/backgroundSyncState', () => ({
   clearBackgroundSyncState: jest.fn(async () => {}),
   getBackgroundSyncState: (db: unknown) => mockGetBackgroundSyncState(db),
@@ -168,10 +173,6 @@ describe('background sync task diagnostics', () => {
     const triggered = await triggerBackgroundSyncForTesting();
 
     expect(triggered).toBe(true);
-    expect(mockUnregisterTaskAsync).toHaveBeenCalledWith(BACKGROUND_SYNC_TASK_NAME);
-    expect(mockRegisterTaskAsync).toHaveBeenCalledWith(BACKGROUND_SYNC_TASK_NAME, {
-      minimumInterval: 15,
-    });
     expect(mockTriggerTaskWorkerForTestingAsync).toHaveBeenCalledTimes(1);
   });
 });

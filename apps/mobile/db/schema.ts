@@ -1,7 +1,7 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 
 export const APP_DATABASE_NAME = 'btwearable.db';
-export const DERIVED_DATA_SCHEMA_VERSION = 1;
+export const DERIVED_DATA_SCHEMA_VERSION = 2;
 
 export async function initializeDatabase(db: SQLiteDatabase) {
   await db.execAsync(`
@@ -35,6 +35,7 @@ export async function initializeDatabase(db: SQLiteDatabase) {
       min_hrv INTEGER NOT NULL,
       max_hrv INTEGER NOT NULL,
       avg_hrv INTEGER NOT NULL,
+      avg_skin_temp REAL,
       score REAL,
       synced INTEGER NOT NULL DEFAULT 0
     );
@@ -78,6 +79,56 @@ export async function initializeDatabase(db: SQLiteDatabase) {
       id INTEGER PRIMARY KEY NOT NULL CHECK (id = 1),
       derived_schema_version INTEGER NOT NULL,
       source_heart_count INTEGER NOT NULL,
+      refreshed_at TEXT NOT NULL,
+      rebuild_status TEXT NOT NULL DEFAULT 'idle',
+      pending_from_time TEXT,
+      pending_to_time TEXT,
+      last_processed_from_time TEXT,
+      last_processed_to_time TEXT,
+      last_error TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS dashboard_snapshot_cache (
+      id INTEGER PRIMARY KEY NOT NULL CHECK (id = 1),
+      snapshot_json TEXT NOT NULL,
+      snapshot_kind TEXT NOT NULL,
+      built_at TEXT NOT NULL,
+      source_heart_count INTEGER NOT NULL,
+      source_last_heart_time TEXT,
+      derived_refreshed_at TEXT,
+      last_error TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS heart_day_stats (
+      day TEXT PRIMARY KEY NOT NULL,
+      min_bpm INTEGER NOT NULL,
+      avg_bpm REAL NOT NULL,
+      max_bpm INTEGER NOT NULL,
+      strain_score REAL
+    );
+
+    CREATE TABLE IF NOT EXISTS heart_global_stats (
+      id INTEGER PRIMARY KEY NOT NULL CHECK (id = 1),
+      observed_peak_bpm INTEGER,
+      latest_heart_time TEXT,
+      latest_stress REAL
+    );
+
+    CREATE TABLE IF NOT EXISTS heart_intraday_buckets (
+      bucket_start TEXT PRIMARY KEY NOT NULL,
+      sample_count INTEGER NOT NULL,
+      avg_bpm REAL NOT NULL,
+      first_bpm INTEGER NOT NULL,
+      second_bpm INTEGER,
+      penultimate_bpm INTEGER,
+      last_bpm INTEGER NOT NULL,
+      max_triplet_avg REAL
+    );
+
+    CREATE TABLE IF NOT EXISTS heart_intraday_bucket_state (
+      id INTEGER PRIMARY KEY NOT NULL CHECK (id = 1),
+      source_heart_count INTEGER NOT NULL,
+      source_last_heart_time TEXT,
       refreshed_at TEXT NOT NULL
     );
 
@@ -133,6 +184,40 @@ export async function initializeDatabase(db: SQLiteDatabase) {
 
   if (!deviceStateColumnNames.has('charging_status')) {
     await db.execAsync('ALTER TABLE device_state ADD COLUMN charging_status TEXT;');
+  }
+
+  const sleepCycleColumns = await db.getAllAsync<{ name: string }>('PRAGMA table_info(sleep_cycles)');
+  const sleepCycleColumnNames = new Set(sleepCycleColumns.map((column) => column.name));
+
+  if (!sleepCycleColumnNames.has('avg_skin_temp')) {
+    await db.execAsync('ALTER TABLE sleep_cycles ADD COLUMN avg_skin_temp REAL;');
+  }
+
+  const derivedDataStateColumns = await db.getAllAsync<{ name: string }>('PRAGMA table_info(derived_data_state)');
+  const derivedDataStateColumnNames = new Set(derivedDataStateColumns.map((column) => column.name));
+
+  if (!derivedDataStateColumnNames.has('rebuild_status')) {
+    await db.execAsync(`ALTER TABLE derived_data_state ADD COLUMN rebuild_status TEXT NOT NULL DEFAULT 'idle';`);
+  }
+
+  if (!derivedDataStateColumnNames.has('pending_from_time')) {
+    await db.execAsync('ALTER TABLE derived_data_state ADD COLUMN pending_from_time TEXT;');
+  }
+
+  if (!derivedDataStateColumnNames.has('pending_to_time')) {
+    await db.execAsync('ALTER TABLE derived_data_state ADD COLUMN pending_to_time TEXT;');
+  }
+
+  if (!derivedDataStateColumnNames.has('last_processed_from_time')) {
+    await db.execAsync('ALTER TABLE derived_data_state ADD COLUMN last_processed_from_time TEXT;');
+  }
+
+  if (!derivedDataStateColumnNames.has('last_processed_to_time')) {
+    await db.execAsync('ALTER TABLE derived_data_state ADD COLUMN last_processed_to_time TEXT;');
+  }
+
+  if (!derivedDataStateColumnNames.has('last_error')) {
+    await db.execAsync('ALTER TABLE derived_data_state ADD COLUMN last_error TEXT;');
   }
 
   const activityForeignKeys = await db.getAllAsync<{ table: string }>('PRAGMA foreign_key_list(activities)');

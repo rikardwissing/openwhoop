@@ -4,6 +4,7 @@ import type { HealthCacheScope, HealthRepository } from '@/data/HealthRepository
 import { DERIVED_DATA_SCHEMA_VERSION } from '@/db/schema';
 import type {
   ActivitySummary,
+  DerivedRefreshState,
   DashboardSnapshot,
   HeartHistorySnapshot,
   HistoryRange,
@@ -18,7 +19,7 @@ import type {
   TrendPoint,
   WellnessSnapshot,
 } from '@/types/health';
-import { dateKey, formatAxisTime, formatClock, formatClockMinutes, formatLongDate, formatShortDate, formatSqliteDateTime, hoursBetween, minutesBetween, parseSqliteDateTime } from '@/utils/dateTime';
+import { addMinutes, dateKey, formatAxisTime, formatClock, formatClockMinutes, formatLongDate, formatShortDate, formatSqliteDateTime, hoursBetween, minutesBetween, parseSqliteDateTime } from '@/utils/dateTime';
 import { describeRecovery, describeSleepScore, formatMetricNumber } from '@/utils/formatters';
 import { sustainedPeakBpm } from '@/utils/heartRate';
 import { clamp, mean, median, stdDev } from '@/utils/math';
@@ -41,6 +42,11 @@ const DEFAULT_TARGET_WAKE_MINUTES = 7 * 60 + 30;
 const RECENT_WAKE_INFERENCE_DAYS = 7;
 const DASHBOARD_HEART_BUCKET_MINUTES = 5;
 const HEART_INTRADAY_BUCKET_MINUTES = 5;
+
+const SHOULD_LOG_MOBILE_PERF =
+  typeof __DEV__ !== 'undefined' &&
+  __DEV__ &&
+  (typeof process === 'undefined' || process.env.NODE_ENV !== 'test');
 
 const PPG_THRESHOLDS = {
   inactiveActive: 7629,
@@ -91,6 +97,56 @@ interface HeartRateRecord {
   ppgGreen: number | null;
 }
 
+interface HeartRateSampleRow {
+  bpm: number;
+  time: string;
+}
+
+interface HeartRateSample {
+  bpm: number;
+  time: string;
+  date: Date;
+}
+
+interface WellnessMetricDayAggregateRow {
+  day: string;
+  avg_stress: number | null;
+  avg_spo2: number | null;
+  avg_skin_temp: number | null;
+}
+
+interface WellnessMetricSummaryRow {
+  stress_count: number;
+  avg_stress: number | null;
+  latest_stress: number | null;
+  spo2_count: number;
+  avg_spo2: number | null;
+  latest_spo2: number | null;
+  skin_temp_count: number;
+  avg_skin_temp: number | null;
+  latest_skin_temp: number | null;
+}
+
+interface HeartIntradayBucketRow {
+  bucket_start: string;
+  sample_count: number;
+  avg_bpm: number;
+  first_bpm: number;
+  second_bpm: number | null;
+  penultimate_bpm: number | null;
+  last_bpm: number;
+  max_triplet_avg: number | null;
+}
+
+interface BucketedHeartWindow {
+  latestHeartDate: Date | null;
+  intradayStart: Date | null;
+  rawRowCount: number;
+  bucketSamples: HeartRateSample[];
+  averageBpm: number | null;
+  sustainedPeakBpm: number | null;
+}
+
 interface SleepCycleRow {
   id: string;
   sleep_id: string;
@@ -102,6 +158,7 @@ interface SleepCycleRow {
   min_hrv: number;
   max_hrv: number;
   avg_hrv: number;
+  avg_skin_temp: number | null;
   score: number | null;
 }
 
@@ -116,6 +173,7 @@ interface SleepCycleRecord {
   minHrv: number;
   maxHrv: number;
   avgHrv: number;
+  avgSkinTemp: number | null;
   score: number | null;
 }
 
@@ -178,19 +236,77 @@ interface DerivedDataStateRow {
   derived_schema_version: number;
   source_heart_count: number;
   refreshed_at: string;
+  rebuild_status: 'idle' | 'pending' | 'processing' | 'error';
+  pending_from_time: string | null;
+  pending_to_time: string | null;
+  last_processed_from_time: string | null;
+  last_processed_to_time: string | null;
+  last_error: string | null;
 }
 
 interface TimeRow {
   time: string;
 }
 
+interface LatestHeartRow {
+  time: string;
+  stress: number | null;
+}
+
+interface HeartTimeBoundsRow {
+  min_time: string | null;
+  max_time: string | null;
+}
+
 interface NumberRow {
   bpm: number;
+}
+
+interface NullableNumberRow {
+  value: number | null;
 }
 
 interface DailyMinimaRow {
   day: string;
   min_bpm: number;
+}
+
+interface HeartDayStatRow {
+  day: string;
+  min_bpm: number;
+  avg_bpm: number;
+  max_bpm: number;
+  strain_score: number | null;
+}
+
+interface HeartDayStatRecord {
+  day: string;
+  minBpm: number;
+  avgBpm: number;
+  maxBpm: number;
+  strainScore: number | null;
+}
+
+interface HeartGlobalStatsRow {
+  observed_peak_bpm: number | null;
+  latest_heart_time: string | null;
+  latest_stress: number | null;
+}
+
+interface HeartIntradayBucketStateRow {
+  source_heart_count: number;
+  source_last_heart_time: string | null;
+  refreshed_at: string;
+}
+
+interface DashboardSnapshotCacheRow {
+  snapshot_json: string;
+  snapshot_kind: 'full' | 'post_sync_heart_only';
+  built_at: string;
+  source_heart_count: number;
+  source_last_heart_time: string | null;
+  derived_refreshed_at: string | null;
+  last_error: string | null;
 }
 
 interface DetectedPeriod {
@@ -206,6 +322,58 @@ interface PreparedDataBundle {
   activities: ActivityRecord[];
   sleepStages: SleepStageRecord[];
   deviceState: DeviceStateRow | null;
+}
+
+type PerformanceLogValue = string | number | boolean | null;
+
+function logMobilePerf(label: string, startedAt: number, details?: Record<string, PerformanceLogValue>) {
+  if (!SHOULD_LOG_MOBILE_PERF) {
+    return;
+  }
+
+  const elapsedMs = Date.now() - startedAt;
+  const suffix = details
+    ? Object.entries(details)
+        .map(([key, value]) => `${key}=${value}`)
+        .join(' ')
+    : '';
+  console.info(`[mobile-perf] ${label} ${elapsedMs}ms${suffix ? ` ${suffix}` : ''}`);
+}
+
+function logMobilePerfError(label: string, error: unknown, details?: Record<string, PerformanceLogValue>) {
+  if (!SHOULD_LOG_MOBILE_PERF) {
+    return;
+  }
+
+  const suffix = details
+    ? Object.entries(details)
+        .map(([key, value]) => `${key}=${value}`)
+        .join(' ')
+    : '';
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`[mobile-perf] ${label} error=${message}${suffix ? ` ${suffix}` : ''}`);
+}
+
+const aggregateMutationLocks = new WeakMap<object, Promise<void>>();
+
+async function withAggregateMutationLock<T>(db: SQLiteDatabase, callback: () => Promise<T>): Promise<T> {
+  const key = db as object;
+  const previous = aggregateMutationLocks.get(key) ?? Promise.resolve();
+  const next = previous.catch(() => {}).then(callback);
+  const settled = next.then(
+    () => {},
+    () => {},
+  );
+
+  aggregateMutationLocks.set(key, settled);
+
+  try {
+    return await next;
+  } finally {
+    if (aggregateMutationLocks.get(key) === settled) {
+      aggregateMutationLocks.delete(key);
+    }
+  }
 }
 
 function parseRrIntervals(value: string): number[] {
@@ -250,6 +418,14 @@ function toHeartRateRecord(row: HeartRateQueryRow): HeartRateRecord {
   };
 }
 
+function toHeartRateSample(row: HeartRateSampleRow): HeartRateSample {
+  return {
+    bpm: row.bpm,
+    time: row.time,
+    date: parseSqliteDateTime(row.time),
+  };
+}
+
 function toSleepCycleRecord(row: SleepCycleRow): SleepCycleRecord {
   return {
     id: row.id,
@@ -262,6 +438,7 @@ function toSleepCycleRecord(row: SleepCycleRow): SleepCycleRecord {
     minHrv: row.min_hrv,
     maxHrv: row.max_hrv,
     avgHrv: row.avg_hrv,
+    avgSkinTemp: row.avg_skin_temp,
     score: row.score,
   };
 }
@@ -273,6 +450,16 @@ function toActivityRecord(row: ActivityRow): ActivityRecord {
     start: parseSqliteDateTime(row.start),
     end: parseSqliteDateTime(row.end),
     activity: row.activity === 'Nap' ? 'Nap' : 'Activity',
+  };
+}
+
+function toHeartDayStatRecord(row: HeartDayStatRow): HeartDayStatRecord {
+  return {
+    day: row.day,
+    minBpm: row.min_bpm,
+    avgBpm: row.avg_bpm,
+    maxBpm: row.max_bpm,
+    strainScore: row.strain_score,
   };
 }
 
@@ -357,8 +544,8 @@ function buildFilledDailySeries(
   });
 }
 
-function createTimeBuckets(
-  points: HeartRateRecord[],
+function createTimeBuckets<T extends { bpm: number; date: Date }>(
+  points: T[],
   bucketMinutes: number,
   startDate?: Date,
   endDate?: Date,
@@ -368,7 +555,7 @@ function createTimeBuckets(
   }
 
   const bucketMs = bucketMinutes * 60000;
-  const buckets = new Map<number, HeartRateRecord[]>();
+  const buckets = new Map<number, T[]>();
 
   for (const point of points) {
     const bucketStart = Math.floor(point.date.getTime() / bucketMs) * bucketMs;
@@ -427,18 +614,19 @@ function detectFromGravity(history: HeartRateRecord[]): DetectedPeriod[] {
 
   const medianInterval = intervals.length === 0 ? 60 : intervals[Math.floor(intervals.length / 2)];
   const windowSize = Math.max(3, Math.floor((GRAVITY_WINDOW_MINUTES * 60) / Math.max(1, medianInterval)));
-  const stillFractions = deltas.map((_, index) => {
-    const half = Math.floor(windowSize / 2);
-    const start = Math.max(0, index - half);
-    const end = Math.min(deltas.length, index + half + 1);
-    const window = deltas.slice(start, end);
-    const still = window.filter((value) => value < GRAVITY_STILL_THRESHOLD).length;
-    return still / window.length;
-  });
+  const halfWindow = Math.floor(windowSize / 2);
+  const stillPrefixCounts = new Array<number>(deltas.length + 1).fill(0);
 
-  const classified = stillFractions.map(
-    (fraction, index) => fraction >= GRAVITY_STILL_FRACTION && history[index].skinContact !== 0,
-  );
+  for (let index = 0; index < deltas.length; index += 1) {
+    stillPrefixCounts[index + 1] = stillPrefixCounts[index] + (deltas[index] < GRAVITY_STILL_THRESHOLD ? 1 : 0);
+  }
+
+  const classified = history.map((row, index) => {
+    const start = Math.max(0, index - halfWindow);
+    const end = Math.min(deltas.length, index + halfWindow + 1);
+    const stillCount = stillPrefixCounts[end] - stillPrefixCounts[start];
+    return stillCount / Math.max(1, end - start) >= GRAVITY_STILL_FRACTION && row.skinContact !== 0;
+  });
   const periods: DetectedPeriod[] = [];
   let runStart = 0;
 
@@ -564,7 +752,7 @@ function selectSleepAndNapPeriods(periods: DetectedPeriod[]) {
   return { sleeps, naps };
 }
 
-function rowsInRange(rows: HeartRateRecord[], start: Date, end: Date): HeartRateRecord[] {
+function rowsInRange<T extends { date: Date }>(rows: T[], start: Date, end: Date): T[] {
   return rows.filter((row) => row.date >= start && row.date <= end);
 }
 
@@ -583,6 +771,58 @@ function calculateRollingHrv(rr: number[]): number[] {
   return values;
 }
 
+function summarizeNumbers(values: readonly number[]) {
+  if (values.length === 0) {
+    return null;
+  }
+
+  let min = values[0]!;
+  let max = values[0]!;
+  let total = 0;
+
+  for (const value of values) {
+    if (value < min) {
+      min = value;
+    }
+    if (value > max) {
+      max = value;
+    }
+    total += value;
+  }
+
+  return {
+    min,
+    max,
+    average: total / values.length,
+  };
+}
+
+function summarizeHeartRows<T extends { bpm: number }>(rows: readonly T[]) {
+  if (rows.length === 0) {
+    return null;
+  }
+
+  let min = rows[0]!.bpm;
+  let max = rows[0]!.bpm;
+  let total = 0;
+
+  for (const row of rows) {
+    if (row.bpm < min) {
+      min = row.bpm;
+    }
+    if (row.bpm > max) {
+      max = row.bpm;
+    }
+    total += row.bpm;
+  }
+
+  return {
+    min,
+    max,
+    average: total / rows.length,
+  };
+}
+
 function buildSleepCycle(period: DetectedPeriod, rows: HeartRateRecord[]): SleepCycleRecord | null {
   const windowRows = rowsInRange(rows, period.start, period.end);
   if (windowRows.length === 0) {
@@ -592,19 +832,25 @@ function buildSleepCycle(period: DetectedPeriod, rows: HeartRateRecord[]): Sleep
   const rr = windowRows.flatMap((row) => row.rr);
   const hrvValues = calculateRollingHrv(rr);
   const bpmValues = windowRows.map((row) => row.bpm);
+  const tempValues = windowRows
+    .map((row) => resolvedSkinTemp(row))
+    .filter((value): value is number => value !== null);
   const sleepId = dateKey(period.end);
+  const bpmSummary = summarizeNumbers(bpmValues)!;
+  const hrvSummary = summarizeNumbers(hrvValues);
 
   return {
     id: sleepId,
     sleepId,
     start: period.start,
     end: period.end,
-    minBpm: Math.min(...bpmValues),
-    maxBpm: Math.max(...bpmValues),
-    avgBpm: Math.round(mean(bpmValues)),
-    minHrv: hrvValues.length > 0 ? Math.min(...hrvValues) : 0,
-    maxHrv: hrvValues.length > 0 ? Math.max(...hrvValues) : 0,
-    avgHrv: hrvValues.length > 0 ? Math.round(mean(hrvValues)) : 0,
+    minBpm: bpmSummary.min,
+    maxBpm: bpmSummary.max,
+    avgBpm: Math.round(bpmSummary.average),
+    minHrv: hrvSummary?.min ?? 0,
+    maxHrv: hrvSummary?.max ?? 0,
+    avgHrv: hrvSummary ? Math.round(hrvSummary.average) : 0,
+    avgSkinTemp: tempValues.length > 0 ? mean(tempValues) : null,
     score: null,
   };
 }
@@ -796,7 +1042,7 @@ function buildNapActivities(periods: DetectedPeriod[]): ActivityRecord[] {
   }));
 }
 
-function sampleDurationMinutes(rows: HeartRateRecord[]): number {
+function sampleDurationMinutes<T extends { date: Date }>(rows: T[]): number {
   if (rows.length < 2) {
     return 1 / 60;
   }
@@ -827,7 +1073,7 @@ function zoneWeight(bpm: number, restingHr: number, hrReserve: number): number {
   return 0;
 }
 
-function calculateStrain(rows: HeartRateRecord[], maxHr: number, restingHr: number): number | null {
+function calculateStrain<T extends { bpm: number; date: Date }>(rows: T[], maxHr: number, restingHr: number): number | null {
   if (rows.length < 600 || maxHr <= restingHr) {
     return null;
   }
@@ -843,7 +1089,7 @@ function calculateStrain(rows: HeartRateRecord[], maxHr: number, restingHr: numb
   return Math.round((21 * Math.log(trimp + 1) / Math.log(7201)) * 100) / 100;
 }
 
-function estimateCalories(rows: HeartRateRecord[], maxHr: number, restingHr: number): number | null {
+function estimateCalories<T extends { bpm: number; date: Date }>(rows: T[], maxHr: number, restingHr: number): number | null {
   if (rows.length < 2 || maxHr <= restingHr) {
     return null;
   }
@@ -861,37 +1107,117 @@ function estimateCalories(rows: HeartRateRecord[], maxHr: number, restingHr: num
   return Math.round(calories);
 }
 
-function calculateStressScore(window: HeartRateRecord[]): number | null {
-  if (window.length < STRESS_WINDOW) {
+function trackStressValue(
+  value: number,
+  bins: Map<number, number>,
+  state: {
+    count: number;
+    min: number;
+    max: number;
+    modeBin: number;
+    modeFreq: number;
+  },
+) {
+  state.count += 1;
+  state.min = Math.min(state.min, value);
+  state.max = Math.max(state.max, value);
+
+  const bin = Math.floor(value / 50);
+  const frequency = (bins.get(bin) ?? 0) + 1;
+  bins.set(bin, frequency);
+
+  if (frequency > state.modeFreq) {
+    state.modeFreq = frequency;
+    state.modeBin = bin;
+  }
+}
+
+function calculateStressScoreForRange(
+  heartRows: HeartRateRecord[],
+  startIndex: number,
+  endIndex: number,
+): number | null {
+  if (endIndex - startIndex < STRESS_WINDOW) {
     return null;
   }
 
-  const realRr = window.flatMap((row) => row.rr);
-  const rr = (realRr.length >= STRESS_WINDOW ? realRr : window.map((row) => Math.round((60 / row.bpm) * 1000)))
-    .filter((value) => value > 0);
-
-  if (rr.length < STRESS_WINDOW) {
-    return null;
+  let realRrLength = 0;
+  for (let index = startIndex; index < endIndex; index += 1) {
+    realRrLength += heartRows[index].rr.length;
   }
 
-  const min = Math.min(...rr);
-  const max = Math.max(...rr);
   const bins = new Map<number, number>();
+  const state = {
+    count: 0,
+    min: Number.POSITIVE_INFINITY,
+    max: Number.NEGATIVE_INFINITY,
+    modeBin: 0,
+    modeFreq: 0,
+  };
 
-  for (const value of rr) {
-    const bin = Math.floor(value / 50);
-    bins.set(bin, (bins.get(bin) ?? 0) + 1);
+  if (realRrLength >= STRESS_WINDOW) {
+    for (let index = startIndex; index < endIndex; index += 1) {
+      for (const value of heartRows[index].rr) {
+        if (value > 0) {
+          trackStressValue(value, bins, state);
+        }
+      }
+    }
+  } else {
+    for (let index = startIndex; index < endIndex; index += 1) {
+      const value = Math.round((60 / heartRows[index].bpm) * 1000);
+      if (value > 0) {
+        trackStressValue(value, bins, state);
+      }
+    }
   }
 
-  const [modeBin, modeFreq] = [...bins.entries()].sort((left, right) => right[1] - left[1])[0] ?? [0, 0];
-  const mode = modeBin * 50 + 25;
-  const variabilityRange = (max - min) / 1000;
+  if (state.count < STRESS_WINDOW) {
+    return null;
+  }
+
+  const variabilityRange = (state.max - state.min) / 1000;
   if (variabilityRange < 0.0001) {
     return 10;
   }
 
-  const aMode = modeFreq / rr.length * 100;
+  const mode = state.modeBin * 50 + 25;
+  const aMode = state.modeFreq / state.count * 100;
   return Math.min(10, Math.round((aMode / (2 * variabilityRange * mode / 1000)) * 100) / 100);
+}
+
+function calculateStressScore(window: HeartRateRecord[]): number | null {
+  return calculateStressScoreForRange(window, 0, window.length);
+}
+
+function calculateSpo2ScoreFromState(
+  windowLength: number,
+  validCount: number,
+  sumRed: number,
+  sumRedSquares: number,
+  sumIr: number,
+  sumIrSquares: number,
+): number | null {
+  if (windowLength < SPO2_WINDOW || validCount < SPO2_WINDOW) {
+    return null;
+  }
+
+  const meanRed = sumRed / validCount;
+  const meanIr = sumIr / validCount;
+  if (meanRed < 1 || meanIr < 1) {
+    return null;
+  }
+
+  const redVariance = Math.max(0, sumRedSquares / validCount - meanRed * meanRed);
+  const irVariance = Math.max(0, sumIrSquares / validCount - meanIr * meanIr);
+  const acRed = Math.sqrt(redVariance);
+  const acIr = Math.sqrt(irVariance);
+  if (acRed < 0.001 || acIr < 0.001) {
+    return null;
+  }
+
+  const ratio = (acRed / meanRed) / (acIr / meanIr);
+  return clamp(110 - 25 * ratio, 70, 100);
 }
 
 function calculateSpo2Score(window: HeartRateRecord[]): number | null {
@@ -899,31 +1225,34 @@ function calculateSpo2Score(window: HeartRateRecord[]): number | null {
     return null;
   }
 
-  const valid = window
-    .map((row) => ({
-      red: row.sensorData?.spo2_red ?? 0,
-      ir: row.sensorData?.spo2_ir ?? 0,
-    }))
-    .filter((row) => row.red > 0 && row.ir > 0);
+  let validCount = 0;
+  let sumRed = 0;
+  let sumRedSquares = 0;
+  let sumIr = 0;
+  let sumIrSquares = 0;
 
-  if (valid.length < SPO2_WINDOW) {
-    return null;
+  for (const row of window) {
+    const red = row.sensorData?.spo2_red ?? 0;
+    const ir = row.sensorData?.spo2_ir ?? 0;
+    if (red <= 0 || ir <= 0) {
+      continue;
+    }
+
+    validCount += 1;
+    sumRed += red;
+    sumRedSquares += red * red;
+    sumIr += ir;
+    sumIrSquares += ir * ir;
   }
 
-  const meanRed = mean(valid.map((row) => row.red));
-  const meanIr = mean(valid.map((row) => row.ir));
-  if (meanRed < 1 || meanIr < 1) {
-    return null;
-  }
-
-  const acRed = Math.sqrt(mean(valid.map((row) => (row.red - meanRed) ** 2)));
-  const acIr = Math.sqrt(mean(valid.map((row) => (row.ir - meanIr) ** 2)));
-  if (acRed < 0.001 || acIr < 0.001) {
-    return null;
-  }
-
-  const ratio = (acRed / meanRed) / (acIr / meanIr);
-  return clamp(110 - 25 * ratio, 70, 100);
+  return calculateSpo2ScoreFromState(
+    window.length,
+    validCount,
+    sumRed,
+    sumRedSquares,
+    sumIr,
+    sumIrSquares,
+  );
 }
 
 function calculateSkinTempValue(row: HeartRateRecord): number | null {
@@ -933,6 +1262,10 @@ function calculateSkinTempValue(row: HeartRateRecord): number | null {
   }
 
   return raw * 0.04;
+}
+
+function resolvedSkinTemp(row: HeartRateRecord): number | null {
+  return row.skinTemp ?? calculateSkinTempValue(row);
 }
 
 function personalizeRestingHr(sleeps: SleepCycleRecord[], dailyMinima: number[]): number {
@@ -956,11 +1289,72 @@ function personalizeMaxHr(bpms: number[], restingHr: number): number {
   return clamp(Math.max(observed, restingHr + 100), 180, 205);
 }
 
+function personalizeMaxHrFromObservedPeak(observedPeakBpm: number | null, restingHr: number): number {
+  const observed = (observedPeakBpm ?? 175) + 5;
+  return clamp(Math.max(observed, restingHr + 100), 180, 205);
+}
+
+function buildEmptyDashboardSnapshot(now: Date, deviceState: DeviceStateRow | null): DashboardSnapshot {
+  return {
+    greeting: greetingForHour(now.getHours()),
+    dateLabel: formatLongDate(now),
+    recovery: {
+      score: null,
+      label: 'Waiting',
+      caption: 'Recovery',
+      isEstimated: true,
+      missingReason: NO_HISTORY_REASON,
+    },
+    summaryStats: [
+      { label: 'HRV', value: '-- ms', accent: 'green', missingReason: NO_HISTORY_REASON },
+      { label: 'RHR', value: '-- bpm', accent: 'cyan', missingReason: NO_HISTORY_REASON },
+      { label: 'Sleep', value: '--', accent: 'violet', missingReason: NO_SLEEP_REASON },
+    ],
+    heartCard: {
+      restingHr: null,
+      averageHr: null,
+      maxHr: null,
+      series: [],
+      missingReason: NO_HISTORY_REASON,
+    },
+    sleepCard: {
+      score: null,
+      durationMinutes: null,
+      stages: [],
+      startLabel: '--',
+      middleLabel: '--',
+      endLabel: '--',
+      isEstimated: true,
+      missingReason: NO_SLEEP_REASON,
+    },
+    strainCard: {
+      score: null,
+      label: 'Waiting',
+      series: [],
+      isEstimated: true,
+      missingReason: NO_HISTORY_REASON,
+    },
+    lastSyncLabel: deviceState?.last_synced_at ?? 'Local seed loaded',
+  };
+}
+
+function dashboardSyncLabel(deviceState: DeviceStateRow | null): string {
+  return deviceState?.last_synced_at
+    ? `Last sync ${formatClock(parseSqliteDateTime(deviceState.last_synced_at))}`
+    : 'Local seed loaded';
+}
+
 function groupByDay<T extends { date: Date }>(rows: T[]): Array<[string, T[]]> {
   const grouped = new Map<string, T[]>();
   for (const row of rows) {
     const key = dateKey(row.date);
-    grouped.set(key, [...(grouped.get(key) ?? []), row]);
+    const current = grouped.get(key);
+    if (current) {
+      current.push(row);
+      continue;
+    }
+
+    grouped.set(key, [row]);
   }
   return [...grouped.entries()].sort((left, right) => left[0].localeCompare(right[0]));
 }
@@ -1045,7 +1439,7 @@ function estimateRecoveryScore(
 
 function averageTemperatureForRange(rows: HeartRateRecord[], start: Date, end: Date): number | null {
   const values = rowsInRange(rows, start, end)
-    .map((row) => row.skinTemp)
+    .map((row) => resolvedSkinTemp(row))
     .filter((value): value is number => value !== null);
 
   return values.length === 0 ? null : mean(values);
@@ -1055,7 +1449,85 @@ function latestValue(values: number[]): number | null {
   return values.length === 0 ? null : values.at(-1) ?? null;
 }
 
-function buildDailyTrend(range: HistoryRange, rows: HeartRateRecord[], accessor: (rows: HeartRateRecord[]) => number | null): TrendPoint[] {
+function estimateRecoveryScoreFromSleeps(
+  latestSleep: SleepCycleRecord | null,
+  sleeps: SleepCycleRecord[],
+  latestStress: number | null,
+): { score: number | null; breakdown: RecoveryBreakdown; isEstimated: boolean; missingReason?: string } {
+  const priorSleeps = sleeps.slice(-15, -1);
+  const hrvBaseline = median(priorSleeps.map((sleep) => sleep.avgHrv).filter((value) => value > 0));
+  const rhrBaseline = median(priorSleeps.map((sleep) => sleep.minBpm));
+  const tempBaseline = median(
+    priorSleeps
+      .map((sleep) => sleep.avgSkinTemp)
+      .filter((value): value is number => value !== null),
+  );
+  const latestTemp = latestSleep?.avgSkinTemp ?? null;
+  const tempDelta = latestTemp !== null && tempBaseline !== null ? latestTemp - tempBaseline : null;
+
+  const breakdown: RecoveryBreakdown = {
+    sleepScore: latestSleep?.score ?? null,
+    hrvComponent: relativeDelta(latestSleep?.avgHrv ?? null, hrvBaseline),
+    rhrComponent: relativeDelta(latestSleep?.minBpm ?? null, rhrBaseline),
+    stressComponent: latestStress !== null ? clamp(100 - latestStress * 10, 0, 100) : null,
+    tempComponent: tempDelta !== null ? clamp(100 - Math.abs(tempDelta) * 50, 0, 100) : null,
+  };
+
+  const weighted: Array<[number, number]> = [];
+
+  if (breakdown.sleepScore !== null) {
+    weighted.push([breakdown.sleepScore, 0.35]);
+  }
+  if (breakdown.hrvComponent !== null) {
+    weighted.push([clamp(70 + breakdown.hrvComponent * 100, 0, 100), 0.25]);
+  }
+  if (breakdown.rhrComponent !== null) {
+    weighted.push([clamp(70 - breakdown.rhrComponent * 100, 0, 100), 0.2]);
+  }
+  if (breakdown.stressComponent !== null) {
+    weighted.push([breakdown.stressComponent, 0.1]);
+  }
+  if (breakdown.tempComponent !== null) {
+    weighted.push([breakdown.tempComponent, 0.1]);
+  }
+
+  if (weighted.length === 0) {
+    return {
+      score: null,
+      isEstimated: true,
+      missingReason: NO_SLEEP_REASON,
+      breakdown,
+    };
+  }
+
+  const totalWeight = weighted.reduce((sum, [, weight]) => sum + weight, 0);
+  const score = weighted.reduce((sum, [value, weight]) => sum + value * weight, 0) / totalWeight;
+
+  return {
+    score: Math.round(score),
+    isEstimated: true,
+    breakdown,
+  };
+}
+
+function buildHeartDayStatsFromRows<T extends { bpm: number; date: Date }>(
+  heartRows: T[],
+  restingHr: number,
+  maxHr: number,
+): HeartDayStatRecord[] {
+  return groupByDay(heartRows).map(([day, rows]) => {
+    const summary = summarizeHeartRows(rows)!;
+    return {
+      day,
+      minBpm: summary.min,
+      avgBpm: summary.average,
+      maxBpm: summary.max,
+      strainScore: calculateStrain(rows, maxHr, restingHr),
+    };
+  });
+}
+
+function buildDailyTrend<T extends { date: Date }>(range: HistoryRange, rows: T[], accessor: (rows: T[]) => number | null): TrendPoint[] {
   if (rows.length === 0) {
     return [];
   }
@@ -1067,6 +1539,39 @@ function buildDailyTrend(range: HistoryRange, rows: HeartRateRecord[], accessor:
     const items = grouped.get(day);
     return items ? accessor(items) : null;
   });
+}
+
+function buildWellnessMetricSeries(options: {
+  title: string;
+  unit: string;
+  accent: MetricSeries['accent'];
+  detail: string;
+  digits?: number;
+  endDate: Date;
+  range: HistoryRange;
+  latest: number | null;
+  average: number | null;
+  count: number;
+  recentValues: readonly number[];
+  valuesByDay: ReadonlyMap<string, number | null>;
+}): MetricSeries {
+  const digits = options.digits ?? 0;
+  const baseline = options.recentValues.length < 2 ? null : options.recentValues.at(-1) ?? null;
+  const delta = options.latest === null || baseline === null ? null : options.latest - baseline;
+
+  return {
+    title: options.title,
+    latest: options.latest === null ? null : Number(options.latest.toFixed(digits)),
+    average: options.average === null ? null : Number(options.average.toFixed(digits)),
+    delta: delta === null ? null : Number(delta.toFixed(digits)),
+    unit: options.unit,
+    detail: options.latest === null ? LIMITED_SENSOR_REASON : options.detail,
+    accent: options.accent,
+    hasPartialData: options.count < 14,
+    series: buildFilledDailySeries(options.range, options.endDate, (day) => options.valuesByDay.get(day) ?? null),
+    isEstimated: false,
+    missingReason: options.latest === null ? LIMITED_SENSOR_REASON : null,
+  };
 }
 
 function aggregateSleepStages(records: SleepStageRecord[]): SleepStageSegment[] {
@@ -1083,7 +1588,7 @@ function axisLabelForMidpoint(start: Date, end: Date): string {
 async function loadPreparedData(db: SQLiteDatabase): Promise<PreparedDataBundle> {
   const [heartRows, sleepRows, activityRows, stageRows, deviceRows] = await Promise.all([
     db.getAllAsync<HeartRateQueryRow>('SELECT id, bpm, time, rr_intervals, stress, spo2, skin_temp, sensor_data FROM heart_rate ORDER BY time ASC'),
-    db.getAllAsync<SleepCycleRow>('SELECT id, sleep_id, start, end, min_bpm, max_bpm, avg_bpm, min_hrv, max_hrv, avg_hrv, score FROM sleep_cycles ORDER BY start ASC'),
+    db.getAllAsync<SleepCycleRow>('SELECT id, sleep_id, start, end, min_bpm, max_bpm, avg_bpm, min_hrv, max_hrv, avg_hrv, avg_skin_temp, score FROM sleep_cycles ORDER BY start ASC'),
     db.getAllAsync<ActivityRow>('SELECT id, period_id, start, end, activity FROM activities ORDER BY start ASC'),
     db.getAllAsync<SleepStageRow>('SELECT id, sleep_id, start, end, stage, is_estimated FROM sleep_stage_segments ORDER BY start ASC'),
     db.getAllAsync<DeviceStateRow>('SELECT id, name, last_seen_at, last_synced_at, firmware, battery_percent, charging_status, body_status, sync_error FROM device_state ORDER BY last_synced_at DESC LIMIT 1'),
@@ -1106,6 +1611,14 @@ async function queryHeartRows(db: SQLiteDatabase, sql: string, args: Array<strin
   return (await db.getAllAsync<HeartRateQueryRow>(sql, ...args)).map(toHeartRateRecord);
 }
 
+async function queryHeartSampleRows(db: SQLiteDatabase, sql: string, args: Array<string | number> = []) {
+  return db.getAllAsync<HeartRateSampleRow>(sql, ...args);
+}
+
+async function queryHeartSamples(db: SQLiteDatabase, sql: string, args: Array<string | number> = []) {
+  return (await queryHeartSampleRows(db, sql, args)).map(toHeartRateSample);
+}
+
 async function querySleepCycles(db: SQLiteDatabase, sql: string, args: Array<string | number> = []) {
   return (await db.getAllAsync<SleepCycleRow>(sql, ...args)).map(toSleepCycleRecord);
 }
@@ -1118,7 +1631,23 @@ async function querySleepStages(db: SQLiteDatabase, sql: string, args: Array<str
   return (await db.getAllAsync<SleepStageRow>(sql, ...args)).map(toSleepStageRecord);
 }
 
-export async function shouldRefreshDerivedData(db: SQLiteDatabase): Promise<boolean> {
+type TransactionWriter = Pick<SQLiteDatabase, 'runAsync' | 'execAsync'>;
+
+async function withExclusiveTransaction(
+  db: SQLiteDatabase,
+  callback: (tx: TransactionWriter) => Promise<void>,
+) {
+  if (typeof db.withExclusiveTransactionAsync === 'function') {
+    await db.withExclusiveTransactionAsync(async (tx) => {
+      await callback(tx);
+    });
+    return;
+  }
+
+  await callback(db);
+}
+
+async function countHeartRows(db: SQLiteDatabase) {
   const counts = await db.getFirstAsync<{
     heart_count: number;
   }>(`
@@ -1126,13 +1655,954 @@ export async function shouldRefreshDerivedData(db: SQLiteDatabase): Promise<bool
       (SELECT COUNT(*) FROM heart_rate) AS heart_count
   `);
 
-  if (!counts || counts.heart_count === 0) {
+  return counts?.heart_count ?? 0;
+}
+
+async function loadDerivedDataStateRow(db: SQLiteDatabase) {
+  return db.getFirstAsync<DerivedDataStateRow>(
+    `
+      SELECT
+        derived_schema_version,
+        source_heart_count,
+        refreshed_at,
+        rebuild_status,
+        pending_from_time,
+        pending_to_time,
+        last_processed_from_time,
+        last_processed_to_time,
+        last_error
+      FROM derived_data_state
+      WHERE id = 1
+      LIMIT 1
+    `,
+  );
+}
+
+async function persistDerivedDataStateRow(
+  db: Pick<SQLiteDatabase, 'getFirstAsync' | 'runAsync'>,
+  patch: Partial<DerivedDataStateRow>,
+) {
+  const current = await loadDerivedDataStateRow(db as SQLiteDatabase);
+  const next: DerivedDataStateRow = {
+    derived_schema_version: current?.derived_schema_version ?? DERIVED_DATA_SCHEMA_VERSION,
+    source_heart_count: current?.source_heart_count ?? 0,
+    refreshed_at: current?.refreshed_at ?? formatSqliteDateTime(new Date(0)),
+    rebuild_status: current?.rebuild_status ?? 'idle',
+    pending_from_time: current?.pending_from_time ?? null,
+    pending_to_time: current?.pending_to_time ?? null,
+    last_processed_from_time: current?.last_processed_from_time ?? null,
+    last_processed_to_time: current?.last_processed_to_time ?? null,
+    last_error: current?.last_error ?? null,
+    ...patch,
+  };
+
+  await db.runAsync(
+    `
+      INSERT INTO derived_data_state (
+        id,
+        derived_schema_version,
+        source_heart_count,
+        refreshed_at,
+        rebuild_status,
+        pending_from_time,
+        pending_to_time,
+        last_processed_from_time,
+        last_processed_to_time,
+        last_error
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        derived_schema_version = excluded.derived_schema_version,
+        source_heart_count = excluded.source_heart_count,
+        refreshed_at = excluded.refreshed_at,
+        rebuild_status = excluded.rebuild_status,
+        pending_from_time = excluded.pending_from_time,
+        pending_to_time = excluded.pending_to_time,
+        last_processed_from_time = excluded.last_processed_from_time,
+        last_processed_to_time = excluded.last_processed_to_time,
+        last_error = excluded.last_error
+    `,
+    1,
+    next.derived_schema_version,
+    next.source_heart_count,
+    next.refreshed_at,
+    next.rebuild_status,
+    next.pending_from_time,
+    next.pending_to_time,
+    next.last_processed_from_time,
+    next.last_processed_to_time,
+    next.last_error,
+  );
+}
+
+async function loadDashboardSnapshotCacheRow(db: SQLiteDatabase) {
+  return db.getFirstAsync<DashboardSnapshotCacheRow>(
+    `
+      SELECT
+        snapshot_json,
+        snapshot_kind,
+        built_at,
+        source_heart_count,
+        source_last_heart_time,
+        derived_refreshed_at,
+        last_error
+      FROM dashboard_snapshot_cache
+      WHERE id = 1
+      LIMIT 1
+    `,
+  );
+}
+
+async function persistDashboardSnapshotCacheRow(
+  db: Pick<SQLiteDatabase, 'runAsync'>,
+  row: DashboardSnapshotCacheRow,
+) {
+  await db.runAsync(
+    `
+      INSERT INTO dashboard_snapshot_cache (
+        id,
+        snapshot_json,
+        snapshot_kind,
+        built_at,
+        source_heart_count,
+        source_last_heart_time,
+        derived_refreshed_at,
+        last_error
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        snapshot_json = excluded.snapshot_json,
+        snapshot_kind = excluded.snapshot_kind,
+        built_at = excluded.built_at,
+        source_heart_count = excluded.source_heart_count,
+        source_last_heart_time = excluded.source_last_heart_time,
+        derived_refreshed_at = excluded.derived_refreshed_at,
+        last_error = excluded.last_error
+    `,
+    1,
+    row.snapshot_json,
+    row.snapshot_kind,
+    row.built_at,
+    row.source_heart_count,
+    row.source_last_heart_time,
+    row.derived_refreshed_at,
+    row.last_error,
+  );
+}
+
+async function loadHeartGlobalStatsRow(db: SQLiteDatabase) {
+  return db.getFirstAsync<HeartGlobalStatsRow>(
+    `
+      SELECT observed_peak_bpm, latest_heart_time, latest_stress
+      FROM heart_global_stats
+      WHERE id = 1
+      LIMIT 1
+    `,
+  );
+}
+
+async function persistHeartGlobalStatsRow(
+  db: Pick<SQLiteDatabase, 'runAsync'>,
+  row: HeartGlobalStatsRow,
+) {
+  await db.runAsync(
+    `
+      INSERT INTO heart_global_stats (id, observed_peak_bpm, latest_heart_time, latest_stress)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        observed_peak_bpm = excluded.observed_peak_bpm,
+        latest_heart_time = excluded.latest_heart_time,
+        latest_stress = excluded.latest_stress
+    `,
+    1,
+    row.observed_peak_bpm,
+    row.latest_heart_time,
+    row.latest_stress,
+  );
+}
+
+async function loadHeartIntradayBucketStateRow(db: SQLiteDatabase) {
+  return db.getFirstAsync<HeartIntradayBucketStateRow>(
+    `
+      SELECT source_heart_count, source_last_heart_time, refreshed_at
+      FROM heart_intraday_bucket_state
+      WHERE id = 1
+      LIMIT 1
+    `,
+  );
+}
+
+async function persistHeartIntradayBucketStateRow(
+  db: Pick<SQLiteDatabase, 'getFirstAsync' | 'runAsync'>,
+  patch: Partial<HeartIntradayBucketStateRow>,
+) {
+  const current = await loadHeartIntradayBucketStateRow(db as SQLiteDatabase);
+  const next: HeartIntradayBucketStateRow = {
+    source_heart_count: current?.source_heart_count ?? 0,
+    source_last_heart_time: current?.source_last_heart_time ?? null,
+    refreshed_at: current?.refreshed_at ?? formatSqliteDateTime(new Date(0)),
+    ...patch,
+  };
+
+  await db.runAsync(
+    `
+      INSERT INTO heart_intraday_bucket_state (id, source_heart_count, source_last_heart_time, refreshed_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        source_heart_count = excluded.source_heart_count,
+        source_last_heart_time = excluded.source_last_heart_time,
+        refreshed_at = excluded.refreshed_at
+    `,
+    1,
+    next.source_heart_count,
+    next.source_last_heart_time,
+    next.refreshed_at,
+  );
+}
+
+function parseDashboardSnapshot(snapshotJson: string): DashboardSnapshot | null {
+  try {
+    return JSON.parse(snapshotJson) as DashboardSnapshot;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeTimeRange(fromTime: string, toTime: string) {
+  return fromTime <= toTime
+    ? { fromTime, toTime }
+    : { fromTime: toTime, toTime: fromTime };
+}
+
+function bucketStartForSqliteTime(value: string, bucketMinutes = DASHBOARD_HEART_BUCKET_MINUTES) {
+  const minute = Number.parseInt(value.slice(14, 16), 10);
+  const bucketMinute = minute - (minute % bucketMinutes);
+  return `${value.slice(0, 14)}${`${bucketMinute}`.padStart(2, '0')}:00`;
+}
+
+function bucketStartForDate(date: Date, bucketMinutes = DASHBOARD_HEART_BUCKET_MINUTES) {
+  return bucketStartForSqliteTime(formatSqliteDateTime(date), bucketMinutes);
+}
+
+function bucketEndExclusive(bucketStart: string, bucketMinutes = DASHBOARD_HEART_BUCKET_MINUTES) {
+  return formatSqliteDateTime(addMinutes(parseSqliteDateTime(bucketStart), bucketMinutes));
+}
+
+function summarizeIntradayBucketRows(
+  bucketStart: string,
+  rows: readonly HeartRateSampleRow[],
+): HeartIntradayBucketRow {
+  let total = 0;
+  let maxTripletAvg: number | null = null;
+
+  for (let index = 0; index < rows.length; index += 1) {
+    total += rows[index].bpm;
+
+    if (index + 2 < rows.length) {
+      const tripletAvg = (rows[index].bpm + rows[index + 1].bpm + rows[index + 2].bpm) / 3;
+      maxTripletAvg = maxTripletAvg === null || tripletAvg > maxTripletAvg ? tripletAvg : maxTripletAvg;
+    }
+  }
+
+  return {
+    bucket_start: bucketStart,
+    sample_count: rows.length,
+    avg_bpm: total / rows.length,
+    first_bpm: rows[0]!.bpm,
+    second_bpm: rows.length > 1 ? rows[1]!.bpm : null,
+    penultimate_bpm: rows.length > 1 ? rows[rows.length - 2]!.bpm : null,
+    last_bpm: rows[rows.length - 1]!.bpm,
+    max_triplet_avg: maxTripletAvg,
+  };
+}
+
+function buildIntradayBucketRows(
+  rows: readonly HeartRateSampleRow[],
+  bucketMinutes = DASHBOARD_HEART_BUCKET_MINUTES,
+) {
+  const grouped = new Map<string, HeartRateSampleRow[]>();
+
+  for (const row of rows) {
+    const bucketStart = bucketStartForSqliteTime(row.time, bucketMinutes);
+    const bucketRows = grouped.get(bucketStart);
+
+    if (bucketRows) {
+      bucketRows.push(row);
+      continue;
+    }
+
+    grouped.set(bucketStart, [row]);
+  }
+
+  return [...grouped.entries()].map(([bucketStart, bucketRows]) =>
+    summarizeIntradayBucketRows(bucketStart, bucketRows),
+  );
+}
+
+function toHeartIntradayBucketSample(row: HeartIntradayBucketRow): HeartRateSample {
+  return {
+    bpm: row.avg_bpm,
+    time: row.bucket_start,
+    date: parseSqliteDateTime(row.bucket_start),
+  };
+}
+
+function sustainedPeakBpmFromBucketRows(rows: readonly HeartIntradayBucketRow[]): number | null {
+  let totalCount = 0;
+  let bestSingle: number | null = null;
+  let bestPair: number | null = null;
+  let bestTriplet: number | null = null;
+  let trailingBpms: number[] = [];
+
+  for (const row of rows) {
+    totalCount += row.sample_count;
+    bestSingle = bestSingle === null ? row.first_bpm : Math.max(bestSingle, row.first_bpm, row.last_bpm);
+
+    if (trailingBpms.length >= 1) {
+      const pairAvg = (trailingBpms[trailingBpms.length - 1]! + row.first_bpm) / 2;
+      bestPair = bestPair === null || pairAvg > bestPair ? pairAvg : bestPair;
+    }
+
+    if (row.sample_count >= 2 && row.second_bpm !== null) {
+      const pairAvg = (row.first_bpm + row.second_bpm) / 2;
+      bestPair = bestPair === null || pairAvg > bestPair ? pairAvg : bestPair;
+    }
+
+    if (trailingBpms.length >= 2) {
+      const tripletAvg = (
+        trailingBpms[trailingBpms.length - 2]! +
+        trailingBpms[trailingBpms.length - 1]! +
+        row.first_bpm
+      ) / 3;
+      bestTriplet = bestTriplet === null || tripletAvg > bestTriplet ? tripletAvg : bestTriplet;
+    }
+
+    if (trailingBpms.length >= 1 && row.sample_count >= 2 && row.second_bpm !== null) {
+      const tripletAvg = (trailingBpms[trailingBpms.length - 1]! + row.first_bpm + row.second_bpm) / 3;
+      bestTriplet = bestTriplet === null || tripletAvg > bestTriplet ? tripletAvg : bestTriplet;
+    }
+
+    if (row.max_triplet_avg !== null) {
+      bestTriplet = bestTriplet === null || row.max_triplet_avg > bestTriplet ? row.max_triplet_avg : bestTriplet;
+    }
+
+    if (row.sample_count === 1) {
+      trailingBpms = [...trailingBpms.slice(-1), row.last_bpm];
+    } else {
+      trailingBpms = [row.penultimate_bpm ?? row.first_bpm, row.last_bpm];
+    }
+  }
+
+  if (totalCount === 0) {
+    return null;
+  }
+
+  if (totalCount === 1) {
+    return bestSingle === null ? null : Math.round(bestSingle);
+  }
+
+  if (totalCount === 2) {
+    return bestPair === null ? null : Math.round(bestPair);
+  }
+
+  if (bestTriplet !== null) {
+    return Math.round(bestTriplet);
+  }
+
+  if (bestPair !== null) {
+    return Math.round(bestPair);
+  }
+
+  return bestSingle === null ? null : Math.round(bestSingle);
+}
+
+function totalBucketSampleCount(rows: readonly HeartIntradayBucketRow[]) {
+  return rows.reduce((sum, row) => sum + row.sample_count, 0);
+}
+
+function calculateStrainFromBucketRows(
+  rows: readonly HeartIntradayBucketRow[],
+  maxHr: number,
+  restingHr: number,
+  durationMinutes: number,
+): number | null {
+  const sampleCount = totalBucketSampleCount(rows);
+  if (sampleCount < 600 || maxHr <= restingHr || durationMinutes <= 0) {
+    return null;
+  }
+
+  const reserve = maxHr - restingHr;
+  const sampleDuration = durationMinutes / Math.max(sampleCount, 1);
+  const trimp = rows.reduce(
+    (sum, row) => sum + row.sample_count * sampleDuration * zoneWeight(row.avg_bpm, restingHr, reserve),
+    0,
+  );
+
+  if (trimp <= 0) {
+    return 0;
+  }
+
+  return Math.round((21 * Math.log(trimp + 1) / Math.log(7201)) * 100) / 100;
+}
+
+function estimateCaloriesFromBucketRows(
+  rows: readonly HeartIntradayBucketRow[],
+  maxHr: number,
+  restingHr: number,
+  durationMinutes: number,
+): number | null {
+  const sampleCount = totalBucketSampleCount(rows);
+  if (sampleCount < 2 || maxHr <= restingHr || durationMinutes <= 0) {
+    return null;
+  }
+
+  const metByZone = [1.8, 4, 6, 8.5, 10.5, 12];
+  const reserve = maxHr - restingHr;
+  const sampleDuration = durationMinutes / Math.max(sampleCount, 1);
+
+  const calories = rows.reduce((sum, row) => {
+    const zone = zoneWeight(row.avg_bpm, restingHr, reserve);
+    const met = metByZone[zone];
+    return sum + row.sample_count * met * 3.5 * 75 / 200 * sampleDuration;
+  }, 0);
+
+  return Math.round(calories);
+}
+
+function mergeTimeRange(
+  currentFromTime: string | null,
+  currentToTime: string | null,
+  nextFromTime: string,
+  nextToTime: string,
+) {
+  const normalized = normalizeTimeRange(nextFromTime, nextToTime);
+
+  if (!currentFromTime || !currentToTime) {
+    return normalized;
+  }
+
+  const current = normalizeTimeRange(currentFromTime, currentToTime);
+  return {
+    fromTime: current.fromTime < normalized.fromTime ? current.fromTime : normalized.fromTime,
+    toTime: current.toTime > normalized.toTime ? current.toTime : normalized.toTime,
+  };
+}
+
+function derivedRefreshStateFromRow(row: DerivedDataStateRow | null): DerivedRefreshState {
+  return {
+    status: row?.rebuild_status ?? 'idle',
+    pendingFromTime: row?.pending_from_time ?? null,
+    pendingToTime: row?.pending_to_time ?? null,
+    lastProcessedFromTime: row?.last_processed_from_time ?? null,
+    lastProcessedToTime: row?.last_processed_to_time ?? null,
+    lastError: row?.last_error ?? null,
+    isFirstSync: row?.last_processed_from_time === null || row?.last_processed_to_time === null,
+  };
+}
+
+function detectionWindowStart(fromTime: string) {
+  const date = parseSqliteDateTime(fromTime);
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate() - 1, 12, 0, 0, 0);
+}
+
+function detectionWindowEnd(toTime: string) {
+  const date = parseSqliteDateTime(toTime);
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1, 12, 0, 0, 0);
+}
+
+async function resolveMetricWindowStartTime(db: SQLiteDatabase, fromTime: string) {
+  const rows = await db.getAllAsync<TimeRow>(
+    `
+      SELECT time
+      FROM heart_rate
+      WHERE time <= ?
+      ORDER BY time DESC
+      LIMIT ?
+    `,
+    fromTime,
+    STRESS_WINDOW,
+  );
+
+  const earliest = rows.at(-1)?.time;
+  return earliest ?? fromTime;
+}
+
+function buildDerivedMetricMaps(heartRows: HeartRateRecord[]) {
+  const stressByTime = new Map<string, number | null>();
+  const spo2ByTime = new Map<string, number | null>();
+  const tempByTime = new Map<string, number | null>();
+  const spo2Window: Array<{ red: number; ir: number; valid: boolean }> = [];
+  let spo2ValidCount = 0;
+  let spo2RedSum = 0;
+  let spo2RedSquares = 0;
+  let spo2IrSum = 0;
+  let spo2IrSquares = 0;
+
+  for (let index = 0; index < heartRows.length; index += 1) {
+    const row = heartRows[index];
+    const stressWindowStart = Math.max(0, index - STRESS_WINDOW + 1);
+    stressByTime.set(row.time, calculateStressScoreForRange(heartRows, stressWindowStart, index + 1));
+
+    const red = row.sensorData?.spo2_red ?? 0;
+    const ir = row.sensorData?.spo2_ir ?? 0;
+    const valid = red > 0 && ir > 0;
+    spo2Window.push({ red, ir, valid });
+
+    if (valid) {
+      spo2ValidCount += 1;
+      spo2RedSum += red;
+      spo2RedSquares += red * red;
+      spo2IrSum += ir;
+      spo2IrSquares += ir * ir;
+    }
+
+    if (spo2Window.length > SPO2_WINDOW) {
+      const removed = spo2Window.shift()!;
+      if (removed.valid) {
+        spo2ValidCount -= 1;
+        spo2RedSum -= removed.red;
+        spo2RedSquares -= removed.red * removed.red;
+        spo2IrSum -= removed.ir;
+        spo2IrSquares -= removed.ir * removed.ir;
+      }
+    }
+
+    spo2ByTime.set(
+      row.time,
+      calculateSpo2ScoreFromState(
+        spo2Window.length,
+        spo2ValidCount,
+        spo2RedSum,
+        spo2RedSquares,
+        spo2IrSum,
+        spo2IrSquares,
+      ),
+    );
+
+    tempByTime.set(row.time, calculateSkinTempValue(row));
+  }
+
+  return {
+    stressByTime,
+    spo2ByTime,
+    tempByTime,
+  };
+}
+
+function buildDerivedDetectionArtifacts(heartRows: HeartRateRecord[]) {
+  const periods = detectFromGravity(heartRows);
+  const sleepCandidates = mergeNearbySleepPeriods(
+    periods.filter((period) => period.activity === 'sleep' && period.durationMinutes >= MIN_SLEEP_DURATION_MINUTES),
+  );
+  const activeCandidates = periods.filter((period) => period.activity === 'active');
+  const { sleeps: primarySleepPeriods, naps: napPeriods } = selectSleepAndNapPeriods(sleepCandidates);
+  const napActivities = buildNapActivities(napPeriods);
+  const sleepCycles = scoreSleepCycles(
+    primarySleepPeriods
+      .map((period) => buildSleepCycle(period, heartRows))
+      .filter((period): period is SleepCycleRecord => period !== null),
+    napActivities,
+  );
+  const activities = [...napActivities, ...buildActivityRecords(activeCandidates, sleepCycles)];
+  const stages = sleepCycles.flatMap((sleep) => buildStageSegments(sleep, heartRows));
+
+  return {
+    sleepCycles,
+    activities,
+    stages,
+  };
+}
+
+async function updateHeartMetricRows(
+  tx: TransactionWriter,
+  heartRows: HeartRateRecord[],
+  metricMaps: ReturnType<typeof buildDerivedMetricMaps>,
+) {
+  for (const row of heartRows) {
+    await tx.runAsync(
+      'UPDATE heart_rate SET stress = ?, spo2 = ?, skin_temp = ? WHERE time = ?',
+      metricMaps.stressByTime.get(row.time) ?? null,
+      metricMaps.spo2ByTime.get(row.time) ?? null,
+      metricMaps.tempByTime.get(row.time) ?? null,
+      row.time,
+    );
+  }
+}
+
+async function insertDerivedArtifacts(
+  tx: TransactionWriter,
+  artifacts: ReturnType<typeof buildDerivedDetectionArtifacts>,
+) {
+  for (const sleep of artifacts.sleepCycles) {
+    await tx.runAsync(
+      `
+        INSERT INTO sleep_cycles (id, sleep_id, start, end, min_bpm, max_bpm, avg_bpm, min_hrv, max_hrv, avg_hrv, avg_skin_temp, score, synced)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+      `,
+      sleep.id,
+      sleep.sleepId,
+      formatSqliteDateTime(sleep.start),
+      formatSqliteDateTime(sleep.end),
+      sleep.minBpm,
+      sleep.maxBpm,
+      sleep.avgBpm,
+      sleep.minHrv,
+      sleep.maxHrv,
+      sleep.avgHrv,
+      sleep.avgSkinTemp,
+      sleep.score,
+    );
+  }
+
+  for (const activity of artifacts.activities) {
+    await tx.runAsync(
+      `
+        INSERT INTO activities (period_id, start, end, activity, synced)
+        VALUES (?, ?, ?, ?, 0)
+      `,
+      activity.periodId,
+      formatSqliteDateTime(activity.start),
+      formatSqliteDateTime(activity.end),
+      activity.activity,
+    );
+  }
+
+  for (const stage of artifacts.stages) {
+    await tx.runAsync(
+      `
+        INSERT INTO sleep_stage_segments (sleep_id, start, end, stage, is_estimated)
+        VALUES (?, ?, ?, ?, ?)
+      `,
+      stage.sleepId,
+      formatSqliteDateTime(stage.start),
+      formatSqliteDateTime(stage.end),
+      stage.stage,
+      stage.isEstimated ? 1 : 0,
+    );
+  }
+}
+
+async function replaceDerivedDetectionRange(
+  tx: TransactionWriter,
+  rangeStart: string,
+  rangeEnd: string,
+  overlappingSleepIds: readonly string[],
+  artifacts: ReturnType<typeof buildDerivedDetectionArtifacts>,
+) {
+  for (const sleepId of overlappingSleepIds) {
+    await tx.runAsync(
+      `
+        DELETE FROM sleep_stage_segments
+        WHERE sleep_id = ?
+      `,
+      sleepId,
+    );
+  }
+
+  await tx.runAsync(
+    `
+      DELETE FROM sleep_cycles
+      WHERE start <= ? AND end >= ?
+    `,
+    rangeEnd,
+    rangeStart,
+  );
+  await tx.runAsync(
+    `
+      DELETE FROM activities
+      WHERE start <= ? AND end >= ?
+    `,
+    rangeEnd,
+    rangeStart,
+  );
+  await insertDerivedArtifacts(tx, artifacts);
+}
+
+async function clearAllDerivedTables(tx: TransactionWriter) {
+  await tx.execAsync(`
+    DELETE FROM sleep_cycles;
+    DELETE FROM activities;
+    DELETE FROM sleep_stage_segments;
+  `);
+}
+
+function startOfSqliteDay(value: string) {
+  const date = parseSqliteDateTime(value);
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0, 0);
+}
+
+function nextSqliteDay(value: string) {
+  const date = startOfSqliteDay(value);
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1, 0, 0, 0, 0);
+}
+
+async function loadRecentSleepCyclesForDashboard(db: SQLiteDatabase, limit: number) {
+  const rows = await querySleepCycles(
+    db,
+    `
+      SELECT id, sleep_id, start, end, min_bpm, max_bpm, avg_bpm, min_hrv, max_hrv, avg_hrv, avg_skin_temp, score
+      FROM sleep_cycles
+      ORDER BY start DESC
+      LIMIT ?
+    `,
+    [limit],
+  );
+  return rows.reverse();
+}
+
+async function loadRecentHeartDayStats(db: SQLiteDatabase, limit: number) {
+  const rows = await db.getAllAsync<HeartDayStatRow>(
+    `
+      SELECT day, min_bpm, avg_bpm, max_bpm, strain_score
+      FROM heart_day_stats
+      ORDER BY day DESC
+      LIMIT ?
+    `,
+    limit,
+  );
+  return rows.reverse().map(toHeartDayStatRecord);
+}
+
+async function replaceHeartDayStatsRange(
+  db: SQLiteDatabase,
+  rangeStartDay: string,
+  rangeEndDay: string,
+  stats: HeartDayStatRecord[],
+) {
+  await withExclusiveTransaction(db, async (tx) => {
+    await tx.runAsync(
+      `
+        DELETE FROM heart_day_stats
+        WHERE day >= ? AND day <= ?
+      `,
+      rangeStartDay,
+      rangeEndDay,
+    );
+
+    for (const stat of stats) {
+      await tx.runAsync(
+        `
+          INSERT INTO heart_day_stats (day, min_bpm, avg_bpm, max_bpm, strain_score)
+          VALUES (?, ?, ?, ?, ?)
+        `,
+        stat.day,
+        stat.minBpm,
+        stat.avgBpm,
+        stat.maxBpm,
+        stat.strainScore,
+      );
+    }
+  });
+}
+
+async function replaceHeartIntradayBucketRange(
+  db: SQLiteDatabase,
+  bucketRangeStart: string,
+  bucketRangeEnd: string,
+  bucketRows: readonly HeartIntradayBucketRow[],
+  options?: { replaceAll?: boolean },
+) {
+  await withExclusiveTransaction(db, async (tx) => {
+    if (options?.replaceAll) {
+      await tx.execAsync('DELETE FROM heart_intraday_buckets;');
+    } else {
+      await tx.runAsync(
+        `
+          DELETE FROM heart_intraday_buckets
+          WHERE bucket_start >= ? AND bucket_start <= ?
+        `,
+        bucketRangeStart,
+        bucketRangeEnd,
+      );
+    }
+
+    for (const bucket of bucketRows) {
+      await tx.runAsync(
+        `
+          INSERT INTO heart_intraday_buckets (
+            bucket_start,
+            sample_count,
+            avg_bpm,
+            first_bpm,
+            second_bpm,
+            penultimate_bpm,
+            last_bpm,
+            max_triplet_avg
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+        bucket.bucket_start,
+        bucket.sample_count,
+        bucket.avg_bpm,
+        bucket.first_bpm,
+        bucket.second_bpm,
+        bucket.penultimate_bpm,
+        bucket.last_bpm,
+        bucket.max_triplet_avg,
+      );
+    }
+  });
+}
+
+async function refreshHeartIntradayBucketsForRange(
+  db: SQLiteDatabase,
+  fromTime: string,
+  toTime: string,
+  options?: { replaceAll?: boolean },
+) {
+  await withAggregateMutationLock(db, async () => {
+    const heartCount = await countHeartRows(db);
+
+    if (heartCount === 0) {
+      await withExclusiveTransaction(db, async (tx) => {
+        await tx.execAsync(`
+          DELETE FROM heart_intraday_buckets;
+          DELETE FROM heart_intraday_bucket_state;
+        `);
+      });
+      return;
+    }
+
+    const normalized = normalizeTimeRange(fromTime, toTime);
+    const bucketRangeStart = bucketStartForSqliteTime(normalized.fromTime);
+    const bucketRangeEnd = bucketStartForSqliteTime(normalized.toTime);
+    const bucketRows = buildIntradayBucketRows(
+      await queryHeartSampleRows(
+        db,
+        `
+          SELECT bpm, time
+          FROM heart_rate
+          WHERE time >= ? AND time < ?
+          ORDER BY time ASC
+        `,
+        [bucketRangeStart, bucketEndExclusive(bucketRangeEnd)],
+      ),
+    );
+
+    await replaceHeartIntradayBucketRange(db, bucketRangeStart, bucketRangeEnd, bucketRows, options);
+
+    const latestHeart = await db.getFirstAsync<TimeRow>(
+      `
+        SELECT time
+        FROM heart_rate
+        ORDER BY time DESC
+        LIMIT 1
+      `,
+    );
+    await persistHeartIntradayBucketStateRow(db, {
+      source_heart_count: heartCount,
+      source_last_heart_time: latestHeart?.time ?? null,
+      refreshed_at: formatSqliteDateTime(new Date()),
+    });
+  });
+}
+
+async function refreshHeartDayStatsForRange(
+  db: SQLiteDatabase,
+  fromTime: string,
+  toTime: string,
+  options?: { replaceAll?: boolean },
+) {
+  await withAggregateMutationLock(db, async () => {
+    const normalized = normalizeTimeRange(fromTime, toTime);
+    const dayStart = startOfSqliteDay(normalized.fromTime);
+    const dayEndExclusive = nextSqliteDay(normalized.toTime);
+    const heartRows = await queryHeartSamples(
+      db,
+      `
+        SELECT bpm, time
+        FROM heart_rate
+        WHERE time >= ? AND time < ?
+        ORDER BY time ASC
+      `,
+      [formatSqliteDateTime(dayStart), formatSqliteDateTime(dayEndExclusive)],
+    );
+
+    const recentSleepCycles = await loadRecentSleepCyclesForDashboard(db, 15);
+    const recentExistingDayStats = options?.replaceAll ? [] : await loadRecentHeartDayStats(db, 14);
+    const currentRangeMinima = heartRows.length === 0
+      ? []
+      : groupByDay(heartRows).map(([, rows]) => summarizeHeartRows(rows)!.min);
+    const dailyMinima = [
+      ...recentExistingDayStats.map((stat) => stat.minBpm),
+      ...currentRangeMinima,
+    ];
+    const restingHr = personalizeRestingHr(recentSleepCycles, dailyMinima);
+    const currentGlobal = options?.replaceAll ? null : await loadHeartGlobalStatsRow(db);
+    const rangePeakBpm = summarizeHeartRows(heartRows)?.max ?? null;
+    const observedPeakBpm =
+      rangePeakBpm === null
+        ? currentGlobal?.observed_peak_bpm ?? null
+        : Math.max(currentGlobal?.observed_peak_bpm ?? 0, rangePeakBpm);
+    const maxHr = personalizeMaxHrFromObservedPeak(observedPeakBpm, restingHr);
+    const heartDayStats = buildHeartDayStatsFromRows(heartRows, restingHr, maxHr);
+
+    if (options?.replaceAll) {
+      await withExclusiveTransaction(db, async (tx) => {
+        await tx.execAsync('DELETE FROM heart_day_stats;');
+        for (const stat of heartDayStats) {
+          await tx.runAsync(
+            `
+              INSERT INTO heart_day_stats (day, min_bpm, avg_bpm, max_bpm, strain_score)
+              VALUES (?, ?, ?, ?, ?)
+            `,
+            stat.day,
+            stat.minBpm,
+            stat.avgBpm,
+            stat.maxBpm,
+            stat.strainScore,
+          );
+        }
+      });
+    } else {
+      await replaceHeartDayStatsRange(
+        db,
+        dateKey(dayStart),
+        dateKey(new Date(dayEndExclusive.getTime() - 1000)),
+        heartDayStats,
+      );
+    }
+
+    const latestHeart = await db.getFirstAsync<LatestHeartRow>(
+      `
+        SELECT time, stress
+        FROM heart_rate
+        ORDER BY time DESC
+        LIMIT 1
+      `,
+    );
+    const peakFromDays = await db.getFirstAsync<NullableNumberRow>(
+      `
+        SELECT MAX(max_bpm) AS value
+        FROM heart_day_stats
+      `,
+    );
+
+    await persistHeartGlobalStatsRow(db, {
+      observed_peak_bpm: peakFromDays?.value ?? null,
+      latest_heart_time: latestHeart?.time ?? null,
+      latest_stress: latestHeart?.stress ?? null,
+    });
+  });
+}
+
+export async function refreshHeartAggregatesForRange(
+  db: SQLiteDatabase,
+  fromTime: string,
+  toTime: string,
+) {
+  await refreshHeartIntradayBucketsForRange(db, fromTime, toTime);
+  await refreshHeartDayStatsForRange(db, fromTime, toTime);
+}
+
+export async function shouldRefreshDerivedData(db: SQLiteDatabase): Promise<boolean> {
+  const heartCount = await countHeartRows(db);
+
+  if (heartCount === 0) {
     return false;
   }
 
-  const state = await db.getFirstAsync<DerivedDataStateRow>(
-    'SELECT derived_schema_version, source_heart_count, refreshed_at FROM derived_data_state WHERE id = 1 LIMIT 1',
-  );
+  const state = await loadDerivedDataStateRow(db);
 
   if (!state) {
     return true;
@@ -1140,118 +2610,800 @@ export async function shouldRefreshDerivedData(db: SQLiteDatabase): Promise<bool
 
   return (
     state.derived_schema_version !== DERIVED_DATA_SCHEMA_VERSION ||
-    state.source_heart_count !== counts.heart_count
+    state.source_heart_count !== heartCount ||
+    state.rebuild_status !== 'idle' ||
+    state.pending_from_time !== null ||
+    state.pending_to_time !== null
   );
 }
 
+export async function markDerivedRefreshPending(
+  db: SQLiteDatabase,
+  fromTime: string,
+  toTime: string,
+) {
+  const state = await loadDerivedDataStateRow(db);
+  const merged = mergeTimeRange(state?.pending_from_time ?? null, state?.pending_to_time ?? null, fromTime, toTime);
+
+  await persistDerivedDataStateRow(db, {
+    rebuild_status: state?.rebuild_status === 'processing' ? 'processing' : 'pending',
+    pending_from_time: merged.fromTime,
+    pending_to_time: merged.toTime,
+    last_error: null,
+  });
+}
+
+export async function refreshDerivedDataRange(
+  db: SQLiteDatabase,
+  fromTime: string,
+  toTime: string,
+) {
+  const refreshStartedAt = Date.now();
+  const normalized = normalizeTimeRange(fromTime, toTime);
+  const metricWindowStartTime = await resolveMetricWindowStartTime(db, normalized.fromTime);
+  const detectionStart = detectionWindowStart(normalized.fromTime);
+  const detectionEnd = detectionWindowEnd(normalized.toTime);
+  const metricQueryStartedAt = Date.now();
+  const metricRows = await queryHeartRows(
+    db,
+    `
+      SELECT id, bpm, time, rr_intervals, stress, spo2, skin_temp, sensor_data
+      FROM heart_rate
+      WHERE time >= ? AND time <= ?
+      ORDER BY time ASC
+    `,
+    [metricWindowStartTime, normalized.toTime],
+  );
+  logMobilePerf('derived.range.queryMetrics', metricQueryStartedAt, {
+    rows: metricRows.length,
+  });
+
+  const detectionQueryStartedAt = Date.now();
+  const detectionRows = await queryHeartRows(
+    db,
+    `
+      SELECT id, bpm, time, rr_intervals, stress, spo2, skin_temp, sensor_data
+      FROM heart_rate
+      WHERE time >= ? AND time <= ?
+      ORDER BY time ASC
+    `,
+    [formatSqliteDateTime(detectionStart), formatSqliteDateTime(detectionEnd)],
+  );
+  logMobilePerf('derived.range.queryDetection', detectionQueryStartedAt, {
+    rows: detectionRows.length,
+  });
+
+  const metricBuildStartedAt = Date.now();
+  const metricMaps = buildDerivedMetricMaps(metricRows);
+  logMobilePerf('derived.range.buildMetrics', metricBuildStartedAt, {
+    rows: metricRows.length,
+  });
+
+  const artifactBuildStartedAt = Date.now();
+  const artifacts = buildDerivedDetectionArtifacts(detectionRows);
+  logMobilePerf('derived.range.buildArtifacts', artifactBuildStartedAt, {
+    rows: detectionRows.length,
+    sleepCycles: artifacts.sleepCycles.length,
+    activities: artifacts.activities.length,
+    stages: artifacts.stages.length,
+  });
+
+  const overlapQueryStartedAt = Date.now();
+  const overlappingSleepRows = await db.getAllAsync<{ sleep_id: string }>(
+    `
+      SELECT sleep_id
+      FROM sleep_cycles
+      WHERE start <= ? AND end >= ?
+    `,
+    formatSqliteDateTime(detectionEnd),
+    formatSqliteDateTime(detectionStart),
+  );
+  const overlappingSleepIds = [...new Set(overlappingSleepRows.map((row) => row.sleep_id))];
+  logMobilePerf('derived.range.queryOverlappingSleepIds', overlapQueryStartedAt, {
+    sleepIds: overlappingSleepIds.length,
+  });
+
+  await withExclusiveTransaction(db, async (tx) => {
+    const metricWriteStartedAt = Date.now();
+    await updateHeartMetricRows(tx, metricRows, metricMaps);
+    logMobilePerf('derived.range.writeMetrics', metricWriteStartedAt, {
+      rows: metricRows.length,
+    });
+
+    const artifactWriteStartedAt = Date.now();
+    await replaceDerivedDetectionRange(
+      tx,
+      formatSqliteDateTime(detectionStart),
+      formatSqliteDateTime(detectionEnd),
+      overlappingSleepIds,
+      artifacts,
+    );
+    logMobilePerf('derived.range.replaceArtifacts', artifactWriteStartedAt, {
+      sleepCycles: artifacts.sleepCycles.length,
+      activities: artifacts.activities.length,
+      stages: artifacts.stages.length,
+    });
+  });
+
+  const statsStartedAt = Date.now();
+  await refreshHeartDayStatsForRange(db, normalized.fromTime, normalized.toTime);
+  logMobilePerf('derived.range.refreshDayStats', statsStartedAt);
+  logMobilePerf('derived.range.total', refreshStartedAt, {
+    metricRows: metricRows.length,
+    detectionRows: detectionRows.length,
+  });
+}
+
 export async function refreshDerivedData(db: SQLiteDatabase) {
-  const heartRows = (await db.getAllAsync<HeartRateQueryRow>('SELECT id, bpm, time, rr_intervals, stress, spo2, skin_temp, sensor_data FROM heart_rate ORDER BY time ASC')).map(toHeartRateRecord);
+  const refreshStartedAt = Date.now();
+  const queryStartedAt = Date.now();
+  const heartRows = await queryHeartRows(
+    db,
+    'SELECT id, bpm, time, rr_intervals, stress, spo2, skin_temp, sensor_data FROM heart_rate ORDER BY time ASC',
+  );
+  logMobilePerf('derived.full.queryHeartRows', queryStartedAt, {
+    rows: heartRows.length,
+  });
 
-  const stressByTime = new Map<string, number | null>();
-  const spo2ByTime = new Map<string, number | null>();
-  const tempByTime = new Map<string, number | null>();
+  const metricBuildStartedAt = Date.now();
+  const metricMaps = buildDerivedMetricMaps(heartRows);
+  logMobilePerf('derived.full.buildMetrics', metricBuildStartedAt, {
+    rows: heartRows.length,
+  });
 
-  for (let index = 0; index < heartRows.length; index += 1) {
-    const stressWindow = heartRows.slice(Math.max(0, index - STRESS_WINDOW + 1), index + 1);
-    stressByTime.set(heartRows[index].time, calculateStressScore(stressWindow));
+  const artifactBuildStartedAt = Date.now();
+  const artifacts = buildDerivedDetectionArtifacts(heartRows);
+  logMobilePerf('derived.full.buildArtifacts', artifactBuildStartedAt, {
+    rows: heartRows.length,
+    sleepCycles: artifacts.sleepCycles.length,
+    activities: artifacts.activities.length,
+    stages: artifacts.stages.length,
+  });
+  const refreshedAt = formatSqliteDateTime(new Date());
 
-    const spo2Window = heartRows.slice(Math.max(0, index - SPO2_WINDOW + 1), index + 1);
-    spo2ByTime.set(heartRows[index].time, calculateSpo2Score(spo2Window));
+  await withExclusiveTransaction(db, async (tx) => {
+    const metricWriteStartedAt = Date.now();
+    await updateHeartMetricRows(tx, heartRows, metricMaps);
+    logMobilePerf('derived.full.writeMetrics', metricWriteStartedAt, {
+      rows: heartRows.length,
+    });
 
-    tempByTime.set(heartRows[index].time, calculateSkinTempValue(heartRows[index]));
+    const artifactWriteStartedAt = Date.now();
+    await clearAllDerivedTables(tx);
+    await insertDerivedArtifacts(tx, artifacts);
+    logMobilePerf('derived.full.replaceArtifacts', artifactWriteStartedAt, {
+      sleepCycles: artifacts.sleepCycles.length,
+      activities: artifacts.activities.length,
+      stages: artifacts.stages.length,
+    });
+  });
+
+  if (heartRows.length > 0) {
+    const statsStartedAt = Date.now();
+    await refreshHeartDayStatsForRange(db, heartRows[0].time, heartRows.at(-1)!.time, {
+      replaceAll: true,
+    });
+    logMobilePerf('derived.full.refreshDayStats', statsStartedAt);
+  } else {
+    await withExclusiveTransaction(db, async (tx) => {
+      await tx.execAsync(`
+        DELETE FROM heart_day_stats;
+        DELETE FROM heart_global_stats;
+      `);
+    });
   }
 
-  const periods = detectFromGravity(heartRows);
-  const sleepCandidates = mergeNearbySleepPeriods(periods.filter((period) => period.activity === 'sleep' && period.durationMinutes >= MIN_SLEEP_DURATION_MINUTES));
-  const activeCandidates = periods.filter((period) => period.activity === 'active');
-  const { sleeps: primarySleepPeriods, naps: napPeriods } = selectSleepAndNapPeriods(sleepCandidates);
-  const sleepCycles = scoreSleepCycles(
-    primarySleepPeriods
-      .map((period) => buildSleepCycle(period, heartRows))
-      .filter((period): period is SleepCycleRecord => period !== null),
-    buildNapActivities(napPeriods),
-  );
-  const activities = [...buildNapActivities(napPeriods), ...buildActivityRecords(activeCandidates, sleepCycles)];
-  const stages = sleepCycles.flatMap((sleep) => buildStageSegments(sleep, heartRows));
-
-  await db.withExclusiveTransactionAsync(async (tx) => {
-    for (const row of heartRows) {
-      await tx.runAsync(
-        'UPDATE heart_rate SET stress = ?, spo2 = ?, skin_temp = ? WHERE time = ?',
-        stressByTime.get(row.time) ?? null,
-        spo2ByTime.get(row.time) ?? null,
-        tempByTime.get(row.time) ?? null,
-        row.time,
-      );
-    }
-
-    await tx.execAsync(`
-      DELETE FROM sleep_cycles;
-      DELETE FROM activities;
-      DELETE FROM sleep_stage_segments;
-    `);
-
-    for (const sleep of sleepCycles) {
-      await tx.runAsync(
-        `
-          INSERT INTO sleep_cycles (id, sleep_id, start, end, min_bpm, max_bpm, avg_bpm, min_hrv, max_hrv, avg_hrv, score, synced)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-        `,
-        sleep.id,
-        sleep.sleepId,
-        formatSqliteDateTime(sleep.start),
-        formatSqliteDateTime(sleep.end),
-        sleep.minBpm,
-        sleep.maxBpm,
-        sleep.avgBpm,
-        sleep.minHrv,
-        sleep.maxHrv,
-        sleep.avgHrv,
-        sleep.score,
-      );
-    }
-
-    for (const activity of activities) {
-      await tx.runAsync(
-        `
-          INSERT INTO activities (period_id, start, end, activity, synced)
-          VALUES (?, ?, ?, ?, 0)
-        `,
-        activity.periodId,
-        formatSqliteDateTime(activity.start),
-        formatSqliteDateTime(activity.end),
-        activity.activity,
-      );
-    }
-
-    for (const stage of stages) {
-      await tx.runAsync(
-        `
-          INSERT INTO sleep_stage_segments (sleep_id, start, end, stage, is_estimated)
-          VALUES (?, ?, ?, ?, ?)
-        `,
-        stage.sleepId,
-        formatSqliteDateTime(stage.start),
-        formatSqliteDateTime(stage.end),
-        stage.stage,
-        stage.isEstimated ? 1 : 0,
-      );
-    }
-
-    await tx.runAsync(
-      `
-        INSERT INTO derived_data_state (id, derived_schema_version, source_heart_count, refreshed_at)
-        VALUES (1, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-          derived_schema_version = excluded.derived_schema_version,
-          source_heart_count = excluded.source_heart_count,
-          refreshed_at = excluded.refreshed_at
-      `,
-      DERIVED_DATA_SCHEMA_VERSION,
-      heartRows.length,
-      formatSqliteDateTime(new Date()),
-    );
+  await persistDerivedDataStateRow(db, {
+    derived_schema_version: DERIVED_DATA_SCHEMA_VERSION,
+    source_heart_count: heartRows.length,
+    refreshed_at: refreshedAt,
+    rebuild_status: 'idle',
+    pending_from_time: null,
+    pending_to_time: null,
+    last_processed_from_time: heartRows[0]?.time ?? null,
+    last_processed_to_time: heartRows.at(-1)?.time ?? null,
+    last_error: null,
   });
+  logMobilePerf('derived.full.total', refreshStartedAt, {
+    rows: heartRows.length,
+  });
+}
+
+export async function processPendingDerivedRefresh(db: SQLiteDatabase): Promise<boolean> {
+  let processed = false;
+
+  while (true) {
+    const heartCount = await countHeartRows(db);
+    if (heartCount === 0) {
+      await persistDerivedDataStateRow(db, {
+        derived_schema_version: DERIVED_DATA_SCHEMA_VERSION,
+        source_heart_count: 0,
+        refreshed_at: formatSqliteDateTime(new Date()),
+        rebuild_status: 'idle',
+        pending_from_time: null,
+        pending_to_time: null,
+        last_error: null,
+      });
+      logMobilePerf('derived.pending.empty', Date.now(), {
+        heartCount,
+      });
+      return false;
+    }
+
+    const state = await loadDerivedDataStateRow(db);
+
+    if (
+      !state ||
+      state.derived_schema_version !== DERIVED_DATA_SCHEMA_VERSION ||
+      (state.pending_from_time === null && state.pending_to_time === null && state.source_heart_count !== heartCount)
+    ) {
+      const fullRefreshStartedAt = Date.now();
+      await refreshDerivedData(db);
+      logMobilePerf('derived.pending.fullRefresh', fullRefreshStartedAt, {
+        heartCount,
+      });
+      return true;
+    }
+
+    if (!state.pending_from_time || !state.pending_to_time) {
+      if (state.rebuild_status !== 'idle' || state.last_error !== null) {
+        await persistDerivedDataStateRow(db, {
+          derived_schema_version: DERIVED_DATA_SCHEMA_VERSION,
+          source_heart_count: heartCount,
+          refreshed_at: state.refreshed_at,
+          rebuild_status: 'idle',
+          last_error: null,
+        });
+      }
+      logMobilePerf('derived.pending.idle', Date.now(), {
+        processed,
+      });
+      return processed;
+    }
+
+    const currentRange = normalizeTimeRange(state.pending_from_time, state.pending_to_time);
+    await persistDerivedDataStateRow(db, {
+      rebuild_status: 'processing',
+      pending_from_time: null,
+      pending_to_time: null,
+      last_error: null,
+    });
+
+    try {
+      const rangeStartedAt = Date.now();
+      await refreshDerivedDataRange(db, currentRange.fromTime, currentRange.toTime);
+      logMobilePerf('derived.pending.range', rangeStartedAt, {
+        fromTime: currentRange.fromTime,
+        toTime: currentRange.toTime,
+      });
+      processed = true;
+
+      const nextState = await loadDerivedDataStateRow(db);
+      await persistDerivedDataStateRow(db, {
+        derived_schema_version: DERIVED_DATA_SCHEMA_VERSION,
+        source_heart_count: heartCount,
+        refreshed_at: formatSqliteDateTime(new Date()),
+        rebuild_status:
+          nextState?.pending_from_time && nextState?.pending_to_time ? 'pending' : 'idle',
+        last_processed_from_time: currentRange.fromTime,
+        last_processed_to_time: currentRange.toTime,
+        last_error: null,
+      });
+    } catch (error) {
+      const latestState = await loadDerivedDataStateRow(db);
+      const merged = mergeTimeRange(
+        latestState?.pending_from_time ?? null,
+        latestState?.pending_to_time ?? null,
+        currentRange.fromTime,
+        currentRange.toTime,
+      );
+      await persistDerivedDataStateRow(db, {
+        rebuild_status: 'error',
+        pending_from_time: merged.fromTime,
+        pending_to_time: merged.toTime,
+        last_error: error instanceof Error ? error.message : 'Derived refresh failed.',
+      });
+      throw error;
+    }
+  }
+}
+
+async function loadLatestDeviceStateRow(db: SQLiteDatabase) {
+  return db.getFirstAsync<DeviceStateRow>(
+    `
+      SELECT id, name, last_seen_at, last_synced_at, firmware, battery_percent, charging_status, body_status, sync_error
+      FROM device_state
+      ORDER BY last_synced_at DESC
+      LIMIT 1
+    `,
+  );
+}
+
+async function loadLatestHeartState(db: SQLiteDatabase) {
+  const [global, latestHeart] = await Promise.all([
+    loadHeartGlobalStatsRow(db),
+    db.getFirstAsync<LatestHeartRow>(
+      `
+        SELECT time, stress
+        FROM heart_rate
+        ORDER BY time DESC
+        LIMIT 1
+      `,
+    ),
+  ]);
+
+  const latestHeartTime =
+    global?.latest_heart_time && latestHeart?.time
+      ? global.latest_heart_time > latestHeart.time
+        ? global.latest_heart_time
+        : latestHeart.time
+      : global?.latest_heart_time ?? latestHeart?.time ?? null;
+  const latestStress =
+    latestHeartTime === latestHeart?.time
+      ? latestHeart?.stress ?? null
+      : global?.latest_stress ?? null;
+
+  return {
+    observed_peak_bpm: global?.observed_peak_bpm ?? null,
+    latest_heart_time: latestHeartTime,
+    latest_stress: latestStress,
+  } satisfies HeartGlobalStatsRow;
+}
+
+async function ensureDashboardAggregatesReady(db: SQLiteDatabase) {
+  const ensureStartedAt = Date.now();
+  const [heartCount, existingDayStat, global] = await Promise.all([
+    countHeartRows(db),
+    db.getFirstAsync<{ day: string }>(
+      `
+        SELECT day
+        FROM heart_day_stats
+        LIMIT 1
+      `,
+    ),
+    loadHeartGlobalStatsRow(db),
+  ]);
+
+  if (heartCount === 0) {
+    logMobilePerf('dashboard.full.ensureAggregates.empty', ensureStartedAt, {
+      heartCount,
+    });
+    return;
+  }
+
+  if (existingDayStat && global?.latest_heart_time) {
+    logMobilePerf('dashboard.full.ensureAggregates.hit', ensureStartedAt, {
+      heartCount,
+    });
+    return;
+  }
+
+  const bounds = await db.getFirstAsync<HeartTimeBoundsRow>(
+    `
+      SELECT MIN(time) AS min_time, MAX(time) AS max_time
+      FROM heart_rate
+    `,
+  );
+
+  if (bounds?.min_time && bounds.max_time) {
+    await refreshHeartDayStatsForRange(db, bounds.min_time, bounds.max_time, {
+      replaceAll: true,
+    });
+  }
+
+  logMobilePerf('dashboard.full.ensureAggregates.rebuild', ensureStartedAt, {
+    heartCount,
+  });
+}
+
+async function ensureHeartIntradayBucketsReady(db: SQLiteDatabase) {
+  const ensureStartedAt = Date.now();
+  const heartCount = await countHeartRows(db);
+
+  if (heartCount === 0) {
+    logMobilePerf('dashboard.full.ensureIntradayBuckets.empty', ensureStartedAt, {
+      heartCount,
+    });
+    return;
+  }
+
+  const latestHeart = await db.getFirstAsync<TimeRow>(
+    `
+      SELECT time
+      FROM heart_rate
+      ORDER BY time DESC
+      LIMIT 1
+    `,
+  );
+  const state = await loadHeartIntradayBucketStateRow(db);
+
+  if (
+    state &&
+    state.source_heart_count === heartCount &&
+    state.source_last_heart_time === (latestHeart?.time ?? null)
+  ) {
+    logMobilePerf('dashboard.full.ensureIntradayBuckets.hit', ensureStartedAt, {
+      heartCount,
+    });
+    return;
+  }
+
+  const bounds = await db.getFirstAsync<HeartTimeBoundsRow>(
+    `
+      SELECT MIN(time) AS min_time, MAX(time) AS max_time
+      FROM heart_rate
+    `,
+  );
+
+  if (bounds?.min_time && bounds.max_time) {
+    await refreshHeartIntradayBucketsForRange(db, bounds.min_time, bounds.max_time, {
+      replaceAll: true,
+    });
+  }
+
+  logMobilePerf('dashboard.full.ensureIntradayBuckets.rebuild', ensureStartedAt, {
+    heartCount,
+  });
+}
+
+async function loadDashboardIntradayRows(db: SQLiteDatabase, latestHeartTime: string | null) {
+  return loadIntradayHeartWindow(db, latestHeartTime);
+}
+
+async function loadIntradayHeartWindow(
+  db: SQLiteDatabase,
+  latestHeartTime: string | null,
+): Promise<BucketedHeartWindow> {
+  if (!latestHeartTime) {
+    return {
+      latestHeartDate: null,
+      intradayStart: null,
+      rawRowCount: 0,
+      bucketSamples: [],
+      averageBpm: null,
+      sustainedPeakBpm: null,
+    };
+  }
+
+  await ensureHeartIntradayBucketsReady(db);
+
+  const latestHeartDate = parseSqliteDateTime(latestHeartTime);
+  const intradayStart = new Date(latestHeartDate.getTime() - 24 * 3600000);
+  const intradayStartSql = formatSqliteDateTime(intradayStart);
+  const firstBucketStart = bucketStartForDate(intradayStart);
+  const lastBucketStart = bucketStartForSqliteTime(latestHeartTime);
+
+  let partialFirstBucket: HeartIntradayBucketRow[] = [];
+  let bucketQueryStart = firstBucketStart;
+
+  if (intradayStartSql > firstBucketStart) {
+    const firstBucketRows = await queryHeartSampleRows(
+      db,
+      `
+        SELECT bpm, time
+        FROM heart_rate
+        WHERE time >= ? AND time <= ?
+        ORDER BY time ASC
+      `,
+      [intradayStartSql, latestHeartTime < bucketEndExclusive(firstBucketStart) ? latestHeartTime : bucketEndExclusive(firstBucketStart)],
+    );
+
+    if (firstBucketRows.length > 0) {
+      partialFirstBucket = [summarizeIntradayBucketRows(firstBucketStart, firstBucketRows)];
+    }
+
+    bucketQueryStart = bucketEndExclusive(firstBucketStart);
+  }
+
+  const storedBuckets =
+    bucketQueryStart > lastBucketStart
+      ? []
+      : await db.getAllAsync<HeartIntradayBucketRow>(
+          `
+            SELECT
+              bucket_start,
+              sample_count,
+              avg_bpm,
+              first_bpm,
+              second_bpm,
+              penultimate_bpm,
+              last_bpm,
+              max_triplet_avg
+            FROM heart_intraday_buckets
+            WHERE bucket_start >= ? AND bucket_start <= ?
+            ORDER BY bucket_start ASC
+          `,
+          bucketQueryStart,
+          lastBucketStart,
+        );
+
+  const bucketRows = [...partialFirstBucket, ...storedBuckets];
+  const rawRowCount = bucketRows.reduce((sum, row) => sum + row.sample_count, 0);
+  const weightedAverageBpm =
+    rawRowCount === 0
+      ? null
+      : Math.round(
+          bucketRows.reduce((sum, row) => sum + row.avg_bpm * row.sample_count, 0) / rawRowCount,
+        );
+
+  return {
+    latestHeartDate,
+    intradayStart,
+    rawRowCount,
+    bucketSamples: bucketRows.map(toHeartIntradayBucketSample),
+    averageBpm: weightedAverageBpm,
+    sustainedPeakBpm: sustainedPeakBpmFromBucketRows(bucketRows),
+  };
+}
+
+async function loadLatestSleepStagesForDashboard(db: SQLiteDatabase, latestSleep: SleepCycleRecord | null) {
+  if (!latestSleep) {
+    return [];
+  }
+
+  return querySleepStages(
+    db,
+    `
+      SELECT id, sleep_id, start, end, stage, is_estimated
+      FROM sleep_stage_segments
+      WHERE sleep_id = ?
+      ORDER BY start ASC
+    `,
+    [latestSleep.sleepId],
+  );
+}
+
+function buildDashboardSleepCard(latestSleep: SleepCycleRecord | null, stageRecords: SleepStageRecord[]): SleepCardSnapshot {
+  if (!latestSleep) {
+    return {
+      score: null,
+      durationMinutes: null,
+      stages: [],
+      startLabel: '--',
+      middleLabel: '--',
+      endLabel: '--',
+      isEstimated: true,
+      missingReason: NO_SLEEP_REASON,
+    };
+  }
+
+  return {
+    score: latestSleep.score,
+    durationMinutes: minutesBetween(latestSleep.start, latestSleep.end),
+    stages: aggregateSleepStages(stageRecords),
+    startLabel: formatClock(latestSleep.start),
+    middleLabel: axisLabelForMidpoint(latestSleep.start, latestSleep.end),
+    endLabel: formatClock(latestSleep.end),
+    isEstimated: stageRecords.some((stage) => stage.isEstimated),
+    missingReason: stageRecords.length === 0 ? LIMITED_SENSOR_REASON : null,
+  };
+}
+
+async function buildFullDashboardSnapshot(db: SQLiteDatabase): Promise<DashboardSnapshot> {
+  const buildStartedAt = Date.now();
+  const now = new Date();
+  await ensureDashboardAggregatesReady(db);
+  const baselineLoadStartedAt = Date.now();
+  const [heartCount, heartState, heartDayStats, sleepCycles, deviceState] = await Promise.all([
+    countHeartRows(db),
+    loadLatestHeartState(db),
+    loadRecentHeartDayStats(db, 14),
+    loadRecentSleepCyclesForDashboard(db, 15),
+    loadLatestDeviceStateRow(db),
+  ]);
+  logMobilePerf('dashboard.full.loadBaseline', baselineLoadStartedAt, {
+    heartCount,
+    heartDays: heartDayStats.length,
+    sleepCycles: sleepCycles.length,
+  });
+
+  if (heartCount === 0) {
+    logMobilePerf('dashboard.full.total', buildStartedAt, {
+      heartCount,
+    });
+    return buildEmptyDashboardSnapshot(now, deviceState);
+  }
+
+  const latestSleep = sleepCycles.at(-1) ?? null;
+  const detailLoadStartedAt = Date.now();
+  const [intraday, stageRecords] = await Promise.all([
+    loadDashboardIntradayRows(db, heartState.latest_heart_time),
+    loadLatestSleepStagesForDashboard(db, latestSleep),
+  ]);
+  logMobilePerf('dashboard.full.loadDetail', detailLoadStartedAt, {
+    intradayRows: intraday.rawRowCount,
+    stageRecords: stageRecords.length,
+  });
+
+  const computeStartedAt = Date.now();
+  const dailyMinima = heartDayStats.map((stat) => stat.minBpm);
+  const restingHr = personalizeRestingHr(sleepCycles, dailyMinima);
+  const recovery = estimateRecoveryScoreFromSleeps(latestSleep, sleepCycles, heartState.latest_stress);
+  const heartCardSeries =
+    intraday.bucketSamples.length > 0
+      ? createTimeBuckets(
+          intraday.bucketSamples,
+          DASHBOARD_HEART_BUCKET_MINUTES,
+          intraday.intradayStart ?? undefined,
+          intraday.latestHeartDate ?? undefined,
+        )
+      : [];
+  const sleepCard = buildDashboardSleepCard(latestSleep, stageRecords);
+  const latestHeartDate = intraday.latestHeartDate ?? now;
+  const dayStatsByDay = new Map(heartDayStats.map((stat) => [stat.day, stat]));
+  const todayStrain = dayStatsByDay.get(dateKey(latestHeartDate))?.strainScore ?? null;
+  const strainSeries = buildFilledDailySeries('14d', latestHeartDate, (day) => dayStatsByDay.get(day)?.strainScore ?? null);
+  logMobilePerf('dashboard.full.computeCards', computeStartedAt, {
+    intradayPoints: heartCardSeries.length,
+    strainPoints: strainSeries.length,
+    hasSleep: latestSleep !== null,
+  });
+
+  const snapshot = {
+    greeting: greetingForHour(now.getHours()),
+    dateLabel: formatLongDate(now),
+    recovery: {
+      score: recovery.score,
+      label: describeRecovery(recovery.score),
+      caption: 'Recovery',
+      isEstimated: true,
+      missingReason: recovery.missingReason,
+      breakdown: recovery.breakdown,
+    },
+    summaryStats: [
+      {
+        label: 'HRV',
+        value: formatMetricNumber(latestSleep?.avgHrv ?? null, 'ms'),
+        accent: 'green',
+        missingReason: latestSleep ? null : NO_SLEEP_REASON,
+      },
+      {
+        label: 'RHR',
+        value: formatMetricNumber(restingHr, 'bpm'),
+        accent: 'cyan',
+      },
+      {
+        label: 'Sleep',
+        value: latestSleep ? formatMetricNumber(minutesBetween(latestSleep.start, latestSleep.end), '').replace(' ', '') : '--',
+        accent: 'violet',
+        missingReason: latestSleep ? null : NO_SLEEP_REASON,
+      },
+    ],
+    heartCard: {
+      restingHr,
+      averageHr: intraday.averageBpm,
+      maxHr: intraday.sustainedPeakBpm,
+      series: heartCardSeries,
+      missingReason: heartCardSeries.length === 0 ? NO_HISTORY_REASON : null,
+    },
+    sleepCard,
+    strainCard: {
+      score: todayStrain,
+      label: todayStrain === null ? 'Waiting for effort' : todayStrain >= 14 ? 'Loaded' : todayStrain >= 8 ? 'Building' : 'Light',
+      series: strainSeries,
+      isEstimated: true,
+      missingReason: strainSeries.length === 0 ? NO_HISTORY_REASON : null,
+    },
+    lastSyncLabel: dashboardSyncLabel(deviceState),
+  } satisfies DashboardSnapshot;
+
+  logMobilePerf('dashboard.full.total', buildStartedAt, {
+    heartCount,
+  });
+
+  return snapshot;
+}
+
+async function buildPostSyncHeartOnlySnapshot(db: SQLiteDatabase): Promise<DashboardSnapshot> {
+  const now = new Date();
+  const [heartCount, cached, deviceState, heartState] = await Promise.all([
+    countHeartRows(db),
+    loadDashboardSnapshotCacheRow(db),
+    loadLatestDeviceStateRow(db),
+    loadLatestHeartState(db),
+  ]);
+
+  if (heartCount === 0) {
+    return buildEmptyDashboardSnapshot(now, deviceState);
+  }
+
+  const baseSnapshot = cached ? parseDashboardSnapshot(cached.snapshot_json) : null;
+  const baseline = baseSnapshot ?? buildEmptyDashboardSnapshot(now, deviceState);
+  const intraday = await loadDashboardIntradayRows(db, heartState.latest_heart_time);
+
+  return {
+    ...baseline,
+    greeting: greetingForHour(now.getHours()),
+    dateLabel: formatLongDate(now),
+    heartCard: {
+      ...baseline.heartCard,
+      averageHr: intraday.averageBpm ?? baseline.heartCard.averageHr,
+      maxHr: intraday.sustainedPeakBpm ?? baseline.heartCard.maxHr,
+      series:
+        intraday.bucketSamples.length > 0
+          ? createTimeBuckets(
+              intraday.bucketSamples,
+              DASHBOARD_HEART_BUCKET_MINUTES,
+              intraday.intradayStart ?? undefined,
+              intraday.latestHeartDate ?? undefined,
+            )
+          : baseline.heartCard.series,
+      missingReason:
+        intraday.bucketSamples.length > 0 ? null : baseline.heartCard.missingReason,
+    },
+    lastSyncLabel: dashboardSyncLabel(deviceState),
+  };
+}
+
+export async function refreshDashboardSnapshot(
+  db: SQLiteDatabase,
+  mode: 'full' | 'post_sync_heart_only',
+): Promise<boolean> {
+  const refreshStartedAt = Date.now();
+  const heartCount = await countHeartRows(db);
+  if (heartCount === 0) {
+    return false;
+  }
+
+  const [snapshot, heartState, derivedState] = await Promise.all([
+    mode === 'full' ? buildFullDashboardSnapshot(db) : buildPostSyncHeartOnlySnapshot(db),
+    loadLatestHeartState(db),
+    loadDerivedDataStateRow(db),
+  ]);
+
+  const persistStartedAt = Date.now();
+  await persistDashboardSnapshotCacheRow(db, {
+    snapshot_json: JSON.stringify(snapshot),
+    snapshot_kind: mode,
+    built_at: formatSqliteDateTime(new Date()),
+    source_heart_count: heartCount,
+    source_last_heart_time: heartState.latest_heart_time,
+    derived_refreshed_at: derivedState?.refreshed_at ?? null,
+    last_error: null,
+  });
+  logMobilePerf(`dashboard.refresh.${mode}.persistCache`, persistStartedAt, {
+    heartCount,
+  });
+
+  logMobilePerf(`dashboard.refresh.${mode}`, refreshStartedAt, {
+    heartCount,
+  });
+
+  return true;
+}
+
+export async function clearDashboardAggregatesForDebug(db: SQLiteDatabase) {
+  await withExclusiveTransaction(db, async (tx) => {
+    await tx.execAsync(`
+      DELETE FROM heart_day_stats;
+      DELETE FROM heart_global_stats;
+      DELETE FROM heart_intraday_buckets;
+      DELETE FROM heart_intraday_bucket_state;
+    `);
+  });
+}
+
+export async function primeDashboardSnapshot(db: SQLiteDatabase): Promise<boolean> {
+  const existing = await loadDashboardSnapshotCacheRow(db);
+  if (existing && parseDashboardSnapshot(existing.snapshot_json)) {
+    return false;
+  }
+
+  if (await countHeartRows(db) === 0) {
+    return false;
+  }
+
+  const derivedState = await loadDerivedDataStateRow(db);
+  const mode =
+    derivedState &&
+    derivedState.derived_schema_version === DERIVED_DATA_SCHEMA_VERSION &&
+    derivedState.rebuild_status === 'idle' &&
+    derivedState.pending_from_time === null &&
+    derivedState.pending_to_time === null
+      ? 'full'
+      : 'post_sync_heart_only';
+
+  return refreshDashboardSnapshot(db, mode);
 }
 
 export class SQLiteHealthRepository implements HealthRepository {
@@ -1283,27 +3435,25 @@ export class SQLiteHealthRepository implements HealthRepository {
     return this.readCached(this.queryCache, key, loader);
   }
 
-  invalidateCaches(scope: HealthCacheScope = 'all') {
-    if (scope === 'all') {
+  invalidateCaches(scope: HealthCacheScope | readonly HealthCacheScope[] = 'all') {
+    const scopes = Array.isArray(scope) ? scope : [scope];
+
+    if (scopes.includes('all')) {
       this.snapshotCache.clear();
       this.queryCache.clear();
       return;
     }
 
     for (const key of this.snapshotCache.keys()) {
-      if (key === scope || key.startsWith(`${scope}:`)) {
-        this.snapshotCache.delete(key);
+      for (const candidate of scopes) {
+        if (key === candidate || key.startsWith(`${candidate}:`)) {
+          this.snapshotCache.delete(key);
+          break;
+        }
       }
     }
-  }
 
-  async warmCaches(): Promise<void> {
-    await Promise.all([
-      this.getDashboardSnapshot(),
-      this.getSleepHistory('14d'),
-      this.getHeartHistory('14d'),
-      this.getWellnessSnapshot('14d'),
-    ]);
+    this.queryCache.clear();
   }
 
   private async ensurePrepared() {
@@ -1313,17 +3463,85 @@ export class SQLiteHealthRepository implements HealthRepository {
     }
 
     this.preparePromise = (async () => {
+      const ensureStartedAt = Date.now();
       try {
         if (await shouldRefreshDerivedData(this.db)) {
-          this.invalidateCaches('all');
-          await refreshDerivedData(this.db);
+          const processed = await processPendingDerivedRefresh(this.db);
+          if (processed) {
+            await refreshDashboardSnapshot(this.db, 'full');
+            this.invalidateCaches(['dashboard', 'sleep', 'wellness', 'derived']);
+          } else {
+            this.invalidateCaches('derived');
+          }
         }
+        logMobilePerf('repository.ensurePrepared', ensureStartedAt);
+      } catch (error) {
+        logMobilePerfError('repository.ensurePrepared', error);
+        throw error;
       } finally {
         this.preparePromise = null;
       }
     })();
 
     await this.preparePromise;
+  }
+
+  async getDerivedRefreshState(): Promise<DerivedRefreshState> {
+    return this.readQuery('derived:state', async () => {
+      const state = await loadDerivedDataStateRow(this.db);
+
+      if (state) {
+        return derivedRefreshStateFromRow(state);
+      }
+
+      const heartCount = await countHeartRows(this.db);
+      if (heartCount === 0) {
+        return derivedRefreshStateFromRow(null);
+      }
+
+      return {
+        status: 'pending',
+        pendingFromTime: null,
+        pendingToTime: null,
+        lastProcessedFromTime: null,
+        lastProcessedToTime: null,
+        lastError: null,
+        isFirstSync: true,
+      };
+    });
+  }
+
+  async primeDashboardSnapshot(): Promise<boolean> {
+    const primed = await primeDashboardSnapshot(this.db);
+
+    if (primed) {
+      this.invalidateCaches('dashboard');
+    }
+
+    return primed;
+  }
+
+  async refreshDashboardSnapshot(mode: 'full' | 'post_sync_heart_only'): Promise<boolean> {
+    const refreshed = await refreshDashboardSnapshot(this.db, mode);
+
+    if (refreshed) {
+      this.invalidateCaches('dashboard');
+    }
+
+    return refreshed;
+  }
+
+  async processPendingDerivedRefresh(): Promise<boolean> {
+    const processed = await processPendingDerivedRefresh(this.db);
+
+    if (processed) {
+      await refreshDashboardSnapshot(this.db, 'full');
+      this.invalidateCaches(['dashboard', 'sleep', 'wellness', 'derived']);
+    } else {
+      this.invalidateCaches('derived');
+    }
+
+    return processed;
   }
 
   private async loadLatestHeartDate() {
@@ -1358,27 +3576,153 @@ export class SQLiteHealthRepository implements HealthRepository {
     );
   }
 
-  private async loadAllHeartBpms() {
-    return this.readQuery('heart:all-bpms', async () => {
-      const rows = await this.db.getAllAsync<NumberRow>('SELECT bpm FROM heart_rate ORDER BY time ASC');
-      return rows.map((row) => row.bpm);
+  private async loadWellnessMetricDayAggregatesSince(start: Date, cacheKey: string) {
+    const startSql = formatSqliteDateTime(start);
+    return this.readQuery(cacheKey, () =>
+      this.db.getAllAsync<WellnessMetricDayAggregateRow>(
+        `
+          SELECT
+            substr(time, 1, 10) AS day,
+            AVG(stress) AS avg_stress,
+            AVG(spo2) AS avg_spo2,
+            AVG(skin_temp) AS avg_skin_temp
+          FROM heart_rate
+          WHERE time >= ?
+          GROUP BY day
+          ORDER BY day ASC
+        `,
+        startSql,
+      ),
+    );
+  }
+
+  private async loadWellnessMetricSummarySince(start: Date, cacheKey: string) {
+    const startSql = formatSqliteDateTime(start);
+    return this.readQuery(cacheKey, () =>
+      this.db.getFirstAsync<WellnessMetricSummaryRow>(
+        `
+          SELECT
+            COUNT(stress) AS stress_count,
+            AVG(stress) AS avg_stress,
+            (SELECT stress FROM heart_rate WHERE time >= ? AND stress IS NOT NULL ORDER BY time DESC LIMIT 1) AS latest_stress,
+            COUNT(spo2) AS spo2_count,
+            AVG(spo2) AS avg_spo2,
+            (SELECT spo2 FROM heart_rate WHERE time >= ? AND spo2 IS NOT NULL ORDER BY time DESC LIMIT 1) AS latest_spo2,
+            COUNT(skin_temp) AS skin_temp_count,
+            AVG(skin_temp) AS avg_skin_temp,
+            (SELECT skin_temp FROM heart_rate WHERE time >= ? AND skin_temp IS NOT NULL ORDER BY time DESC LIMIT 1) AS latest_skin_temp
+          FROM heart_rate
+          WHERE time >= ?
+        `,
+        startSql,
+        startSql,
+        startSql,
+        startSql,
+      ),
+    );
+  }
+
+  private async loadRecentWellnessMetricValuesSince(
+    start: Date,
+    metric: 'stress' | 'spo2' | 'skin_temp',
+    limit: number,
+    cacheKey: string,
+  ) {
+    const startSql = formatSqliteDateTime(start);
+    const sql =
+      metric === 'stress'
+        ? `
+            SELECT stress AS value
+            FROM heart_rate
+            WHERE time >= ? AND stress IS NOT NULL
+            ORDER BY time DESC
+            LIMIT ?
+          `
+        : metric === 'spo2'
+          ? `
+              SELECT spo2 AS value
+              FROM heart_rate
+              WHERE time >= ? AND spo2 IS NOT NULL
+              ORDER BY time DESC
+              LIMIT ?
+            `
+          : `
+              SELECT skin_temp AS value
+              FROM heart_rate
+              WHERE time >= ? AND skin_temp IS NOT NULL
+              ORDER BY time DESC
+              LIMIT ?
+            `;
+
+    return this.readQuery(cacheKey, async () => {
+      const rows = await this.db.getAllAsync<NullableNumberRow>(sql, startSql, limit);
+      return rows.map((row) => row.value).filter((value): value is number => value !== null);
+    });
+  }
+
+  private async loadHeartSamplesBetween(start: Date, end: Date, cacheKey: string) {
+    return this.readQuery(cacheKey, () =>
+      queryHeartSamples(
+        this.db,
+        `
+          SELECT bpm, time
+          FROM heart_rate
+          WHERE time >= ? AND time <= ?
+          ORDER BY time ASC
+        `,
+        [formatSqliteDateTime(start), formatSqliteDateTime(end)],
+      ),
+    );
+  }
+
+  private async loadHeartBucketRowsBetween(start: Date, end: Date, cacheKey: string) {
+    const startBucket = bucketStartForDate(start);
+    const endBucket = bucketStartForDate(end);
+
+    return this.readQuery(cacheKey, async () => {
+      await ensureHeartIntradayBucketsReady(this.db);
+      return this.db.getAllAsync<HeartIntradayBucketRow>(
+        `
+          SELECT
+            bucket_start,
+            sample_count,
+            avg_bpm,
+            first_bpm,
+            second_bpm,
+            penultimate_bpm,
+            last_bpm,
+            max_triplet_avg
+          FROM heart_intraday_buckets
+          WHERE bucket_start >= ? AND bucket_start <= ?
+          ORDER BY bucket_start ASC
+        `,
+        startBucket,
+        endBucket,
+      );
     });
   }
 
   private async loadDailyHeartMinima() {
     return this.readQuery('heart:daily-minima', async () => {
-      const rows = await this.db.getAllAsync<DailyMinimaRow>(
+      let rows = await this.db.getAllAsync<DailyMinimaRow>(
         `
           SELECT day, min_bpm
-          FROM (
-            SELECT substr(time, 1, 10) AS day, MIN(bpm) AS min_bpm
-            FROM heart_rate
-            GROUP BY day
-            ORDER BY day DESC
-          )
+          FROM heart_day_stats
           ORDER BY day ASC
         `,
       );
+
+      if (rows.length === 0 && (await countHeartRows(this.db)) > 0) {
+        await ensureDashboardAggregatesReady(this.db);
+        rows = await this.db.getAllAsync<DailyMinimaRow>(
+          `
+            SELECT day, min_bpm
+            FROM heart_day_stats
+            ORDER BY day ASC
+          `,
+        );
+      }
+
       return rows;
     });
   }
@@ -1388,7 +3732,7 @@ export class SQLiteHealthRepository implements HealthRepository {
       const rows = await querySleepCycles(
         this.db,
         `
-          SELECT id, sleep_id, start, end, min_bpm, max_bpm, avg_bpm, min_hrv, max_hrv, avg_hrv, score
+          SELECT id, sleep_id, start, end, min_bpm, max_bpm, avg_bpm, min_hrv, max_hrv, avg_hrv, avg_skin_temp, score
           FROM sleep_cycles
           ORDER BY start DESC
           LIMIT ?
@@ -1463,156 +3807,35 @@ export class SQLiteHealthRepository implements HealthRepository {
 
   async getDashboardSnapshot(): Promise<DashboardSnapshot> {
     return this.readSnapshot('dashboard', async () => {
-      await this.ensurePrepared();
+      const startedAt = Date.now();
+      try {
+        const cached = await loadDashboardSnapshotCacheRow(this.db);
+        const parsed = cached ? parseDashboardSnapshot(cached.snapshot_json) : null;
+        if (parsed) {
+          logMobilePerf('repository.getDashboardSnapshot.cacheHit', startedAt, {
+            snapshotKind: cached?.snapshot_kind ?? null,
+          });
+          return parsed;
+        }
 
-      const now = new Date();
-      const [latestHeartDate, sleepCycles, dailyMinimaRows, allBpms, deviceState] = await Promise.all([
-        this.loadLatestHeartDate(),
-        this.loadRecentSleepCycles(15),
-        this.loadDailyHeartMinima(),
-        this.loadAllHeartBpms(),
-        this.loadDeviceStateRow(),
-      ]);
+        const deviceState = await loadLatestDeviceStateRow(this.db);
+        const heartCount = await countHeartRows(this.db);
+        if (heartCount === 0) {
+          logMobilePerf('repository.getDashboardSnapshot.empty', startedAt);
+          return buildEmptyDashboardSnapshot(new Date(), deviceState);
+        }
 
-      const latestSleep = sleepCycles.at(-1) ?? null;
-      const stageRecords = latestSleep ? await this.loadSleepStagesForIds([latestSleep.sleepId]) : [];
-      const sleepCard: SleepCardSnapshot = latestSleep
-        ? {
-            score: latestSleep.score,
-            durationMinutes: minutesBetween(latestSleep.start, latestSleep.end),
-            stages: aggregateSleepStages(stageRecords),
-            startLabel: formatClock(latestSleep.start),
-            middleLabel: axisLabelForMidpoint(latestSleep.start, latestSleep.end),
-            endLabel: formatClock(latestSleep.end),
-            isEstimated: stageRecords.some((stage) => stage.isEstimated),
-            missingReason: stageRecords.length === 0 ? LIMITED_SENSOR_REASON : null,
-          }
-        : {
-            score: null,
-            durationMinutes: null,
-            stages: [],
-            startLabel: '--',
-            middleLabel: '--',
-            endLabel: '--',
-            isEstimated: true,
-            missingReason: NO_SLEEP_REASON,
-          };
-
-      if (allBpms.length === 0) {
-        return {
-          greeting: greetingForHour(now.getHours()),
-          dateLabel: formatLongDate(now),
-          recovery: {
-            score: null,
-            label: 'Waiting',
-            caption: 'Recovery',
-            isEstimated: true,
-            missingReason: NO_HISTORY_REASON,
-          },
-          summaryStats: [
-            { label: 'HRV', value: '-- ms', accent: 'green', missingReason: NO_HISTORY_REASON },
-            { label: 'RHR', value: '-- bpm', accent: 'cyan', missingReason: NO_HISTORY_REASON },
-            { label: 'Sleep', value: '--', accent: 'violet', missingReason: NO_SLEEP_REASON },
-          ],
-          heartCard: {
-            restingHr: null,
-            averageHr: null,
-            maxHr: null,
-            series: [],
-            missingReason: NO_HISTORY_REASON,
-          },
-          sleepCard,
-          strainCard: {
-            score: null,
-            label: 'Waiting',
-            series: [],
-            isEstimated: true,
-            missingReason: NO_HISTORY_REASON,
-          },
-          lastSyncLabel: deviceState?.last_synced_at ?? 'Local seed loaded',
-        };
+        await primeDashboardSnapshot(this.db);
+        const primed = await loadDashboardSnapshotCacheRow(this.db);
+        const primedSnapshot = primed ? parseDashboardSnapshot(primed.snapshot_json) : null;
+        logMobilePerf('repository.getDashboardSnapshot.primed', startedAt, {
+          snapshotKind: primed?.snapshot_kind ?? null,
+        });
+        return primedSnapshot ?? buildEmptyDashboardSnapshot(new Date(), deviceState);
+      } catch (error) {
+        logMobilePerfError('repository.getDashboardSnapshot', error);
+        throw error;
       }
-
-      const dailyMinima = dailyMinimaRows.map((row) => row.min_bpm);
-      const restingHr = personalizeRestingHr(sleepCycles, dailyMinima);
-      const maxHr = personalizeMaxHr(allBpms, restingHr);
-      const earliestContext = new Date(
-        Math.min(
-          now.getTime() - 24 * 3600000,
-          sleepCycles[0]?.start.getTime() ?? now.getTime(),
-        ),
-      );
-      let heartRows = await this.loadHeartRowsSince(
-        earliestContext,
-        `dashboard:heart-context:${formatSqliteDateTime(earliestContext)}`,
-      );
-      if (heartRows.length === 0) {
-        heartRows = await this.loadAllHeartRows();
-      }
-
-      const recovery = estimateRecoveryScore(latestSleep, sleepCycles, heartRows);
-      const last24Hours = heartRows.filter((row) => now.getTime() - row.date.getTime() <= 24 * 3600000);
-      const intradayRows = last24Hours.length > 0 ? last24Hours : heartRows;
-      const heartCardSeries =
-        last24Hours.length > 0
-          ? createTimeBuckets(
-              intradayRows,
-              DASHBOARD_HEART_BUCKET_MINUTES,
-              new Date(now.getTime() - 24 * 3600000),
-              now,
-            )
-          : createTimeBuckets(intradayRows, DASHBOARD_HEART_BUCKET_MINUTES);
-      const latestDayKey = dateKey(heartRows.at(-1)?.date ?? now);
-      const latestDayRows = heartRows.filter((row) => dateKey(row.date) === latestDayKey);
-      const todayStrain = calculateStrain(latestDayRows, maxHr, restingHr);
-      const strainSeries = buildDailyTrend('14d', heartRows, (rows) => calculateStrain(rows, maxHr, restingHr));
-
-      return {
-        greeting: greetingForHour(now.getHours()),
-        dateLabel: formatLongDate(now),
-        recovery: {
-          score: recovery.score,
-          label: describeRecovery(recovery.score),
-          caption: 'Recovery',
-          isEstimated: true,
-          missingReason: recovery.missingReason,
-          breakdown: recovery.breakdown,
-        },
-        summaryStats: [
-          {
-            label: 'HRV',
-            value: formatMetricNumber(latestSleep?.avgHrv ?? null, 'ms'),
-            accent: 'green',
-            missingReason: latestSleep ? null : NO_SLEEP_REASON,
-          },
-          {
-            label: 'RHR',
-            value: formatMetricNumber(restingHr, 'bpm'),
-            accent: 'cyan',
-          },
-          {
-            label: 'Sleep',
-            value: latestSleep ? formatMetricNumber(minutesBetween(latestSleep.start, latestSleep.end), '').replace(' ', '') : '--',
-            accent: 'violet',
-            missingReason: latestSleep ? null : NO_SLEEP_REASON,
-          },
-        ],
-        heartCard: {
-          restingHr,
-          averageHr: Math.round(mean(intradayRows.map((row) => row.bpm))),
-          maxHr: sustainedPeakBpm(intradayRows.map((row) => row.bpm)),
-          series: heartCardSeries,
-        },
-        sleepCard,
-        strainCard: {
-          score: todayStrain,
-          label: todayStrain === null ? 'Waiting for effort' : todayStrain >= 14 ? 'Loaded' : todayStrain >= 8 ? 'Building' : 'Light',
-          series: strainSeries,
-          isEstimated: true,
-          missingReason: strainSeries.length === 0 ? NO_HISTORY_REASON : null,
-        },
-        lastSyncLabel: deviceState?.last_synced_at ? `Last sync ${formatClock(parseSqliteDateTime(deviceState.last_synced_at))}` : 'Local seed loaded',
-      };
     });
   }
 
@@ -1654,264 +3877,378 @@ export class SQLiteHealthRepository implements HealthRepository {
 
   async getSleepHistory(range: HistoryRange): Promise<SleepHistorySnapshot> {
     return this.readSnapshot(`sleep:${range}`, async () => {
-      await this.ensurePrepared();
+      const startedAt = Date.now();
+      try {
+        await this.ensurePrepared();
 
-      const sleepCycles = await this.loadRecentSleepCycles(Math.max(rangeDays(range), 15));
-      const preferences = await loadSleepPreferences(this.db, sleepCycles);
-      const latestSleepForPlan = sleepCycles.at(-1) ?? null;
-      const napActivities = latestSleepForPlan ? await this.loadNapActivitiesSince(latestSleepForPlan.end) : [];
-      const sleepPlan = buildSleepPlanSnapshot(preferences, sleepCycles, napActivities);
-      const sessions = sleepCycles.slice(-rangeDays(range)).reverse();
-      const latestSleep = sessions[0] ?? null;
+        const sleepCycles = await this.loadRecentSleepCycles(Math.max(rangeDays(range), 15));
+        const preferences = await loadSleepPreferences(this.db, sleepCycles);
+        const latestSleepForPlan = sleepCycles.at(-1) ?? null;
+        const napActivities = latestSleepForPlan ? await this.loadNapActivitiesSince(latestSleepForPlan.end) : [];
+        const sleepPlan = buildSleepPlanSnapshot(preferences, sleepCycles, napActivities);
+        const sessions = sleepCycles.slice(-rangeDays(range)).reverse();
+        const latestSleep = sessions[0] ?? null;
 
-      if (!latestSleep) {
-        return {
-          headlineScore: null,
-          headlineLabel: 'Waiting for sleep',
-          bedtime: '--',
-          wakeTime: '--',
-          durationMinutes: null,
-          bedtimeConsistency: null,
-          wakeConsistency: null,
-          scoreTrend: [],
-          durationTrend: [],
-          sessions: [],
+        if (!latestSleep) {
+          logMobilePerf('repository.getSleepHistory.empty', startedAt, {
+            range,
+          });
+          return {
+            headlineScore: null,
+            headlineLabel: 'Waiting for sleep',
+            bedtime: '--',
+            wakeTime: '--',
+            durationMinutes: null,
+            bedtimeConsistency: null,
+            wakeConsistency: null,
+            scoreTrend: [],
+            durationTrend: [],
+            sessions: [],
+            sleepPlan,
+            isEstimated: true,
+            missingReason: NO_SLEEP_REASON,
+          };
+        }
+
+        const stageRecords = await this.loadSleepStagesForIds(sessions.map((session) => session.sleepId));
+        const bedtimeValues = sessions.map((session) => session.start.getHours() * 60 + session.start.getMinutes());
+        const wakeValues = sessions.map((session) => session.end.getHours() * 60 + session.end.getMinutes());
+        const bedtimeMean = mean(bedtimeValues);
+        const wakeMean = mean(wakeValues);
+        const bedtimeConsistency = clamp(100 - stdDev(bedtimeValues, bedtimeMean) / Math.max(1, bedtimeMean) * 100, 0, 100);
+        const wakeConsistency = clamp(100 - stdDev(wakeValues, wakeMean) / Math.max(1, wakeMean) * 100, 0, 100);
+
+        const mappedSessions: SleepSession[] = sessions.map((session) => {
+          const stages = aggregateSleepStages(stageRecords.filter((stage) => stage.sleepId === session.sleepId));
+          return {
+            id: session.id,
+            dateLabel: formatShortDate(session.end),
+            score: session.score,
+            bedtime: formatClock(session.start),
+            wakeTime: formatClock(session.end),
+            durationMinutes: minutesBetween(session.start, session.end),
+            efficiency: session.score,
+            remMinutes: stages.filter((stage) => stage.stage === 'rem').reduce((sum, stage) => sum + stage.minutes, 0),
+            deepMinutes: stages.filter((stage) => stage.stage === 'deep').reduce((sum, stage) => sum + stage.minutes, 0),
+            consistency: Math.round((bedtimeConsistency + wakeConsistency) / 2),
+            stages,
+            isEstimated: true,
+            missingReason: stages.length === 0 ? LIMITED_SENSOR_REASON : null,
+            minBpm: session.minBpm,
+            maxBpm: session.maxBpm,
+            avgHrv: session.avgHrv,
+          };
+        });
+        const sleepScoreByDay = new Map(sessions.map((session) => [dateKey(session.end), session.score]));
+        const sleepDurationByDay = new Map(
+          sessions.map((session) => [dateKey(session.end), minutesBetween(session.start, session.end)]),
+        );
+
+        const snapshot = {
+          headlineScore: latestSleep.score,
+          headlineLabel: describeSleepScore(latestSleep.score),
+          bedtime: formatClock(latestSleep.start),
+          wakeTime: formatClock(latestSleep.end),
+          durationMinutes: minutesBetween(latestSleep.start, latestSleep.end),
+          bedtimeConsistency: Math.round(bedtimeConsistency),
+          wakeConsistency: Math.round(wakeConsistency),
+          scoreTrend: buildFilledDailySeries(range, latestSleep.end, (day) => sleepScoreByDay.get(day) ?? null),
+          durationTrend: buildFilledDailySeries(range, latestSleep.end, (day) => sleepDurationByDay.get(day) ?? null),
+          sessions: mappedSessions,
           sleepPlan,
           isEstimated: true,
-          missingReason: NO_SLEEP_REASON,
-        };
+        } satisfies SleepHistorySnapshot;
+        logMobilePerf('repository.getSleepHistory', startedAt, {
+          range,
+          sessions: snapshot.sessions.length,
+        });
+        return snapshot;
+      } catch (error) {
+        logMobilePerfError('repository.getSleepHistory', error, {
+          range,
+        });
+        throw error;
       }
-
-      const stageRecords = await this.loadSleepStagesForIds(sessions.map((session) => session.sleepId));
-      const bedtimeValues = sessions.map((session) => session.start.getHours() * 60 + session.start.getMinutes());
-      const wakeValues = sessions.map((session) => session.end.getHours() * 60 + session.end.getMinutes());
-      const bedtimeMean = mean(bedtimeValues);
-      const wakeMean = mean(wakeValues);
-      const bedtimeConsistency = clamp(100 - stdDev(bedtimeValues, bedtimeMean) / Math.max(1, bedtimeMean) * 100, 0, 100);
-      const wakeConsistency = clamp(100 - stdDev(wakeValues, wakeMean) / Math.max(1, wakeMean) * 100, 0, 100);
-
-      const mappedSessions: SleepSession[] = sessions.map((session) => {
-        const stages = aggregateSleepStages(stageRecords.filter((stage) => stage.sleepId === session.sleepId));
-        return {
-          id: session.id,
-          dateLabel: formatShortDate(session.end),
-          score: session.score,
-          bedtime: formatClock(session.start),
-          wakeTime: formatClock(session.end),
-          durationMinutes: minutesBetween(session.start, session.end),
-          efficiency: session.score,
-          remMinutes: stages.filter((stage) => stage.stage === 'rem').reduce((sum, stage) => sum + stage.minutes, 0),
-          deepMinutes: stages.filter((stage) => stage.stage === 'deep').reduce((sum, stage) => sum + stage.minutes, 0),
-          consistency: Math.round((bedtimeConsistency + wakeConsistency) / 2),
-          stages,
-          isEstimated: true,
-          missingReason: stages.length === 0 ? LIMITED_SENSOR_REASON : null,
-          minBpm: session.minBpm,
-          maxBpm: session.maxBpm,
-          avgHrv: session.avgHrv,
-        };
-      });
-      const sleepScoreByDay = new Map(sessions.map((session) => [dateKey(session.end), session.score]));
-      const sleepDurationByDay = new Map(
-        sessions.map((session) => [dateKey(session.end), minutesBetween(session.start, session.end)]),
-      );
-
-      return {
-        headlineScore: latestSleep.score,
-        headlineLabel: describeSleepScore(latestSleep.score),
-        bedtime: formatClock(latestSleep.start),
-        wakeTime: formatClock(latestSleep.end),
-        durationMinutes: minutesBetween(latestSleep.start, latestSleep.end),
-        bedtimeConsistency: Math.round(bedtimeConsistency),
-        wakeConsistency: Math.round(wakeConsistency),
-        scoreTrend: buildFilledDailySeries(range, latestSleep.end, (day) => sleepScoreByDay.get(day) ?? null),
-        durationTrend: buildFilledDailySeries(range, latestSleep.end, (day) => sleepDurationByDay.get(day) ?? null),
-        sessions: mappedSessions,
-        sleepPlan,
-        isEstimated: true,
-      };
     });
   }
 
   async getHeartHistory(range: HistoryRange): Promise<HeartHistorySnapshot> {
     return this.readSnapshot(`heart:${range}`, async () => {
-      await this.ensurePrepared();
+      const startedAt = Date.now();
+      try {
+        await this.ensurePrepared();
 
-      const [latestHeartDate, dailyMinimaRows, sleepCycles] = await Promise.all([
-        this.loadLatestHeartDate(),
-        this.loadDailyHeartMinima(),
-        this.loadRecentSleepCycles(14),
-      ]);
+        const [latestHeartDate, dailyMinimaRows, sleepCycles] = await Promise.all([
+          this.loadLatestHeartDate(),
+          this.loadDailyHeartMinima(),
+          this.loadRecentSleepCycles(14),
+        ]);
 
-      if (!latestHeartDate || dailyMinimaRows.length === 0) {
-        return {
-          restingHr: null,
-          averageHr: null,
-          maxHr: null,
-          intraday: [],
-          weeklyResting: [],
-          recoveryShift: null,
-          missingReason: NO_HISTORY_REASON,
-        };
+        if (!latestHeartDate || dailyMinimaRows.length === 0) {
+          logMobilePerf('repository.getHeartHistory.empty', startedAt, {
+            range,
+          });
+          return {
+            restingHr: null,
+            averageHr: null,
+            maxHr: null,
+            intraday: [],
+            weeklyResting: [],
+            recoveryShift: null,
+            missingReason: NO_HISTORY_REASON,
+          };
+        }
+
+        const intradayStart = new Date(latestHeartDate.getTime() - 24 * 3600000);
+        const intraday = await loadIntradayHeartWindow(this.db, formatSqliteDateTime(latestHeartDate));
+        const dailyMinima = dailyMinimaRows.map((row) => row.min_bpm);
+        const restingHr = personalizeRestingHr(sleepCycles, dailyMinima);
+        const dailyMinimaByDay = new Map(dailyMinimaRows.map((row) => [row.day, row.min_bpm]));
+        const weeklyResting = buildFilledDailySeries(range, latestHeartDate, (day) => dailyMinimaByDay.get(day) ?? null);
+        const previousMedian = median(trendValues(weeklyResting.slice(0, -1)));
+
+        const snapshot = {
+          restingHr,
+          averageHr: intraday.averageBpm,
+          maxHr: intraday.sustainedPeakBpm,
+          intraday: createTimeBuckets(
+            intraday.bucketSamples,
+            HEART_INTRADAY_BUCKET_MINUTES,
+            intraday.intradayStart ?? intradayStart,
+            latestHeartDate,
+          ),
+          weeklyResting,
+          recoveryShift: previousMedian === null ? null : restingHr - previousMedian,
+        } satisfies HeartHistorySnapshot;
+        logMobilePerf('repository.getHeartHistory', startedAt, {
+          range,
+          intradayPoints: snapshot.intraday.length,
+        });
+        return snapshot;
+      } catch (error) {
+        logMobilePerfError('repository.getHeartHistory', error, {
+          range,
+        });
+        throw error;
       }
-
-      const intradayStart = new Date(latestHeartDate.getTime() - 24 * 3600000);
-      const intradaySource = await this.loadHeartRowsSince(
-        intradayStart,
-        `heart:intraday:${formatSqliteDateTime(intradayStart)}`,
-      );
-      const dailyMinima = dailyMinimaRows.map((row) => row.min_bpm);
-      const restingHr = personalizeRestingHr(sleepCycles, dailyMinima);
-      const dailyMinimaByDay = new Map(dailyMinimaRows.map((row) => [row.day, row.min_bpm]));
-      const weeklyResting = buildFilledDailySeries(range, latestHeartDate, (day) => dailyMinimaByDay.get(day) ?? null);
-      const previousMedian = median(trendValues(weeklyResting.slice(0, -1)));
-
-      return {
-        restingHr,
-        averageHr: Math.round(mean(intradaySource.map((row) => row.bpm))),
-        maxHr: sustainedPeakBpm(intradaySource.map((row) => row.bpm)),
-        intraday: createTimeBuckets(
-          intradaySource,
-          HEART_INTRADAY_BUCKET_MINUTES,
-          intradayStart,
-          latestHeartDate,
-        ),
-        weeklyResting,
-        recoveryShift: previousMedian === null ? null : restingHr - previousMedian,
-      };
     });
   }
 
   async getWellnessSnapshot(range: HistoryRange): Promise<WellnessSnapshot> {
     return this.readSnapshot(`wellness:${range}`, async () => {
-      await this.ensurePrepared();
+      const startedAt = Date.now();
+      try {
+        await this.ensurePrepared();
 
-      const [latestHeartDate, recentSleepCycles, recentActivities, dailyMinimaRows, allBpms] = await Promise.all([
-        this.loadLatestHeartDate(),
-        this.loadRecentSleepCycles(rangeDays(range)),
-        this.loadRecentActivities(5),
-        this.loadDailyHeartMinima(),
-        this.loadAllHeartBpms(),
-      ]);
-
-      if (!latestHeartDate || allBpms.length === 0) {
-        const emptyMetric = (title: string, accent: MetricSeries['accent']): MetricSeries => ({
-          title,
-          latest: null,
-          average: null,
-          delta: null,
-          unit: '',
-          detail: NO_HISTORY_REASON,
-          accent,
-          series: [],
-          missingReason: NO_HISTORY_REASON,
+        const baselineStartedAt = Date.now();
+        const [recentSleepCycles, recentActivities, dailyMinimaRows, heartState] = await Promise.all([
+          this.loadRecentSleepCycles(rangeDays(range)),
+          this.loadRecentActivities(5),
+          this.loadDailyHeartMinima(),
+          loadLatestHeartState(this.db),
+        ]);
+        const latestHeartDate = heartState.latest_heart_time
+          ? parseSqliteDateTime(heartState.latest_heart_time)
+          : null;
+        logMobilePerf('repository.getWellnessSnapshot.loadBaseline', baselineStartedAt, {
+          range,
+          heartDays: dailyMinimaRows.length,
+          sleepCycles: recentSleepCycles.length,
+          activities: recentActivities.length,
         });
 
-        return {
-          stress: emptyMetric('Stress', 'alert'),
-          spo2: emptyMetric('SpO2', 'cyan'),
-          skinTemperature: emptyMetric('Skin Temperature', 'heart'),
-          recoveryIndex: emptyMetric('Recovery Index', 'green'),
-          activities: [],
-          missingReason: NO_HISTORY_REASON,
-        };
-      }
+        if (!latestHeartDate || dailyMinimaRows.length === 0) {
+          const emptyMetric = (title: string, accent: MetricSeries['accent']): MetricSeries => ({
+            title,
+            latest: null,
+            average: null,
+            delta: null,
+            unit: '',
+            detail: NO_HISTORY_REASON,
+            accent,
+            series: [],
+            missingReason: NO_HISTORY_REASON,
+          });
 
-      const earliestRelevantTimestamp = Math.min(
-        latestHeartDate.getTime() - rangeDays(range) * 24 * 3600000,
-        recentSleepCycles[0]?.start.getTime() ?? latestHeartDate.getTime(),
-        recentActivities.at(-1)?.start.getTime() ?? latestHeartDate.getTime(),
-      );
-      const heartRows = await this.loadHeartRowsSince(
-        new Date(earliestRelevantTimestamp),
-        `wellness:heart-context:${range}:${formatSqliteDateTime(new Date(earliestRelevantTimestamp))}`,
-      );
-      const latestSleep = recentSleepCycles.at(-1) ?? null;
-      const restingHr = personalizeRestingHr(recentSleepCycles, dailyMinimaRows.map((row) => row.min_bpm));
-      const maxHr = personalizeMaxHr(allBpms, restingHr);
-      const recoveryByDay = new Map(
-        recentSleepCycles.map((sleep, index, sleeps) => [
-          dateKey(sleep.end),
-          estimateRecoveryScore(sleep, sleeps.slice(0, index + 1), heartRows).score,
-        ]),
-      );
-      const recoveryTrend =
-        latestSleep === null
-          ? []
-          : buildFilledDailySeries(range, latestSleep.end, (day) => recoveryByDay.get(day) ?? null);
+          logMobilePerf('repository.getWellnessSnapshot.empty', startedAt, {
+            range,
+          });
+          return {
+            stress: emptyMetric('Stress', 'alert'),
+            spo2: emptyMetric('SpO2', 'cyan'),
+            skinTemperature: emptyMetric('Skin Temperature', 'heart'),
+            recoveryIndex: emptyMetric('Recovery Index', 'green'),
+            activities: [],
+            missingReason: NO_HISTORY_REASON,
+          };
+        }
 
-      const stressRows = heartRows.filter((row) => row.stress !== null);
-      const spo2Rows = heartRows.filter((row) => row.spo2 !== null);
-      const tempRows = heartRows.filter((row) => row.skinTemp !== null);
+        const earliestRelevantTimestamp = Math.min(
+          latestHeartDate.getTime() - rangeDays(range) * 24 * 3600000,
+          recentSleepCycles[0]?.start.getTime() ?? latestHeartDate.getTime(),
+          recentActivities.at(-1)?.start.getTime() ?? latestHeartDate.getTime(),
+        );
+        const earliestRelevantDate = new Date(earliestRelevantTimestamp);
+        const earliestRelevantSql = formatSqliteDateTime(earliestRelevantDate);
+        const metricRowsStartedAt = Date.now();
+        const [metricDayAggregates, metricSummary, recentStressValues, recentSpo2Values, recentSkinTempValues] = await Promise.all([
+          this.loadWellnessMetricDayAggregatesSince(
+            earliestRelevantDate,
+            `wellness:metric-days:${range}:${earliestRelevantSql}`,
+          ),
+          this.loadWellnessMetricSummarySince(
+            earliestRelevantDate,
+            `wellness:metric-summary:${range}:${earliestRelevantSql}`,
+          ),
+          this.loadRecentWellnessMetricValuesSince(
+            earliestRelevantDate,
+            'stress',
+            8,
+            `wellness:metric-recent:stress:${range}:${earliestRelevantSql}`,
+          ),
+          this.loadRecentWellnessMetricValuesSince(
+            earliestRelevantDate,
+            'spo2',
+            8,
+            `wellness:metric-recent:spo2:${range}:${earliestRelevantSql}`,
+          ),
+          this.loadRecentWellnessMetricValuesSince(
+            earliestRelevantDate,
+            'skin_temp',
+            8,
+            `wellness:metric-recent:skin_temp:${range}:${earliestRelevantSql}`,
+          ),
+        ]);
+        logMobilePerf('repository.getWellnessSnapshot.loadMetricRows', metricRowsStartedAt, {
+          range,
+          dayRows: metricDayAggregates.length,
+        });
 
-      const buildMetric = (
-        title: string,
-        unit: string,
-        accent: MetricSeries['accent'],
-        rows: HeartRateRecord[],
-        accessor: (row: HeartRateRecord) => number | null,
-        detail: string,
-        digits = 0,
-      ): MetricSeries => {
-        const values = rows.map(accessor).filter((value): value is number => value !== null);
-        const latest = values.at(-1) ?? null;
-        const average = values.length === 0 ? null : mean(values);
-        const baseline = values.length < 2 ? null : values[Math.max(0, values.length - 8)];
-        const delta = latest === null || baseline === null ? null : latest - baseline;
-        return {
-          title,
-          latest: latest === null ? null : Number(latest.toFixed(digits)),
-          average: average === null ? null : Number(average.toFixed(digits)),
-          delta: delta === null ? null : Number(delta.toFixed(digits)),
-          unit,
-          detail: latest === null ? LIMITED_SENSOR_REASON : detail,
-          accent,
-          hasPartialData: values.length < 14,
-          series: buildDailyTrend(range, rows, (items) => {
-            const itemValues = items.map(accessor).filter((value): value is number => value !== null);
-            return itemValues.length === 0 ? null : mean(itemValues);
+        const activityRowsStartedAt = Date.now();
+        const activityHeartBuckets = await Promise.all(
+          recentActivities.map((activity) =>
+            this.loadHeartBucketRowsBetween(
+              activity.start,
+              activity.end,
+              `wellness:activity-buckets:${activity.id}:${formatSqliteDateTime(activity.start)}:${formatSqliteDateTime(activity.end)}`,
+            ),
+          ),
+        );
+        logMobilePerf('repository.getWellnessSnapshot.loadActivityRows', activityRowsStartedAt, {
+          range,
+          activities: recentActivities.length,
+          bucketRows: activityHeartBuckets.reduce((sum, rows) => sum + rows.length, 0),
+          samples: activityHeartBuckets.reduce((sum, rows) => sum + totalBucketSampleCount(rows), 0),
+        });
+
+        const computeStartedAt = Date.now();
+        const latestSleep = recentSleepCycles.at(-1) ?? null;
+        const restingHr = personalizeRestingHr(recentSleepCycles, dailyMinimaRows.map((row) => row.min_bpm));
+        const maxHr = personalizeMaxHrFromObservedPeak(heartState.observed_peak_bpm, restingHr);
+        const latestStress = heartState.latest_stress;
+        const recoveryByDay = new Map(
+          recentSleepCycles.map((sleep, index, sleeps) => [
+            dateKey(sleep.end),
+            estimateRecoveryScoreFromSleeps(sleep, sleeps.slice(0, index + 1), latestStress).score,
+          ]),
+        );
+        const recoveryTrend =
+          latestSleep === null
+            ? []
+            : buildFilledDailySeries(range, latestSleep.end, (day) => recoveryByDay.get(day) ?? null);
+        const stressByDay = new Map(metricDayAggregates.map((row) => [row.day, row.avg_stress]));
+        const spo2ByDay = new Map(metricDayAggregates.map((row) => [row.day, row.avg_spo2]));
+        const skinTempByDay = new Map(metricDayAggregates.map((row) => [row.day, row.avg_skin_temp]));
+
+        const activities = recentActivities.map((activity, index): ActivitySummary => {
+          const rows = activityHeartBuckets[index] ?? [];
+          const durationMinutes = minutesBetween(activity.start, activity.end);
+          return {
+            id: activity.id,
+            title: activity.activity,
+            timeLabel: formatClock(activity.start),
+            durationMinutes,
+            strain: calculateStrainFromBucketRows(rows, maxHr, restingHr, durationMinutes),
+            calories: estimateCaloriesFromBucketRows(rows, maxHr, restingHr, durationMinutes),
+            isEstimated: true,
+            strainLabel: 'Estimated strain',
+            caloriesLabel: 'Estimated calories',
+          };
+        });
+
+        const recovery = estimateRecoveryScoreFromSleeps(latestSleep, recentSleepCycles, latestStress);
+        const snapshot = {
+          stress: buildWellnessMetricSeries({
+            title: 'Stress',
+            unit: '',
+            accent: 'alert',
+            detail: 'Lower recent variability points to calmer load.',
+            endDate: latestHeartDate,
+            range,
+            latest: metricSummary?.latest_stress ?? null,
+            average: metricSummary?.avg_stress ?? null,
+            count: metricSummary?.stress_count ?? 0,
+            recentValues: recentStressValues,
+            valuesByDay: stressByDay,
           }),
-          isEstimated: false,
-          missingReason: latest === null ? LIMITED_SENSOR_REASON : null,
-        };
-      };
-
-      const activities = recentActivities.map((activity): ActivitySummary => {
-        const rows = rowsInRange(heartRows, activity.start, activity.end);
-        return {
-          id: activity.id,
-          title: activity.activity,
-          timeLabel: formatClock(activity.start),
-          durationMinutes: minutesBetween(activity.start, activity.end),
-          strain: calculateStrain(rows, maxHr, restingHr),
-          calories: estimateCalories(rows, maxHr, restingHr),
-          isEstimated: true,
-          strainLabel: 'Estimated strain',
-          caloriesLabel: 'Estimated calories',
-        };
-      });
-
-      const recovery = estimateRecoveryScore(latestSleep, recentSleepCycles, heartRows);
-
-      return {
-        stress: buildMetric('Stress', '', 'alert', stressRows, (row) => row.stress, 'Lower recent variability points to calmer load.'),
-        spo2: buildMetric('SpO2', '%', 'cyan', spo2Rows, (row) => row.spo2, 'Overnight oxygen stayed stable.', 0),
-        skinTemperature: buildMetric('Skin Temperature', '°C', 'heart', tempRows, (row) => row.skinTemp, 'Night temperature stayed within baseline range.', 1),
-        recoveryIndex: {
-          title: 'Recovery Index',
-          latest: recovery.score,
-          average: trendValues(recoveryTrend).length === 0 ? null : mean(trendValues(recoveryTrend)),
-          delta: trendValues(recoveryTrend).length < 2 ? null : trendValues(recoveryTrend).at(-1)! - trendValues(recoveryTrend).at(-2)!,
-          unit: '',
-          detail: recovery.score === null ? NO_SLEEP_REASON : 'Transparent readiness heuristic from sleep, HRV, resting HR, stress, and temperature.',
-          accent: 'green',
-          series: recoveryTrend,
-          isEstimated: true,
-          hasPartialData: recoveryTrend.length < 7,
-          missingReason: recovery.score === null ? NO_SLEEP_REASON : null,
-        },
-        activities,
-      };
+          spo2: buildWellnessMetricSeries({
+            title: 'SpO2',
+            unit: '%',
+            accent: 'cyan',
+            detail: 'Overnight oxygen stayed stable.',
+            endDate: latestHeartDate,
+            range,
+            latest: metricSummary?.latest_spo2 ?? null,
+            average: metricSummary?.avg_spo2 ?? null,
+            count: metricSummary?.spo2_count ?? 0,
+            recentValues: recentSpo2Values,
+            valuesByDay: spo2ByDay,
+          }),
+          skinTemperature: buildWellnessMetricSeries({
+            title: 'Skin Temperature',
+            unit: '°C',
+            accent: 'heart',
+            detail: 'Night temperature stayed within baseline range.',
+            digits: 1,
+            endDate: latestHeartDate,
+            range,
+            latest: metricSummary?.latest_skin_temp ?? null,
+            average: metricSummary?.avg_skin_temp ?? null,
+            count: metricSummary?.skin_temp_count ?? 0,
+            recentValues: recentSkinTempValues,
+            valuesByDay: skinTempByDay,
+          }),
+          recoveryIndex: {
+            title: 'Recovery Index',
+            latest: recovery.score,
+            average: trendValues(recoveryTrend).length === 0 ? null : mean(trendValues(recoveryTrend)),
+            delta: trendValues(recoveryTrend).length < 2 ? null : trendValues(recoveryTrend).at(-1)! - trendValues(recoveryTrend).at(-2)!,
+            unit: '',
+            detail: recovery.score === null ? NO_SLEEP_REASON : 'Transparent readiness heuristic from sleep, HRV, resting HR, stress, and temperature.',
+            accent: 'green',
+            series: recoveryTrend,
+            isEstimated: true,
+            hasPartialData: recoveryTrend.length < 7,
+            missingReason: recovery.score === null ? NO_SLEEP_REASON : null,
+          },
+          activities,
+        } satisfies WellnessSnapshot;
+        logMobilePerf('repository.getWellnessSnapshot.compute', computeStartedAt, {
+          range,
+          dayRows: metricDayAggregates.length,
+          activities: snapshot.activities.length,
+        });
+        logMobilePerf('repository.getWellnessSnapshot', startedAt, {
+          range,
+          activities: snapshot.activities.length,
+        });
+        return snapshot;
+      } catch (error) {
+        logMobilePerfError('repository.getWellnessSnapshot', error, {
+          range,
+        });
+        throw error;
+      }
     });
   }
 }

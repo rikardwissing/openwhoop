@@ -3,7 +3,7 @@ import { StyleSheet, Text, View } from 'react-native';
 import { ScreenShell } from '@/components/layout/ScreenShell';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { colors, typography } from '@/constants/theme';
-import { useWearableSync } from '@/providers/WearableSyncProvider';
+import { useWearableLiveEvents, useWearableSyncState } from '@/providers/WearableSyncProvider';
 import type { WearableLiveEvent } from '@/types/device';
 import { formatClock, formatShortDate, parseSqliteDateTime } from '@/utils/dateTime';
 
@@ -17,7 +17,8 @@ function eventTimestamp(event: WearableLiveEvent) {
 }
 
 export function LiveEventsScreen() {
-  const { deviceState, liveEvents } = useWearableSync();
+  const { deviceState } = useWearableSyncState();
+  const { liveEvents } = useWearableLiveEvents();
 
   return (
     <ScreenShell headerIcon="live-events" headerTitle="Live Events">

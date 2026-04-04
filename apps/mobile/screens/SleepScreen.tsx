@@ -12,10 +12,10 @@ import { GlowRing } from '@/components/ui/GlowRing';
 import { MetricCard } from '@/components/ui/MetricCard';
 import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
 import { colors, typography } from '@/constants/theme';
-import { useSleepHistory } from '@/hooks/useHealthData';
+import { useDerivedRefreshState, useSleepHistory } from '@/hooks/useHealthData';
 import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
 import { useHealthRepository } from '@/providers/HealthDataProvider';
-import { useWearableSync } from '@/providers/WearableSyncProvider';
+import { useWearableSyncActions, useWearableSyncState } from '@/providers/WearableSyncProvider';
 import { syncSleepPreparationReminder } from '@/services/notifications/sleepPreparationReminder';
 import type { SleepStageSelection, TrendSelection } from '@/types/health';
 import {
@@ -31,9 +31,11 @@ import { calculateOptimalBedtimeMinutes, nextUpcomingClockDate, roundClockMinute
 
 export function SleepScreen() {
   const repository = useHealthRepository();
-  const { deviceState, setAlarm, disableAlarm } = useWearableSync();
+  const { deviceState } = useWearableSyncState();
+  const { setAlarm, disableAlarm } = useWearableSyncActions();
   const { onRefresh, refreshing } = useWearableRefreshControl();
   const state = useSleepHistory('14d');
+  const derivedRefresh = useDerivedRefreshState();
   const [scoreSelection, setScoreSelection] = useState<TrendSelection | null>(null);
   const [durationSelection, setDurationSelection] = useState<TrendSelection | null>(null);
   const [stageSelection, setStageSelection] = useState<SleepStageSelection | null>(null);
@@ -114,6 +116,12 @@ export function SleepScreen() {
     optimalBedtime: formatClockMinutes(displayedOptimalBedtimeMinutes),
     alarmEnabled: resolvedAlarmEnabled,
   };
+  const derivedRefreshMessage =
+    derivedRefresh.data?.status === 'pending' || derivedRefresh.data?.status === 'processing'
+      ? derivedRefresh.data.isFirstSync
+        ? 'Preparing insights from your first sync...'
+        : 'Updating sleep insights with your latest sync...'
+      : null;
 
   const queueWakeTargetCommit = () => {
     if (wakeSaveTimeoutRef.current) {
@@ -259,6 +267,12 @@ export function SleepScreen() {
     <ScreenShell headerIcon="sleep" headerTitle="Sleep" onRefresh={onRefresh} refreshing={refreshing}>
       {state.status === 'error' ? (
         <ErrorState message="Showing the last sleep snapshot while refresh catches up." variant="inline" />
+      ) : null}
+      {derivedRefreshMessage ? (
+        <Text style={styles.syncNotice}>{derivedRefreshMessage}</Text>
+      ) : null}
+      {derivedRefresh.data?.status === 'error' && derivedRefresh.data.lastError ? (
+        <ErrorState message={derivedRefresh.data.lastError} variant="inline" />
       ) : null}
       <View>
         <Text style={styles.subtitle}>Rhythm, recovery, and stage balance across the last 14 nights.</Text>
@@ -521,6 +535,11 @@ const styles = StyleSheet.create({
     fontFamily: typography.body,
     fontSize: 15,
     marginTop: 6,
+  },
+  syncNotice: {
+    color: colors.primaryBright,
+    fontFamily: typography.bodySemiBold,
+    fontSize: 13,
   },
   metricGrid: {
     flexDirection: 'row',

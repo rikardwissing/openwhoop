@@ -5,7 +5,7 @@ import { syncSleepPreparationReminder } from '@/services/notifications/sleepPrep
 
 export function SleepPreparationReminderSync() {
   const repository = useHealthRepository();
-  const version = useHealthDataVersion();
+  const version = useHealthDataVersion('sleep');
 
   useEffect(() => {
     let cancelled = false;

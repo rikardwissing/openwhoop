@@ -1,5 +1,6 @@
 import type { HealthRepository } from '@/data/HealthRepository';
 import type {
+  DerivedRefreshState,
   ActivitySummary,
   DashboardSnapshot,
   HeartHistorySnapshot,
@@ -222,7 +223,29 @@ export class MockHealthRepository implements HealthRepository {
 
   constructor(private readonly options: { delayMs?: number } = {}) {}
 
-  async warmCaches(): Promise<void> {}
+  async primeDashboardSnapshot(): Promise<boolean> {
+    return false;
+  }
+
+  async refreshDashboardSnapshot(): Promise<boolean> {
+    return true;
+  }
+
+  async getDerivedRefreshState(): Promise<DerivedRefreshState> {
+    return {
+      status: 'idle',
+      pendingFromTime: null,
+      pendingToTime: null,
+      lastProcessedFromTime: '2026-04-23 07:45:00',
+      lastProcessedToTime: '2026-04-23 07:45:00',
+      lastError: null,
+      isFirstSync: false,
+    };
+  }
+
+  async processPendingDerivedRefresh(): Promise<boolean> {
+    return false;
+  }
 
   invalidateCaches(): void {}
 

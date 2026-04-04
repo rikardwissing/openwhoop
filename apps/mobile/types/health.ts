@@ -2,6 +2,7 @@ export type HistoryRange = '24h' | '7d' | '14d' | '30d';
 export type AccentTone = 'green' | 'cyan' | 'alert' | 'heart' | 'violet';
 export type SleepStage = 'awake' | 'rem' | 'deep' | 'light';
 export type PartialDataReason = string;
+export type DerivedRefreshStatus = 'idle' | 'pending' | 'processing' | 'error';
 
 export interface TrendPoint {
   label: string;
@@ -164,4 +165,14 @@ export interface WellnessSnapshot extends EstimatedValueMeta {
   skinTemperature: MetricSeries;
   recoveryIndex: MetricSeries;
   activities: ActivitySummary[];
+}
+
+export interface DerivedRefreshState {
+  status: DerivedRefreshStatus;
+  pendingFromTime: string | null;
+  pendingToTime: string | null;
+  lastProcessedFromTime: string | null;
+  lastProcessedToTime: string | null;
+  lastError: string | null;
+  isFirstSync: boolean;
 }

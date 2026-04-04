@@ -5,7 +5,7 @@ import { Tabs } from 'expo-router';
 import { PulsingHeartIcon } from '@/components/ui/PulsingHeartIcon';
 import { brandMark } from '@/constants/assets';
 import { colors, typography } from '@/constants/theme';
-import { useWearableSync } from '@/providers/WearableSyncProvider';
+import { useWearableSyncState } from '@/providers/WearableSyncProvider';
 import { hasFreshLiveHeartRate } from '@/types/device';
 
 function TabIcon({
@@ -50,7 +50,7 @@ function TabIcon({
 }
 
 export default function TabLayout() {
-  const { deviceState } = useWearableSync();
+  const { deviceState } = useWearableSyncState();
   const liveHeartRate = hasFreshLiveHeartRate(deviceState) ? deviceState.liveHeartRate : null;
 
   return (

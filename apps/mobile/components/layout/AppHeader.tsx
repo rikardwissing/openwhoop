@@ -5,7 +5,7 @@ import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
 import { brandMark } from '@/constants/assets';
 import { PulsingHeartIcon } from '@/components/ui/PulsingHeartIcon';
 import { colors, typography } from '@/constants/theme';
-import { useWearableSync } from '@/providers/WearableSyncProvider';
+import { useWearableSyncState } from '@/providers/WearableSyncProvider';
 import { hasFreshLiveHeartRate } from '@/types/device';
 
 export type AppHeaderIcon = 'today' | 'sleep' | 'heart' | 'wellness' | 'settings' | 'pair' | 'live-events';
@@ -71,7 +71,7 @@ export function AppHeader({
   title: string;
 }) {
   const router = useRouter();
-  const { deviceState } = useWearableSync();
+  const { deviceState } = useWearableSyncState();
   const buttonDisabled = settingsDisabled || settingsActive;
   const badgeText = deviceState.batteryPercent === null ? '--' : `${deviceState.batteryPercent}%`;
   const badgeColors = badgePalette(deviceState.batteryPercent, buttonDisabled);

@@ -1,6 +1,13 @@
 import { startTransition, useEffect, useState } from 'react';
 
-import type { DashboardSnapshot, HeartHistorySnapshot, HistoryRange, SleepHistorySnapshot, WellnessSnapshot } from '@/types/health';
+import type {
+  DashboardSnapshot,
+  DerivedRefreshState,
+  HeartHistorySnapshot,
+  HistoryRange,
+  SleepHistorySnapshot,
+  WellnessSnapshot,
+} from '@/types/health';
 import { useHealthDataVersion, useHealthRepository } from '@/providers/HealthDataProvider';
 import type { HealthRepository } from '@/data/HealthRepository';
 
@@ -76,7 +83,7 @@ function useAsyncValue<T>(
 
 export function useDashboardSnapshot() {
   const repository = useHealthRepository();
-  const version = useHealthDataVersion();
+  const version = useHealthDataVersion('dashboard');
   return useAsyncValue<DashboardSnapshot>(
     repository,
     'dashboard',
@@ -87,7 +94,7 @@ export function useDashboardSnapshot() {
 
 export function useSleepHistory(range: HistoryRange) {
   const repository = useHealthRepository();
-  const version = useHealthDataVersion();
+  const version = useHealthDataVersion('sleep');
   return useAsyncValue<SleepHistorySnapshot>(
     repository,
     `sleep:${range}`,
@@ -98,7 +105,7 @@ export function useSleepHistory(range: HistoryRange) {
 
 export function useHeartHistory(range: HistoryRange) {
   const repository = useHealthRepository();
-  const version = useHealthDataVersion();
+  const version = useHealthDataVersion('heart');
   return useAsyncValue<HeartHistorySnapshot>(
     repository,
     `heart:${range}`,
@@ -109,11 +116,22 @@ export function useHeartHistory(range: HistoryRange) {
 
 export function useWellnessSnapshot(range: HistoryRange) {
   const repository = useHealthRepository();
-  const version = useHealthDataVersion();
+  const version = useHealthDataVersion('wellness');
   return useAsyncValue<WellnessSnapshot>(
     repository,
     `wellness:${range}`,
     () => repository.getWellnessSnapshot(range),
     [repository, range, version],
+  );
+}
+
+export function useDerivedRefreshState() {
+  const repository = useHealthRepository();
+  const version = useHealthDataVersion('derived');
+  return useAsyncValue<DerivedRefreshState>(
+    repository,
+    'derived:state',
+    () => repository.getDerivedRefreshState(),
+    [repository, version],
   );
 }

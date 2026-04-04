@@ -5,13 +5,19 @@ jest.mock('react-native-ble-plx', () => ({
 }));
 
 jest.mock('@/data/sqlite/SQLiteHealthRepository', () => ({
-  refreshDerivedData: jest.fn(async () => {}),
+  markDerivedRefreshPending: jest.fn(async () => {}),
+  refreshHeartAggregatesForRange: jest.fn(async () => {}),
 }));
 
+import { markDerivedRefreshPending, refreshHeartAggregatesForRange } from '@/data/sqlite/SQLiteHealthRepository';
 import { CMD_FROM_STRAP_UUID, CommandNumber, DATA_FROM_STRAP_UUID, EVENTS_FROM_STRAP_UUID, EventNumber, MetadataType, PacketType } from '@/services/ble/constants';
 import { PacketAssembler, base64ToBytes, bytesToBase64, framePacket } from '@/services/ble/codec';
 import { WearableSyncService } from '@/services/ble/WearableSyncService';
 import type { WearableLiveEvent } from '@/types/device';
+import { formatSqliteDateTime } from '@/utils/dateTime';
+
+const mockMarkDerivedRefreshPending = jest.mocked(markDerivedRefreshPending);
+const mockRefreshHeartAggregatesForRange = jest.mocked(refreshHeartAggregatesForRange);
 
 function writeU16LE(bytes: Uint8Array, offset: number, value: number) {
   bytes[offset] = value & 0xff;
@@ -275,7 +281,45 @@ class MockDb {
   }
 }
 
+class BufferedHistoryDb extends MockDb {
+  heartInsertCount = 0;
+  heartWriteTransactionCount = 0;
+
+  async withExclusiveTransactionAsync<T>(
+    callback: (tx: Pick<BufferedHistoryDb, 'getFirstAsync' | 'runAsync' | 'execAsync'>) => Promise<T>,
+  ) {
+    this.heartWriteTransactionCount += 1;
+    return callback({
+      getFirstAsync: this.getFirstAsync.bind(this),
+      runAsync: this.runAsync.bind(this),
+      execAsync: this.execAsync.bind(this),
+    });
+  }
+
+  async getFirstAsync<T>(sql?: string) {
+    if (sql?.includes('FROM background_sync_state')) {
+      return null as T | null;
+    }
+
+    return super.getFirstAsync<T>();
+  }
+
+  async runAsync(sql: string, ...args: Array<string | number | null>) {
+    if (sql.includes('INSERT INTO heart_rate')) {
+      this.heartInsertCount += 1;
+      return;
+    }
+
+    return super.runAsync(sql, ...args);
+  }
+}
+
 describe('WearableSyncService battery refresh', () => {
+  beforeEach(() => {
+    mockMarkDerivedRefreshPending.mockClear();
+    mockRefreshHeartAggregatesForRange.mockClear();
+  });
+
   it('sends the reboot command to the wearable', async () => {
     const device = new MockDevice();
     const db = new MockDb(71);
@@ -535,5 +579,49 @@ describe('WearableSyncService battery refresh', () => {
       'Firmware reply',
       'Battery reply',
     ]);
+  });
+
+  it('buffers history writes into batched transactions and flushes the final partial batch', async () => {
+    const device = new MockDevice();
+    device.batteryTenthsPercent = 845;
+    device.historyFrames = [
+      ...Array.from({ length: 251 }, (_, index) => ({
+        characteristic: DATA_FROM_STRAP_UUID,
+        frame: framePacket(
+          PacketType.HistoricalData,
+          0,
+          0,
+          createHistoryPayload(1_710_000_001 + index * 60),
+        ),
+      })),
+      {
+        characteristic: DATA_FROM_STRAP_UUID,
+        frame: framePacket(
+          PacketType.Metadata,
+          0,
+          MetadataType.HistoryComplete,
+          createMetadataPayload(1_710_000_001 + 251 * 60, 0),
+        ),
+      },
+    ];
+    const db = new BufferedHistoryDb(null);
+    const manager = new MockBleManager(device);
+    const service = new WearableSyncService(db as never, manager as never);
+
+    const result = await service.syncSelected();
+
+    expect(result.importedReadings).toBe(251);
+    expect(db.heartInsertCount).toBe(251);
+    expect(db.heartWriteTransactionCount).toBe(2);
+    expect(mockRefreshHeartAggregatesForRange).toHaveBeenCalledWith(
+      db,
+      formatSqliteDateTime(new Date(1_710_000_001 * 1000)),
+      formatSqliteDateTime(new Date((1_710_000_001 + 250 * 60) * 1000)),
+    );
+    expect(mockMarkDerivedRefreshPending).toHaveBeenCalledWith(
+      db,
+      formatSqliteDateTime(new Date(1_710_000_001 * 1000)),
+      formatSqliteDateTime(new Date((1_710_000_001 + 250 * 60) * 1000)),
+    );
   });
 });

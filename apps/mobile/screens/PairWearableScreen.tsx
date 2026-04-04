@@ -7,7 +7,7 @@ import { GlassCard } from '@/components/ui/GlassCard';
 import { brandMark } from '@/constants/assets';
 import { brand } from '@/constants/brand';
 import { colors, typography } from '@/constants/theme';
-import { useWearableSync } from '@/providers/WearableSyncProvider';
+import { useWearableScanResults, useWearableSyncActions, useWearableSyncProgress, useWearableSyncState } from '@/providers/WearableSyncProvider';
 import { isBlockingSyncStatus, type WearableScanResult } from '@/types/device';
 
 function ActionButton({
@@ -40,7 +40,10 @@ function ActionButton({
 }
 
 export function PairWearableScreen() {
-  const { deviceState, progress, scanResults, scan, pairDevice } = useWearableSync();
+  const { deviceState } = useWearableSyncState();
+  const { progress } = useWearableSyncProgress();
+  const { scanResults } = useWearableScanResults();
+  const { scan, pairDevice } = useWearableSyncActions();
   const startedScanRef = useRef(false);
   const [selectingDeviceId, setSelectingDeviceId] = useState<string | null>(null);
   const deviceBusy = progress.status === 'scanning' || isBlockingSyncStatus(progress.status) || selectingDeviceId !== null;

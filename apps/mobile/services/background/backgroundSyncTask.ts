@@ -4,6 +4,7 @@ import * as TaskManager from 'expo-task-manager';
 import { Platform } from 'react-native';
 
 import { openAppDatabaseAsync } from '@/db/appDatabase';
+import { processPendingDerivedRefresh, refreshDashboardSnapshot } from '@/data/sqlite/SQLiteHealthRepository';
 import {
   deliverBackgroundSyncRunNotification,
   deliverNewBackgroundNotifications,
@@ -22,6 +23,27 @@ import type { BackgroundSyncDiagnostics, NotificationPermissionState } from '@/t
 
 export const BACKGROUND_SYNC_TASK_NAME = 'btwearable-background-sync';
 export const BACKGROUND_SYNC_MIN_INTERVAL_MINUTES = 15;
+
+const SHOULD_LOG_BACKGROUND_SYNC_PERF =
+  typeof __DEV__ !== 'undefined' &&
+  __DEV__ &&
+  (typeof process === 'undefined' || process.env.NODE_ENV !== 'test');
+
+type PerformanceLogValue = string | number | boolean | null;
+
+function logBackgroundSyncPerf(label: string, startedAt: number, details?: Record<string, PerformanceLogValue>) {
+  if (!SHOULD_LOG_BACKGROUND_SYNC_PERF) {
+    return;
+  }
+
+  const elapsedMs = Date.now() - startedAt;
+  const suffix = details
+    ? Object.entries(details)
+        .map(([key, value]) => `${key}=${value}`)
+        .join(' ')
+    : '';
+  console.info(`[mobile-perf] ${label} ${elapsedMs}ms${suffix ? ` ${suffix}` : ''}`);
+}
 
 if (typeof Notifications.setNotificationHandler === 'function') {
   Notifications.setNotificationHandler({
@@ -238,6 +260,7 @@ TaskManager.defineTask(BACKGROUND_SYNC_TASK_NAME, async () => {
 
   const db = await openAppDatabaseAsync();
   const service = new WearableSyncService(db);
+  const runStartedAt = Date.now();
   const startedAt = formatSqliteDateTime(new Date());
   let recordedDeviceId: string | null = null;
 
@@ -285,8 +308,33 @@ TaskManager.defineTask(BACKGROUND_SYNC_TASK_NAME, async () => {
 
     const outcome = await service.syncInBackground();
     if (outcome.status === 'success') {
+      const heartSnapshotStartedAt = Date.now();
+      await refreshDashboardSnapshot(db, 'post_sync_heart_only');
+      logBackgroundSyncPerf('background.refreshDashboard.postSyncHeartOnly', heartSnapshotStartedAt, {
+        importedReadings: outcome.importedReadings,
+      });
+
+      const derivedRefreshStartedAt = Date.now();
+      const processed = await processPendingDerivedRefresh(db);
+      logBackgroundSyncPerf('background.processPendingDerivedRefresh', derivedRefreshStartedAt, {
+        processed,
+      });
+
+      if (processed) {
+        const fullSnapshotStartedAt = Date.now();
+        await refreshDashboardSnapshot(db, 'full');
+        logBackgroundSyncPerf('background.refreshDashboard.full', fullSnapshotStartedAt, {
+          importedReadings: outcome.importedReadings,
+        });
+      }
+
       await deliverNewBackgroundNotifications(db, selectedDeviceId);
     }
+
+    logBackgroundSyncPerf('background.syncRun.total', runStartedAt, {
+      result: outcome.status,
+      importedReadings: outcome.importedReadings,
+    });
 
     await recordBackgroundRunResult(db, {
       deviceId: selectedDeviceId,

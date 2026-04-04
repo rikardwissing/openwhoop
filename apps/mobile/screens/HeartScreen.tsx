@@ -12,14 +12,14 @@ import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
 import { colors, typography } from '@/constants/theme';
 import { useHeartHistory } from '@/hooks/useHealthData';
 import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
-import { useWearableSync } from '@/providers/WearableSyncProvider';
+import { useWearableSyncState } from '@/providers/WearableSyncProvider';
 import { hasFreshLiveHeartRate } from '@/types/device';
 import type { TrendSelection } from '@/types/health';
 import { formatMetricValue, formatSignedValue } from '@/utils/formatters';
 
 export function HeartScreen() {
   const state = useHeartHistory('14d');
-  const { deviceState } = useWearableSync();
+  const { deviceState } = useWearableSyncState();
   const { onRefresh, refreshing } = useWearableRefreshControl();
   const [intradaySelection, setIntradaySelection] = useState<TrendSelection | null>(null);
   const [restingSelection, setRestingSelection] = useState<TrendSelection | null>(null);

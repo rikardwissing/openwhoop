@@ -1,43 +1,122 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
 import { useSQLiteContext } from 'expo-sqlite';
 
-import type { HealthRepository } from '@/data/HealthRepository';
+import type { HealthRefreshScope, HealthRepository } from '@/data/HealthRepository';
 import { SQLiteHealthRepository } from '@/data/sqlite/SQLiteHealthRepository';
 
-interface HealthRepositoryContextValue {
-  repository: HealthRepository;
-  version: number;
-  refresh: () => void;
+interface HealthVersionState {
+  dashboard: number;
+  sleep: number;
+  heart: number;
+  wellness: number;
+  derived: number;
 }
 
-const HealthRepositoryContext = createContext<HealthRepositoryContextValue | null>(null);
+const INITIAL_VERSIONS: HealthVersionState = {
+  dashboard: 0,
+  sleep: 0,
+  heart: 0,
+  wellness: 0,
+  derived: 0,
+};
+
+const ALL_REFRESH_SCOPES: Array<Exclude<HealthRefreshScope, 'all'>> = [
+  'dashboard',
+  'sleep',
+  'heart',
+  'wellness',
+  'derived',
+];
+
+const HealthRepositoryContext = createContext<HealthRepository | null>(null);
+const HealthRefreshContext = createContext<
+  ((scope?: HealthRefreshScope | readonly HealthRefreshScope[]) => void) | null
+>(null);
+const DashboardVersionContext = createContext(0);
+const SleepVersionContext = createContext(0);
+const HeartVersionContext = createContext(0);
+const WellnessVersionContext = createContext(0);
+const DerivedVersionContext = createContext(0);
+
+function normalizeScopes(scope: HealthRefreshScope | readonly HealthRefreshScope[] = 'all') {
+  const scopes = Array.isArray(scope) ? [...scope] : [scope];
+  return scopes.includes('all') ? ALL_REFRESH_SCOPES : scopes;
+}
+
+function bumpVersions(
+  current: HealthVersionState,
+  scopes: Array<Exclude<HealthRefreshScope, 'all'>>,
+): HealthVersionState {
+  const next = { ...current };
+
+  for (const scope of scopes) {
+    next[scope] += 1;
+  }
+
+  return next;
+}
+
+function HealthRepositoryProvider({
+  children,
+  repository,
+}: {
+  children: ReactNode;
+  repository: HealthRepository;
+}) {
+  const [versions, setVersions] = useState(INITIAL_VERSIONS);
+  const refresh = useCallback(
+    (scope: HealthRefreshScope | readonly HealthRefreshScope[] = 'all') => {
+      const scopes = normalizeScopes(scope);
+      repository.invalidateCaches(scopes);
+      setVersions((current) => bumpVersions(current, scopes));
+    },
+    [repository],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void repository
+      .primeDashboardSnapshot()
+      .then((primed) => {
+        if (!cancelled && primed) {
+          setVersions((current) => bumpVersions(current, ['dashboard']));
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, [repository]);
+
+  return (
+    <HealthRepositoryContext.Provider value={repository}>
+      <HealthRefreshContext.Provider value={refresh}>
+        <DashboardVersionContext.Provider value={versions.dashboard}>
+          <SleepVersionContext.Provider value={versions.sleep}>
+            <HeartVersionContext.Provider value={versions.heart}>
+              <WellnessVersionContext.Provider value={versions.wellness}>
+                <DerivedVersionContext.Provider value={versions.derived}>
+                  {children}
+                </DerivedVersionContext.Provider>
+              </WellnessVersionContext.Provider>
+            </HeartVersionContext.Provider>
+          </SleepVersionContext.Provider>
+        </DashboardVersionContext.Provider>
+      </HealthRefreshContext.Provider>
+    </HealthRepositoryContext.Provider>
+  );
+}
 
 function SQLiteRepositoryProvider({ children }: { children: ReactNode }) {
   const db = useSQLiteContext();
   const [repository] = useState<HealthRepository>(() => new SQLiteHealthRepository(db));
-  const [version, setVersion] = useState(0);
-  const refresh = useCallback(() => {
-    repository.invalidateCaches('all');
-    setVersion((current) => current + 1);
-  }, [repository]);
-
-  useEffect(() => {
-    void repository.warmCaches().catch(() => {});
-  }, [repository]);
-
-  const value = useMemo(
-    () => ({
-      repository,
-      version,
-      refresh,
-    }),
-    [refresh, repository, version],
-  );
 
   return (
-    <HealthRepositoryContext.Provider value={value}>
+    <HealthRepositoryProvider repository={repository}>
       {children}
-    </HealthRepositoryContext.Provider>
+    </HealthRepositoryProvider>
   );
 }
 
@@ -48,31 +127,11 @@ export function HealthDataProvider({
   children: ReactNode;
   repository?: HealthRepository;
 }) {
-  const resolvedRepository = repository;
-  const [version, setVersion] = useState(0);
-  const refresh = useCallback(() => {
-    resolvedRepository?.invalidateCaches('all');
-    setVersion((current) => current + 1);
-  }, [resolvedRepository]);
-
-  useEffect(() => {
-    if (!resolvedRepository) {
-      return;
-    }
-
-    void resolvedRepository.warmCaches().catch(() => {});
-  }, [resolvedRepository]);
-
-  if (resolvedRepository) {
-    const value = {
-      repository: resolvedRepository,
-      version,
-      refresh,
-    };
+  if (repository) {
     return (
-      <HealthRepositoryContext.Provider value={value}>
+      <HealthRepositoryProvider repository={repository}>
         {children}
-      </HealthRepositoryContext.Provider>
+      </HealthRepositoryProvider>
     );
   }
 
@@ -86,25 +145,30 @@ export function useHealthRepository() {
     throw new Error('Health repository is not available.');
   }
 
-  return repository.repository;
+  return repository;
 }
 
-export function useHealthDataVersion() {
-  const value = useContext(HealthRepositoryContext);
-
-  if (!value) {
-    throw new Error('Health repository is not available.');
+export function useHealthDataVersion(scope: Exclude<HealthRefreshScope, 'all'>) {
+  switch (scope) {
+    case 'dashboard':
+      return useContext(DashboardVersionContext);
+    case 'sleep':
+      return useContext(SleepVersionContext);
+    case 'heart':
+      return useContext(HeartVersionContext);
+    case 'wellness':
+      return useContext(WellnessVersionContext);
+    case 'derived':
+      return useContext(DerivedVersionContext);
   }
-
-  return value.version;
 }
 
 export function useRefreshHealthData() {
-  const value = useContext(HealthRepositoryContext);
+  const refresh = useContext(HealthRefreshContext);
 
-  if (!value) {
+  if (!refresh) {
     throw new Error('Health repository is not available.');
   }
 
-  return value.refresh;
+  return refresh;
 }

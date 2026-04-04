@@ -1,7 +1,7 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 import { BleManager, type Device, type Subscription } from 'react-native-ble-plx';
 
-import { refreshDerivedData } from '@/data/sqlite/SQLiteHealthRepository';
+import { markDerivedRefreshPending, refreshHeartAggregatesForRange } from '@/data/sqlite/SQLiteHealthRepository';
 import { acquireBackgroundSyncLock, releaseBackgroundSyncLock } from '@/services/background/backgroundSyncState';
 import { CMD_FROM_STRAP_UUID, CMD_TO_STRAP_UUID, DATA_FROM_STRAP_UUID, EVENTS_FROM_STRAP_UUID, EventNumber, MEMFAULT_UUID, WEARABLE_SERVICE_UUID } from '@/services/ble/constants';
 import { resolveScanDeviceName } from '@/services/ble/deviceNaming';
@@ -29,6 +29,7 @@ const CONNECT_TIMEOUT_MS = 15_000;
 const CONNECT_SCAN_TIMEOUT_MS = 8_000;
 const BATTERY_REQUEST_TIMEOUT_MS = 1_500;
 const LIVE_UPDATES_RECONNECT_DELAY_MS = 3_000;
+const HISTORY_WRITE_BATCH_SIZE = 250;
 
 function delay(ms: number) {
   return new Promise((resolve) => {
@@ -44,6 +45,22 @@ function rrToString(rr: number[]) {
   return rr.join(',');
 }
 
+type TransactionWriter = Pick<SQLiteDatabase, 'runAsync' | 'execAsync'>;
+
+async function withExclusiveTransaction(
+  db: SQLiteDatabase,
+  callback: (tx: TransactionWriter) => Promise<void>,
+) {
+  if (typeof db.withExclusiveTransactionAsync === 'function') {
+    await db.withExclusiveTransactionAsync(async (tx) => {
+      await callback(tx);
+    });
+    return;
+  }
+
+  await callback(db);
+}
+
 interface DeviceStateUpdate {
   id: string;
   name: string | null;
@@ -57,6 +74,13 @@ interface DeviceStateUpdate {
 
 type LiveEventRecorder = (event: WearableLiveEvent) => void;
 type SyncRunSource = SyncSource;
+
+interface PendingHistoryRow {
+  bpm: number;
+  time: string;
+  rrIntervals: string;
+  sensorData: string | null;
+}
 
 export interface SyncExecutionOutcome {
   status: 'success' | 'skipped';
@@ -625,8 +649,12 @@ export class WearableSyncService {
     let batteryPercent: number | null = null;
     let importedReadings = 0;
     let lastHistoryCursor = 0;
+    let earliestImportedTime: string | null = null;
+    let latestImportedTime: string | null = null;
     let resolvedDeviceId = selected.id;
     let resolvedDeviceName = selected.name;
+    let pendingHistoryRows: PendingHistoryRow[] = [];
+    let historyFlushQueued = false;
     let writeQueue = Promise.resolve();
     let commandQueue = Promise.resolve();
     const dataAssembler = new PacketAssembler();
@@ -641,6 +669,53 @@ export class WearableSyncService {
     const queueCommand = (task: () => Promise<void>) => {
       commandQueue = commandQueue.then(task);
       return commandQueue;
+    };
+
+    const flushPendingHistoryRows = async () => {
+      if (pendingHistoryRows.length === 0) {
+        return;
+      }
+
+      const rows = pendingHistoryRows;
+      pendingHistoryRows = [];
+
+      await withExclusiveTransaction(this.db, async (tx) => {
+        for (const row of rows) {
+          await tx.runAsync(
+            `
+              INSERT INTO heart_rate (bpm, time, rr_intervals, imu_data, sensor_data, synced)
+              VALUES (?, ?, ?, NULL, ?, 0)
+              ON CONFLICT(time) DO UPDATE SET
+                bpm = excluded.bpm,
+                rr_intervals = excluded.rr_intervals,
+                sensor_data = excluded.sensor_data
+            `,
+            row.bpm,
+            row.time,
+            row.rrIntervals,
+            row.sensorData,
+          );
+        }
+      });
+    };
+
+    const queuePendingHistoryFlush = () => {
+      if (historyFlushQueued) {
+        return;
+      }
+
+      historyFlushQueued = true;
+      void queueWrite(async () => {
+        try {
+          await flushPendingHistoryRows();
+        } finally {
+          historyFlushQueued = false;
+
+          if (pendingHistoryRows.length >= HISTORY_WRITE_BATCH_SIZE) {
+            queuePendingHistoryFlush();
+          }
+        }
+      }).catch(() => {});
     };
 
     try {
@@ -716,22 +791,25 @@ export class WearableSyncService {
                 importedReadings += 1;
                 lastHistoryCursor = parsed.reading.unix;
                 watchdog.markProgress();
-                queueWrite(async () => {
-                  await this.db.runAsync(
-                    `
-                      INSERT INTO heart_rate (bpm, time, rr_intervals, imu_data, sensor_data, synced)
-                      VALUES (?, ?, ?, NULL, ?, 0)
-                      ON CONFLICT(time) DO UPDATE SET
-                        bpm = excluded.bpm,
-                        rr_intervals = excluded.rr_intervals,
-                        sensor_data = excluded.sensor_data
-                    `,
-                    parsed.reading.bpm,
-                    formatSqliteDateTime(new Date(parsed.reading.unix)),
-                    rrToString(parsed.reading.rr),
-                    serializeSensorData(parsed.reading.sensorData),
-                  );
+                const readingTime = formatSqliteDateTime(new Date(parsed.reading.unix));
+                earliestImportedTime =
+                  earliestImportedTime === null || readingTime < earliestImportedTime
+                    ? readingTime
+                    : earliestImportedTime;
+                latestImportedTime =
+                  latestImportedTime === null || readingTime > latestImportedTime
+                    ? readingTime
+                    : latestImportedTime;
+                pendingHistoryRows.push({
+                  bpm: parsed.reading.bpm,
+                  time: readingTime,
+                  rrIntervals: rrToString(parsed.reading.rr),
+                  sensorData: serializeSensorData(parsed.reading.sensorData),
                 });
+
+                if (pendingHistoryRows.length >= HISTORY_WRITE_BATCH_SIZE) {
+                  queuePendingHistoryFlush();
+                }
 
                 if (importedReadings % 250 === 0) {
                   onProgress?.({
@@ -758,6 +836,7 @@ export class WearableSyncService {
                 }
 
                 if (parsed.metadata.kind === 3) {
+                  queuePendingHistoryFlush();
                   succeed();
                 }
               }
@@ -789,9 +868,16 @@ export class WearableSyncService {
       await this.sendCommand(device, historyStartPacket());
       await completion;
 
+      await queueWrite(async () => {
+        await flushPendingHistoryRows();
+      });
       await writeQueue;
-      onProgress?.({ status: 'refreshing', message: 'Refreshing local metrics...', importedReadings });
-      await refreshDerivedData(this.db);
+      if (earliestImportedTime && latestImportedTime) {
+        try {
+          await refreshHeartAggregatesForRange(this.db, earliestImportedTime, latestImportedTime);
+        } catch {}
+        await markDerivedRefreshPending(this.db, earliestImportedTime, latestImportedTime);
+      }
 
       const completedAt = formatSqliteDateTime(new Date());
       await this.persistDeviceState({
@@ -820,6 +906,9 @@ export class WearableSyncService {
       onProgress?.({ status: 'error', message });
       throw error;
     } finally {
+      await queueWrite(async () => {
+        await flushPendingHistoryRows();
+      }).catch(() => {});
       await commandQueue.catch(() => {});
 
       for (const subscription of subscriptions) {

@@ -3,9 +3,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import { initializeDatabase } from '@/db/schema';
+import { DERIVED_DATA_SCHEMA_VERSION, initializeDatabase } from '@/db/schema';
 import {
   SQLiteHealthRepository,
+  markDerivedRefreshPending,
+  primeDashboardSnapshot,
+  processPendingDerivedRefresh,
+  refreshDashboardSnapshot,
   refreshDerivedData,
   shouldRefreshDerivedData,
 } from '@/data/sqlite/SQLiteHealthRepository';
@@ -157,8 +161,9 @@ async function createRepositoryFixture() {
   await adapter.runAsync(
     `
       INSERT INTO derived_data_state (id, derived_schema_version, source_heart_count, refreshed_at)
-      VALUES (1, 1, 4, '2026-03-19 07:05:00')
+      VALUES (1, ?, 4, '2026-03-19 07:05:00')
     `,
+    DERIVED_DATA_SCHEMA_VERSION,
   );
 
   return {
@@ -177,6 +182,84 @@ function formatTestSqliteDateTime(date: Date) {
   return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
 }
 
+async function insertOvernightStillness(
+  adapter: NodeSqliteAdapter,
+  start: Date,
+  idOffset = 0,
+) {
+  const heartInsert = `
+    INSERT INTO heart_rate (id, bpm, time, rr_intervals, sensor_data, synced)
+    VALUES (?, ?, ?, ?, ?, 0)
+  `;
+  const gravity = [0.11, -0.02, 0.98];
+
+  for (let index = 0; index < 60; index += 1) {
+    const sampleDate = new Date(start.getTime() + index * 10 * 60000);
+    const sleepEndsAt = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 1, 7, 0, 0);
+    const skinContact = sampleDate < sleepEndsAt ? 1 : 0;
+    await adapter.runAsync(
+      heartInsert,
+      idOffset + index + 1,
+      58,
+      formatTestSqliteDateTime(sampleDate),
+      '1000,990,980',
+      JSON.stringify({
+        ppg_green: 15000,
+        skin_contact: skinContact,
+        skin_temp_raw: 830,
+        accel_gravity: gravity,
+      }),
+    );
+  }
+}
+
+async function insertSyntheticHeartSeries(
+  adapter: NodeSqliteAdapter,
+  {
+    count,
+    start,
+    idOffset = 0,
+    intervalMinutes = 5,
+  }: {
+    count: number;
+    start: Date;
+    idOffset?: number;
+    intervalMinutes?: number;
+  },
+) {
+  const heartInsert = `
+    INSERT INTO heart_rate (id, bpm, time, rr_intervals, stress, spo2, skin_temp, sensor_data, synced)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+  `;
+  const gravity = [0.05, -0.01, 0.99];
+
+  await adapter.withExclusiveTransactionAsync(async (tx) => {
+    for (let index = 0; index < count; index += 1) {
+      const sampleDate = new Date(start.getTime() + index * intervalMinutes * 60000);
+      const bpm = 56 + (index % 18);
+      const stress = 2 + (index % 6);
+      const spo2 = 96 + (index % 3);
+      const skinTemp = 33.1 + ((index % 5) * 0.1);
+
+      await tx.runAsync(
+        heartInsert,
+        idOffset + index + 1,
+        bpm,
+        formatTestSqliteDateTime(sampleDate),
+        `${1020 - (index % 40)},${1005 - (index % 35)},${990 - (index % 30)}`,
+        stress,
+        spo2,
+        Number(skinTemp.toFixed(1)),
+        JSON.stringify({
+          ppg_green: 14_000 + ((index % 12) * 350),
+          skin_contact: 1,
+          accel_gravity: gravity,
+        }),
+      );
+    }
+  });
+}
+
 describe('SQLiteHealthRepository', () => {
   it('skips derived refresh when derived state matches the source history', async () => {
     const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
@@ -191,8 +274,9 @@ describe('SQLiteHealthRepository', () => {
     await adapter.runAsync(
       `
         INSERT INTO derived_data_state (id, derived_schema_version, source_heart_count, refreshed_at)
-        VALUES (1, 1, 1, '2026-03-20 06:05:00')
+        VALUES (1, ?, 1, '2026-03-20 06:05:00')
       `,
+      DERIVED_DATA_SCHEMA_VERSION,
     );
 
     await expect(shouldRefreshDerivedData(adapter as never)).resolves.toBe(false);
@@ -223,9 +307,10 @@ describe('SQLiteHealthRepository', () => {
     await adapter.runAsync(
       `
         UPDATE derived_data_state
-        SET derived_schema_version = 1, source_heart_count = 99
+        SET derived_schema_version = ?, source_heart_count = 99
         WHERE id = 1
       `,
+      DERIVED_DATA_SCHEMA_VERSION,
     );
     await expect(shouldRefreshDerivedData(adapter as never)).resolves.toBe(true);
 
@@ -339,6 +424,276 @@ describe('SQLiteHealthRepository', () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
+  it('loads larger synthetic snapshots without triggering a derived rebuild', async () => {
+    const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
+    await initializeDatabase(adapter as never);
+
+    const rowCount = 15_000;
+    const latest = new Date();
+    const start = new Date(latest.getTime() - (rowCount - 1) * 5 * 60000);
+    await insertSyntheticHeartSeries(adapter, { count: rowCount, start });
+    await adapter.runAsync(
+      `
+        INSERT INTO derived_data_state (id, derived_schema_version, source_heart_count, refreshed_at)
+        VALUES (1, ?, ?, ?)
+      `,
+      DERIVED_DATA_SCHEMA_VERSION,
+      rowCount,
+      formatTestSqliteDateTime(latest),
+    );
+
+    await expect(shouldRefreshDerivedData(adapter as never)).resolves.toBe(false);
+
+    const repository = new SQLiteHealthRepository(adapter as never);
+    const startedAt = Date.now();
+    const [dashboard, sleep, heart, wellness] = await Promise.all([
+      repository.getDashboardSnapshot(),
+      repository.getSleepHistory('14d'),
+      repository.getHeartHistory('14d'),
+      repository.getWellnessSnapshot('14d'),
+    ]);
+    const elapsedMs = Date.now() - startedAt;
+
+    expect(dashboard.summaryStats).toHaveLength(3);
+    expect(sleep.sessions).toHaveLength(0);
+    expect(heart.intraday.length).toBeGreaterThan(0);
+    expect(wellness.activities).toHaveLength(0);
+    expect(elapsedMs).toBeLessThan(5_000);
+
+    adapter.close();
+  });
+
+  it('reads the dashboard from cache without rescanning heart history in steady state', async () => {
+    const { adapter, repository } = await createRepositoryFixture();
+
+    await refreshDashboardSnapshot(adapter as never, 'full');
+    expect(
+      adapter.calls.some((sql) => sql.includes('SELECT bpm FROM heart_rate ORDER BY time ASC'))
+    ).toBe(false);
+    expect(
+      adapter.calls.some((sql) => sql.includes('SELECT day, min_bpm') && sql.includes('FROM ('))
+    ).toBe(false);
+    adapter.calls.length = 0;
+
+    const firstDashboard = await repository.getDashboardSnapshot();
+    expect(firstDashboard.summaryStats).toHaveLength(3);
+    expect(firstDashboard.heartCard.series.length).toBeGreaterThan(0);
+    expect(adapter.calls).toEqual([
+      expect.stringContaining('FROM dashboard_snapshot_cache'),
+    ]);
+
+    adapter.calls.length = 0;
+    const secondDashboard = await repository.getDashboardSnapshot();
+    expect(secondDashboard.summaryStats).toHaveLength(3);
+    expect(adapter.calls).toHaveLength(0);
+
+    adapter.close();
+  });
+
+  it('uses lightweight heart sample queries when rebuilding the full dashboard snapshot', async () => {
+    const { adapter } = await createRepositoryFixture();
+
+    await refreshDashboardSnapshot(adapter as never, 'full');
+
+    expect(
+      adapter.calls.some(
+        (sql) =>
+          sql.includes('SELECT bpm, time') &&
+          sql.includes('FROM heart_rate') &&
+          (sql.includes('WHERE time >= ? AND time <= ?') ||
+            sql.includes('WHERE time >= ? AND time < ?')),
+      ),
+    ).toBe(true);
+    expect(
+      adapter.calls.some(
+        (sql) =>
+          sql.includes('FROM heart_rate') &&
+          sql.includes('rr_intervals') &&
+          sql.includes('sensor_data') &&
+          sql.includes('WHERE time >= ? AND time <= ?'),
+      ),
+    ).toBe(false);
+    expect(
+      adapter.calls.some(
+        (sql) =>
+          sql.includes('FROM heart_rate') &&
+          sql.includes('rr_intervals') &&
+          sql.includes('sensor_data') &&
+          sql.includes('WHERE time >= ? AND time < ?'),
+      ),
+    ).toBe(false);
+
+    adapter.close();
+  });
+
+  it('uses lightweight heart sample queries when loading heart history', async () => {
+    const { adapter, repository } = await createRepositoryFixture();
+
+    await repository.getHeartHistory('14d');
+
+    expect(
+      adapter.calls.some(
+        (sql) =>
+          sql.includes('SELECT bpm, time') &&
+          sql.includes('FROM heart_rate') &&
+          (sql.includes('WHERE time >= ? AND time <= ?') ||
+            sql.includes('WHERE time >= ? AND time < ?')),
+      ),
+    ).toBe(true);
+    expect(
+      adapter.calls.some(
+        (sql) =>
+          sql.includes('FROM heart_rate') &&
+          sql.includes('rr_intervals') &&
+          sql.includes('sensor_data') &&
+          sql.includes('WHERE time >= ? AND time <= ?'),
+      ),
+    ).toBe(false);
+
+    adapter.close();
+  });
+
+  it('uses lightweight heart metric queries when loading wellness history', async () => {
+    const { adapter, repository } = await createRepositoryFixture();
+
+    await adapter.runAsync(
+      `
+        INSERT INTO activities (period_id, start, end, activity, synced)
+        VALUES (?, ?, ?, ?, 0)
+      `,
+      'activity-1',
+      '2026-03-19 06:50:00',
+      '2026-03-19 07:00:00',
+      'Run',
+    );
+
+    await repository.getWellnessSnapshot('14d');
+
+    expect(
+      adapter.calls.some(
+        (sql) =>
+          sql.includes('AVG(stress) AS avg_stress') &&
+          sql.includes('AVG(spo2) AS avg_spo2') &&
+          sql.includes('AVG(skin_temp) AS avg_skin_temp') &&
+          sql.includes('FROM heart_rate') &&
+          sql.includes('GROUP BY day'),
+      ),
+    ).toBe(true);
+    expect(
+      adapter.calls.some(
+        (sql) =>
+          sql.includes('FROM heart_intraday_buckets') &&
+          sql.includes('WHERE bucket_start >= ? AND bucket_start <= ?'),
+      ),
+    ).toBe(true);
+    expect(
+      adapter.calls.some(
+        (sql) =>
+          sql.includes('SELECT bpm FROM heart_rate ORDER BY time ASC'),
+      ),
+    ).toBe(false);
+    expect(
+      adapter.calls.some(
+        (sql) =>
+          sql.includes('SELECT bpm, time') &&
+          sql.includes('FROM heart_rate') &&
+          sql.includes('WHERE time >= ? AND time <= ?') &&
+          sql.includes('ORDER BY time ASC'),
+      ),
+    ).toBe(false);
+    expect(
+      adapter.calls.some(
+        (sql) =>
+          sql.includes('FROM heart_rate') &&
+          sql.includes('rr_intervals') &&
+          sql.includes('sensor_data') &&
+          sql.includes('WHERE time >= ?'),
+      ),
+    ).toBe(false);
+
+    adapter.close();
+  });
+
+  it('primes the dashboard snapshot cache when derived data is already current', async () => {
+    const { adapter } = await createRepositoryFixture();
+
+    await expect(primeDashboardSnapshot(adapter as never)).resolves.toBe(true);
+
+    const cached = await adapter.getFirstAsync<{
+      snapshot_kind: string;
+      source_heart_count: number;
+    }>(
+      `
+        SELECT snapshot_kind, source_heart_count
+        FROM dashboard_snapshot_cache
+        WHERE id = 1
+      `,
+    );
+
+    expect(cached).toEqual({
+      snapshot_kind: 'full',
+      source_heart_count: 4,
+    });
+
+    adapter.close();
+  });
+
+  it('does not block cached dashboard reads when derived refresh is pending', async () => {
+    const { adapter, repository } = await createRepositoryFixture();
+
+    await refreshDashboardSnapshot(adapter as never, 'full');
+    await markDerivedRefreshPending(adapter as never, '2026-03-19 06:55:00', '2026-03-19 07:00:00');
+    adapter.calls.length = 0;
+
+    const dashboard = await repository.getDashboardSnapshot();
+
+    expect(dashboard.summaryStats).toHaveLength(3);
+    expect(adapter.calls).toEqual([
+      expect.stringContaining('FROM dashboard_snapshot_cache'),
+    ]);
+    expect(adapter.calls.some((sql) => sql.includes('UPDATE heart_rate SET stress'))).toBe(false);
+    expect(adapter.calls.some((sql) => sql.includes('BEGIN EXCLUSIVE TRANSACTION'))).toBe(false);
+
+    adapter.close();
+  });
+
+  it('updates only heart-visible dashboard fields for post-sync heart refreshes', async () => {
+    const { adapter, repository } = await createRepositoryFixture();
+
+    await refreshDashboardSnapshot(adapter as never, 'full');
+    const before = await repository.getDashboardSnapshot();
+    repository.invalidateCaches('dashboard');
+
+    await adapter.runAsync(
+      `
+        INSERT INTO heart_rate (id, bpm, time, rr_intervals, stress, spo2, skin_temp, sensor_data, synced)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+      `,
+      5,
+      110,
+      '2026-03-19 08:05:00',
+      '780,790,800',
+      null,
+      null,
+      null,
+      '{"ppg_green":25000}',
+    );
+
+    await refreshDashboardSnapshot(adapter as never, 'post_sync_heart_only');
+    repository.invalidateCaches('dashboard');
+    const after = await repository.getDashboardSnapshot();
+
+    expect(after.recovery).toEqual(before.recovery);
+    expect(after.summaryStats).toEqual(before.summaryStats);
+    expect(after.sleepCard).toEqual(before.sleepCard);
+    expect(after.strainCard).toEqual(before.strainCard);
+    expect(after.heartCard.maxHr).toBeGreaterThan(before.heartCard.maxHr ?? 0);
+    expect(after.heartCard.averageHr).toBeGreaterThan(before.heartCard.averageHr ?? 0);
+    expect(after.heartCard.series.length).toBeGreaterThanOrEqual(before.heartCard.series.length);
+
+    adapter.close();
+  });
+
   it('preserves missing intraday buckets as null chart points', async () => {
     const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
     await initializeDatabase(adapter as never);
@@ -354,8 +709,9 @@ describe('SQLiteHealthRepository', () => {
     await adapter.runAsync(
       `
         INSERT INTO derived_data_state (id, derived_schema_version, source_heart_count, refreshed_at)
-        VALUES (1, 1, 4, '2026-03-20 04:10:00')
+        VALUES (1, ?, 4, '2026-03-20 04:10:00')
       `,
+      DERIVED_DATA_SCHEMA_VERSION,
     );
 
     const repository = new SQLiteHealthRepository(adapter as never);
@@ -366,5 +722,146 @@ describe('SQLiteHealthRepository', () => {
     expect(heart.intraday.find((point) => point.label === '4 AM')?.value).toBe(78);
 
     adapter.close();
+  });
+
+  it('merges overlapping pending derived refresh ranges', async () => {
+    const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
+    await initializeDatabase(adapter as never);
+
+    await markDerivedRefreshPending(adapter as never, '2026-04-06 23:10:00', '2026-04-07 06:40:00');
+    await markDerivedRefreshPending(adapter as never, '2026-04-06 22:50:00', '2026-04-07 07:00:00');
+
+    const repository = new SQLiteHealthRepository(adapter as never);
+    await expect(repository.getDerivedRefreshState()).resolves.toEqual({
+      status: 'pending',
+      pendingFromTime: '2026-04-06 22:50:00',
+      pendingToTime: '2026-04-07 07:00:00',
+      lastProcessedFromTime: null,
+      lastProcessedToTime: null,
+      lastError: null,
+      isFirstSync: true,
+    });
+
+    adapter.close();
+  });
+
+  it('rebuilds only the pending append-only range and preserves older derived rows', async () => {
+    const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
+    await initializeDatabase(adapter as never);
+
+    await insertOvernightStillness(adapter, new Date(2026, 3, 1, 23, 0, 0), 0);
+    await refreshDerivedData(adapter as never);
+
+    await insertOvernightStillness(adapter, new Date(2026, 3, 6, 23, 0, 0), 100);
+    await markDerivedRefreshPending(adapter as never, '2026-04-06 23:00:00', '2026-04-07 08:50:00');
+    await expect(processPendingDerivedRefresh(adapter as never)).resolves.toBe(true);
+
+    const sleeps = await adapter.getAllAsync<{
+      start: string;
+      end: string;
+    }>(
+      `
+        SELECT start, end
+        FROM sleep_cycles
+        ORDER BY start ASC
+      `,
+    );
+
+    expect(sleeps).toEqual([
+      {
+        start: '2026-04-01 23:00:00',
+        end: '2026-04-02 06:50:00',
+      },
+      {
+        start: '2026-04-06 23:00:00',
+        end: '2026-04-07 06:50:00',
+      },
+    ]);
+
+    const derivedState = await adapter.getFirstAsync<{
+      rebuild_status: string;
+      pending_from_time: string | null;
+      pending_to_time: string | null;
+      last_processed_from_time: string | null;
+      last_processed_to_time: string | null;
+    }>(
+      `
+        SELECT rebuild_status, pending_from_time, pending_to_time, last_processed_from_time, last_processed_to_time
+        FROM derived_data_state
+        WHERE id = 1
+      `,
+    );
+
+    expect(derivedState).toEqual({
+      rebuild_status: 'idle',
+      pending_from_time: null,
+      pending_to_time: null,
+      last_processed_from_time: '2026-04-06 23:00:00',
+      last_processed_to_time: '2026-04-07 08:50:00',
+    });
+
+    const heartDayStats = await adapter.getAllAsync<{
+      day: string;
+      min_bpm: number;
+      avg_bpm: number;
+      max_bpm: number;
+      strain_score: number | null;
+    }>(
+      `
+        SELECT day, min_bpm, avg_bpm, max_bpm, strain_score
+        FROM heart_day_stats
+        ORDER BY day ASC
+      `,
+    );
+    expect(heartDayStats).toHaveLength(4);
+    expect(heartDayStats.every((row) => row.min_bpm > 0 && row.max_bpm >= row.min_bpm)).toBe(true);
+
+    const latestSleep = await adapter.getFirstAsync<{
+      avg_skin_temp: number | null;
+    }>(
+      `
+        SELECT avg_skin_temp
+        FROM sleep_cycles
+        ORDER BY start DESC
+        LIMIT 1
+      `,
+    );
+    expect(latestSleep?.avg_skin_temp).toBeCloseTo(33.2, 1);
+
+    adapter.close();
+  });
+
+  it('refreshes large histories without spread-based native extrema calls', async () => {
+    const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
+    await initializeDatabase(adapter as never);
+
+    await insertSyntheticHeartSeries(adapter, {
+      count: 5_000,
+      start: new Date(2026, 0, 1, 0, 0, 0),
+      intervalMinutes: 1,
+    });
+
+    const originalMin = Math.min;
+    const originalMax = Math.max;
+    const minSpy = jest.spyOn(Math, 'min').mockImplementation((...values: number[]) => {
+      if (values.length > 1_000) {
+        throw new Error(`Unexpected Math.min call with ${values.length} arguments`);
+      }
+      return originalMin(...values);
+    });
+    const maxSpy = jest.spyOn(Math, 'max').mockImplementation((...values: number[]) => {
+      if (values.length > 1_000) {
+        throw new Error(`Unexpected Math.max call with ${values.length} arguments`);
+      }
+      return originalMax(...values);
+    });
+
+    try {
+      await expect(refreshDerivedData(adapter as never)).resolves.toBeUndefined();
+    } finally {
+      minSpy.mockRestore();
+      maxSpy.mockRestore();
+      adapter.close();
+    }
   });
 });

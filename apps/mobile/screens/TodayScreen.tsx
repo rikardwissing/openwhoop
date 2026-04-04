@@ -12,9 +12,9 @@ import { PulsingHeartIcon } from '@/components/ui/PulsingHeartIcon';
 import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
 import { StatChip } from '@/components/ui/StatChip';
 import { colors, typography } from '@/constants/theme';
-import { useDashboardSnapshot } from '@/hooks/useHealthData';
+import { useDashboardSnapshot, useDerivedRefreshState } from '@/hooks/useHealthData';
 import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
-import { useWearableSync } from '@/providers/WearableSyncProvider';
+import { useWearableSyncState } from '@/providers/WearableSyncProvider';
 import { hasFreshLiveHeartRate } from '@/types/device';
 import type { SleepStageSelection, TrendSelection } from '@/types/health';
 import {
@@ -26,7 +26,8 @@ import {
 
 export function TodayScreen() {
   const state = useDashboardSnapshot();
-  const { deviceState } = useWearableSync();
+  const derivedRefresh = useDerivedRefreshState();
+  const { deviceState } = useWearableSyncState();
   const { onRefresh, refreshing } = useWearableRefreshControl();
   const [heartSelection, setHeartSelection] = useState<TrendSelection | null>(null);
   const [sleepSelection, setSleepSelection] = useState<SleepStageSelection | null>(null);
@@ -80,11 +81,23 @@ export function TodayScreen() {
       : strainSelection.point.value === null
         ? 'No strain data for this point'
         : 'Selected strain point';
+  const derivedRefreshMessage =
+    derivedRefresh.data?.status === 'pending' || derivedRefresh.data?.status === 'processing'
+      ? derivedRefresh.data.isFirstSync
+        ? 'Preparing insights from your first sync...'
+        : 'Updating insights with your latest sync...'
+      : null;
 
   return (
     <ScreenShell headerIcon="today" headerTitle="Today" onRefresh={onRefresh} refreshing={refreshing}>
       {state.status === 'error' ? (
         <ErrorState message="Showing the last dashboard snapshot while refresh catches up." variant="inline" />
+      ) : null}
+      {derivedRefreshMessage ? (
+        <Text style={styles.syncNotice}>{derivedRefreshMessage}</Text>
+      ) : null}
+      {derivedRefresh.data?.status === 'error' && derivedRefresh.data.lastError ? (
+        <ErrorState message={derivedRefresh.data.lastError} variant="inline" />
       ) : null}
 
       <View>
@@ -257,6 +270,11 @@ const styles = StyleSheet.create({
     fontFamily: typography.body,
     fontSize: 16,
     marginTop: 4,
+  },
+  syncNotice: {
+    color: colors.primaryBright,
+    fontFamily: typography.bodySemiBold,
+    fontSize: 13,
   },
   summaryRow: {
     flexDirection: 'row',

@@ -1,7 +1,7 @@
 import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
 
 import { colors, typography } from '@/constants/theme';
-import { useWearableSync } from '@/providers/WearableSyncProvider';
+import { useWearableSyncProgress } from '@/providers/WearableSyncProvider';
 import { isBlockingSyncStatus, type SyncStatus } from '@/types/device';
 
 function titleForStatus(status: SyncStatus) {
@@ -20,7 +20,7 @@ function titleForStatus(status: SyncStatus) {
 }
 
 export function WearableProgressOverlay() {
-  const { progress } = useWearableSync();
+  const { progress } = useWearableSyncProgress();
 
   if (!isBlockingSyncStatus(progress.status) || progress.showOverlay === false) {
     return null;

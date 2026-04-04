@@ -9,7 +9,18 @@ const mockAppState = {
 };
 const mockHealthRepository = {
   invalidateCaches: jest.fn(),
-  warmCaches: jest.fn(async () => {}),
+  primeDashboardSnapshot: jest.fn(async () => false),
+  refreshDashboardSnapshot: jest.fn(async () => true),
+  getDerivedRefreshState: jest.fn(async () => ({
+    status: 'idle',
+    pendingFromTime: null,
+    pendingToTime: null,
+    lastProcessedFromTime: null,
+    lastProcessedToTime: null,
+    lastError: null,
+    isFirstSync: false,
+  })),
+  processPendingDerivedRefresh: jest.fn(async () => false),
 };
 const mockUseSQLiteContext = jest.fn(() => ({}));
 const mockFreshBackgroundDb = {
@@ -133,7 +144,14 @@ jest.mock('@/services/ble/WearableSyncService', () => ({
   }),
 }));
 
-import { WearableSyncProvider, useWearableSync } from '@/providers/WearableSyncProvider';
+import {
+  WearableSyncProvider,
+  useWearableLiveEvents,
+  useWearableSync,
+  useWearableSyncActions,
+  useWearableSyncProgress,
+  useWearableSyncState,
+} from '@/providers/WearableSyncProvider';
 import { getBackgroundSyncState } from '@/services/background/backgroundSyncState';
 import {
   disableBackgroundSync,
@@ -224,6 +242,44 @@ function ProgressHarness() {
   );
 }
 
+let deviceOnlyRenderCount = 0;
+let liveEventsOnlyRenderCount = 0;
+let progressOnlyRenderCount = 0;
+
+function DeviceOnlyHarness() {
+  deviceOnlyRenderCount += 1;
+  const { deviceState } = useWearableSyncState();
+
+  return <Text testID="device-only-name">{deviceState.name ?? '--'}</Text>;
+}
+
+function LiveEventsOnlyHarness() {
+  liveEventsOnlyRenderCount += 1;
+  const { liveEvents } = useWearableLiveEvents();
+
+  return <Text testID="live-events-only-count">{String(liveEvents.length)}</Text>;
+}
+
+function ProgressOnlyHarness() {
+  progressOnlyRenderCount += 1;
+  const { progress } = useWearableSyncProgress();
+
+  return <Text testID="progress-only-status">{progress.status}</Text>;
+}
+
+function SyncActionHarness() {
+  const { syncSelected } = useWearableSyncActions();
+
+  return (
+    <Pressable
+      testID="isolated-run-sync"
+      onPress={() => {
+        void syncSelected({ showOverlay: false });
+      }}
+    />
+  );
+}
+
 function renderProviderHarness() {
   return render(
     <WearableSyncProvider>
@@ -287,7 +343,10 @@ describe('WearableSyncProvider live events', () => {
     jest.restoreAllMocks();
     mockRefreshHealthData.mockClear();
     mockHealthRepository.invalidateCaches.mockClear();
-    mockHealthRepository.warmCaches.mockClear();
+    mockHealthRepository.primeDashboardSnapshot.mockClear();
+    mockHealthRepository.refreshDashboardSnapshot.mockClear();
+    mockHealthRepository.getDerivedRefreshState.mockClear();
+    mockHealthRepository.processPendingDerivedRefresh.mockClear();
     mockUseSQLiteContext.mockClear();
     mockUseSQLiteContext.mockReturnValue({});
     mockOpenAppDatabaseAsync.mockClear();
@@ -301,6 +360,9 @@ describe('WearableSyncProvider live events', () => {
     mockServiceInstances.length = 0;
     mockAppState.currentState = 'active';
     appStateListeners.clear();
+    deviceOnlyRenderCount = 0;
+    liveEventsOnlyRenderCount = 0;
+    progressOnlyRenderCount = 0;
     Object.defineProperty(AppState, 'currentState', {
       configurable: true,
       value: 'active',
@@ -504,6 +566,73 @@ describe('WearableSyncProvider live events', () => {
     await advanceTimersAndFlush(5_000);
 
     expect(service.syncSelected).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not rerender device-only consumers when live events change', async () => {
+    const screen = render(
+      <WearableSyncProvider>
+        <DeviceOnlyHarness />
+        <LiveEventsOnlyHarness />
+      </WearableSyncProvider>,
+    );
+    const service = latestService();
+
+    await waitFor(() => {
+      expect(service.startLiveUpdates).toHaveBeenCalledTimes(1);
+      expect(screen.getByTestId('device-only-name').props.children).toBe('Neo Strap');
+    });
+
+    const deviceBaseline = deviceOnlyRenderCount;
+    const liveBaseline = liveEventsOnlyRenderCount;
+
+    act(() => {
+      service.emitLiveEvent(buildLiveEvent(1));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('live-events-only-count').props.children).toBe('1');
+    });
+
+    expect(liveEventsOnlyRenderCount).toBeGreaterThan(liveBaseline);
+    expect(deviceOnlyRenderCount).toBe(deviceBaseline);
+  });
+
+  it('does not rerender live-event-only consumers when sync progress changes', async () => {
+    const screen = render(
+      <WearableSyncProvider>
+        <LiveEventsOnlyHarness />
+        <ProgressOnlyHarness />
+        <SyncActionHarness />
+      </WearableSyncProvider>,
+    );
+    const service = latestService();
+    service.syncSelected.mockImplementationOnce(async (...args: unknown[]) => {
+      const onProgress = args[0] as ((progress: SyncProgress) => void) | undefined;
+
+      onProgress?.({
+        status: 'connecting',
+        message: 'Connecting in isolated render test...',
+      });
+
+      return {
+        importedReadings: 2,
+        completedAt: '2026-04-02 10:05:00',
+      };
+    });
+
+    await flushAsyncState();
+
+    const liveBaseline = liveEventsOnlyRenderCount;
+    const progressBaseline = progressOnlyRenderCount;
+
+    fireEvent.press(screen.getByTestId('isolated-run-sync'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('progress-only-status').props.children).toBe('connecting');
+    });
+
+    expect(progressOnlyRenderCount).toBeGreaterThan(progressBaseline);
+    expect(liveEventsOnlyRenderCount).toBe(liveBaseline);
   });
 
 });
