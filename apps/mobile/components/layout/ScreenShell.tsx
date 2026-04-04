@@ -1,9 +1,10 @@
 import { LinearGradient } from 'expo-linear-gradient';
-import type { ReactNode } from 'react';
+import { useCallback, useMemo, useState, type ReactNode } from 'react';
 import { RefreshControl, ScrollView, StyleSheet, View, type StyleProp, type ViewStyle } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AppHeader, type AppHeaderIcon } from '@/components/layout/AppHeader';
+import { ScreenScrollContext } from '@/components/layout/ScreenScrollContext';
 import { colors, spacing } from '@/constants/theme';
 
 export function ScreenShell({
@@ -26,6 +27,23 @@ export function ScreenShell({
   refreshing?: boolean;
 }) {
   const refreshEnabled = typeof onRefresh === 'function';
+  const [activeScrollLocks, setActiveScrollLocks] = useState(0);
+
+  const acquireScrollLock = useCallback(() => {
+    let released = false;
+    setActiveScrollLocks((current) => current + 1);
+
+    return () => {
+      if (released) {
+        return;
+      }
+
+      released = true;
+      setActiveScrollLocks((current) => Math.max(0, current - 1));
+    };
+  }, []);
+
+  const screenScrollContextValue = useMemo(() => acquireScrollLock, [acquireScrollLock]);
 
   return (
     <View style={styles.root}>
@@ -37,33 +55,36 @@ export function ScreenShell({
       />
       <View style={[styles.glow, styles.glowTop]} />
       <View style={[styles.glow, styles.glowBottom]} />
-      <SafeAreaView edges={['top']} style={styles.safeArea}>
-        <ScrollView
-          alwaysBounceVertical={refreshEnabled}
-          bounces={refreshEnabled}
-          contentContainerStyle={[styles.content, contentStyle]}
-          refreshControl={
-            refreshEnabled ? (
-              <RefreshControl
-                onRefresh={onRefresh}
-                progressBackgroundColor="rgba(18, 28, 42, 0.92)"
-                refreshing={refreshing}
-                tintColor={colors.primary}
+      <ScreenScrollContext.Provider value={screenScrollContextValue}>
+        <SafeAreaView edges={['top']} style={styles.safeArea}>
+          <ScrollView
+            alwaysBounceVertical={refreshEnabled && activeScrollLocks === 0}
+            bounces={refreshEnabled && activeScrollLocks === 0}
+            contentContainerStyle={[styles.content, contentStyle]}
+            refreshControl={
+              refreshEnabled ? (
+                <RefreshControl
+                  onRefresh={onRefresh}
+                  progressBackgroundColor="rgba(18, 28, 42, 0.92)"
+                  refreshing={refreshing}
+                  tintColor={colors.primary}
+                />
+              ) : undefined
+            }
+            scrollEnabled={activeScrollLocks === 0}
+            showsVerticalScrollIndicator={false}>
+            {headerTitle && headerIcon ? (
+              <AppHeader
+                icon={headerIcon}
+                settingsActive={headerSettingsActive}
+                settingsDisabled={headerSettingsDisabled}
+                title={headerTitle}
               />
-            ) : undefined
-          }
-          showsVerticalScrollIndicator={false}>
-          {headerTitle && headerIcon ? (
-            <AppHeader
-              icon={headerIcon}
-              settingsActive={headerSettingsActive}
-              settingsDisabled={headerSettingsDisabled}
-              title={headerTitle}
-            />
-          ) : null}
-          {children}
-        </ScrollView>
-      </SafeAreaView>
+            ) : null}
+            {children}
+          </ScrollView>
+        </SafeAreaView>
+      </ScreenScrollContext.Provider>
     </View>
   );
 }

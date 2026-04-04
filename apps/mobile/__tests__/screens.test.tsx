@@ -234,6 +234,27 @@ describe('screen rendering', () => {
     expect(screen.queryByText('82.4%')).toBeNull();
   });
 
+  it('moves backward and forward through sleep days', async () => {
+    const screen = renderWithProviders(<SleepScreen />);
+
+    await screen.findByTestId('sleep-last-night-stage-chart');
+    expect(screen.getByTestId('sleep-selected-session-label').props.children).toBe('Apr 23');
+    expect(screen.getByText('82%')).toBeTruthy();
+
+    fireEvent.press(screen.getByTestId('sleep-day-backward-button'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('sleep-selected-session-label').props.children).toBe('Apr 22');
+    });
+    expect(screen.getByText('86%')).toBeTruthy();
+
+    fireEvent.press(screen.getByTestId('sleep-day-forward-button'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('sleep-selected-session-label').props.children).toBe('Apr 23');
+    });
+  });
+
   it('swaps sleep-stage readout while scrubbing and restores on release', async () => {
     const screen = renderWithProviders(<SleepScreen />);
     await screen.findByTestId('sleep-last-night-stage-chart');

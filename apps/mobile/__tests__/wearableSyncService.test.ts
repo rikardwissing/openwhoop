@@ -43,10 +43,10 @@ function createVersionPayload(harvard = [1, 2, 3, 4], boylston = [5, 6, 7, 8]) {
   return payload;
 }
 
-function createHistoryPayload(unixSeconds: number) {
+function createHistoryPayload(unixSeconds: number, bpm = 64) {
   const payload = new Uint8Array(24);
   writeU32LE(payload, 4, unixSeconds);
-  payload[14] = 64;
+  payload[14] = bpm;
   payload[15] = 0;
   return payload;
 }
@@ -438,6 +438,30 @@ describe('WearableSyncService battery refresh', () => {
     });
   });
 
+  it('ignores implausible realtime heart rate placeholders', async () => {
+    const device = new MockDevice();
+    const db = new MockDb(null);
+    const manager = new MockBleManager(device);
+    const service = new WearableSyncService(db as never, manager as never);
+    const updates: Array<Awaited<ReturnType<typeof service.getDeviceState>>> = [];
+
+    await service.startLiveUpdates((nextState) => {
+      updates.push(nextState);
+    });
+
+    device.emitRealtimeHeartRate(0x12345678, 1);
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    await expect(service.getDeviceState()).resolves.toMatchObject({
+      liveHeartRate: null,
+    });
+    expect(updates.some((state) => state.liveHeartRate === 1)).toBe(false);
+
+    await service.stopLiveUpdates();
+  });
+
   it('updates charging status to not_charging when charging stops', async () => {
     const device = new MockDevice();
     const db = new MockDb(null);
@@ -623,5 +647,35 @@ describe('WearableSyncService battery refresh', () => {
       formatSqliteDateTime(new Date(1_710_000_001 * 1000)),
       formatSqliteDateTime(new Date((1_710_000_001 + 250 * 60) * 1000)),
     );
+  });
+
+  it('skips empty history placeholder rows with implausible bpm values', async () => {
+    const device = new MockDevice();
+    device.batteryTenthsPercent = 845;
+    device.historyFrames = [
+      {
+        characteristic: DATA_FROM_STRAP_UUID,
+        frame: framePacket(PacketType.HistoricalData, 0, 0, createHistoryPayload(1_710_000_001, 1)),
+      },
+      {
+        characteristic: DATA_FROM_STRAP_UUID,
+        frame: framePacket(
+          PacketType.Metadata,
+          0,
+          MetadataType.HistoryComplete,
+          createMetadataPayload(1_710_000_001, 0),
+        ),
+      },
+    ];
+    const db = new BufferedHistoryDb(null);
+    const manager = new MockBleManager(device);
+    const service = new WearableSyncService(db as never, manager as never);
+
+    const result = await service.syncSelected();
+
+    expect(result.importedReadings).toBe(1);
+    expect(db.heartInsertCount).toBe(0);
+    expect(mockRefreshHeartAggregatesForRange).not.toHaveBeenCalled();
+    expect(mockMarkDerivedRefreshPending).not.toHaveBeenCalled();
   });
 });

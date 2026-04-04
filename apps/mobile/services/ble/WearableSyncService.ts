@@ -10,6 +10,7 @@ import { PacketAssembler, base64ToBytes, bytesToBase64, disableAlarmPacket, ente
 import { HistorySyncWatchdog } from '@/services/ble/syncWatchdog';
 import type { ChargingState, DeviceState, SyncProgress, SyncResult, SyncSource, WearState, WearableLiveEvent, WearableScanResult } from '@/types/device';
 import { formatSqliteDateTime } from '@/utils/dateTime';
+import { isPlausibleRecordedBpm } from '@/utils/heartRate';
 
 const SELECTED_DEVICE_SQL = `
   INSERT INTO device_state (id, name, last_seen_at, last_synced_at, firmware, battery_percent, charging_status, body_status, sync_error)
@@ -39,6 +40,14 @@ function delay(ms: number) {
 
 function serializeSensorData(value: SensorDataPacket | null) {
   return value ? JSON.stringify(value) : null;
+}
+
+function shouldPersistHistoryReading(reading: {
+  bpm: number;
+  rr: number[];
+  sensorData: SensorDataPacket | null;
+}) {
+  return isPlausibleRecordedBpm(reading.bpm) || reading.rr.length > 0 || reading.sensorData !== null;
 }
 
 function rrToString(rr: number[]) {
@@ -425,8 +434,10 @@ export class WearableSyncService {
       }
 
       if (parsed.type === 'realtimeHr') {
-        this.updateLiveHeartRate(parsed.heartRate.bpm);
-        onDeviceState(await this.getDeviceState());
+        if (isPlausibleRecordedBpm(parsed.heartRate.bpm)) {
+          this.updateLiveHeartRate(parsed.heartRate.bpm);
+          onDeviceState(await this.getDeviceState());
+        }
         return;
       }
 
@@ -791,6 +802,11 @@ export class WearableSyncService {
                 importedReadings += 1;
                 lastHistoryCursor = parsed.reading.unix;
                 watchdog.markProgress();
+
+                if (!shouldPersistHistoryReading(parsed.reading)) {
+                  continue;
+                }
+
                 const readingTime = formatSqliteDateTime(new Date(parsed.reading.unix));
                 earliestImportedTime =
                   earliestImportedTime === null || readingTime < earliestImportedTime

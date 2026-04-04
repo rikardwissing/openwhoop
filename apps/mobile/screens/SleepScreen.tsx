@@ -11,23 +11,30 @@ import { GlassCard } from '@/components/ui/GlassCard';
 import { GlowRing } from '@/components/ui/GlowRing';
 import { MetricCard } from '@/components/ui/MetricCard';
 import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
-import { colors, typography } from '@/constants/theme';
+import { colors, sleepStageColors, typography } from '@/constants/theme';
 import { useDerivedRefreshState, useSleepHistory } from '@/hooks/useHealthData';
 import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
 import { useHealthRepository } from '@/providers/HealthDataProvider';
 import { useWearableSyncActions, useWearableSyncState } from '@/providers/WearableSyncProvider';
 import { syncSleepPreparationReminder } from '@/services/notifications/sleepPreparationReminder';
-import type { SleepStageSelection, TrendSelection } from '@/types/health';
+import type { SleepStage, SleepStageSelection, TrendSelection } from '@/types/health';
 import {
   formatClockRangeFromStartLabel,
   formatCompactDuration,
   formatDuration,
+  describeSleepScore,
   formatMetricValue,
   formatNullablePercent,
   formatSleepStageLabel,
 } from '@/utils/formatters';
 import { formatClockMinutes } from '@/utils/dateTime';
 import { calculateOptimalBedtimeMinutes, nextUpcomingClockDate, roundClockMinutes } from '@/utils/sleepPlan';
+
+const stageBreakdownOrder: SleepStage[] = ['deep', 'light', 'rem', 'awake'];
+
+function formatStageBadgeLabel(stage: SleepStage) {
+  return stage === 'rem' ? 'REM' : `${stage[0].toUpperCase()}${stage.slice(1)}`;
+}
 
 export function SleepScreen() {
   const repository = useHealthRepository();
@@ -45,11 +52,13 @@ export function SleepScreen() {
   const [savingAlarm, setSavingAlarm] = useState(false);
   const [alarmError, setAlarmError] = useState<string | null>(null);
   const [reminderNotice, setReminderNotice] = useState<string | null>(null);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const wakeSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wakeSaveQueueRef = useRef(Promise.resolve());
   const targetWakeMinutesRef = useRef<number | null>(null);
   const alarmEnabledRef = useRef<boolean | null>(null);
   const data = state.data;
+  const sessions = data?.sessions ?? [];
 
   useEffect(() => {
     if (!data) {
@@ -68,12 +77,27 @@ export function SleepScreen() {
   }, [data]);
 
   useEffect(() => {
+    if (sessions.length === 0) {
+      setSelectedSessionId(null);
+      return;
+    }
+
+    setSelectedSessionId((current) =>
+      current && sessions.some((session) => session.id === current) ? current : sessions[0].id,
+    );
+  }, [sessions]);
+
+  useEffect(() => {
     targetWakeMinutesRef.current = targetWakeMinutes;
   }, [targetWakeMinutes]);
 
   useEffect(() => {
     alarmEnabledRef.current = alarmEnabled;
   }, [alarmEnabled]);
+
+  useEffect(() => {
+    setStageSelection(null);
+  }, [selectedSessionId]);
 
   useEffect(() => () => {
     if (wakeSaveTimeoutRef.current) {
@@ -101,7 +125,60 @@ export function SleepScreen() {
     return null;
   }
 
-  const latestSession = data.sessions[0] ?? null;
+  const selectedSessionIndex = sessions.findIndex((session) => session.id === selectedSessionId);
+  const resolvedSelectedSessionIndex =
+    selectedSessionIndex >= 0 ? selectedSessionIndex : sessions.length > 0 ? 0 : -1;
+  const selectedSession =
+    resolvedSelectedSessionIndex >= 0 ? sessions[resolvedSelectedSessionIndex] : null;
+  const hasOlderSession =
+    resolvedSelectedSessionIndex >= 0 && resolvedSelectedSessionIndex < sessions.length - 1;
+  const hasNewerSession = resolvedSelectedSessionIndex > 0;
+  const displayedSleepScore = selectedSession?.score ?? data.headlineScore;
+  const displayedSleepLabel = selectedSession
+    ? describeSleepScore(selectedSession.score)
+    : data.headlineLabel;
+  const displayedBedtime = selectedSession?.bedtime ?? data.bedtime;
+  const displayedWakeTime = selectedSession?.wakeTime ?? data.wakeTime;
+  const displayedDurationMinutes = selectedSession?.durationMinutes ?? data.durationMinutes;
+  const displayedTimeInBedMinutes = selectedSession?.timeInBedMinutes ?? data.timeInBedMinutes;
+  const displayedAwakeMinutes =
+    displayedTimeInBedMinutes === null || displayedDurationMinutes === null
+      ? null
+      : Math.max(0, displayedTimeInBedMinutes - displayedDurationMinutes);
+  const selectedStageTotals = selectedSession
+    ? selectedSession.stages.reduce<Record<SleepStage, number>>(
+        (totals, segment) => {
+          totals[segment.stage] += segment.minutes;
+          return totals;
+        },
+        {
+          awake: 0,
+          rem: 0,
+          deep: 0,
+          light: 0,
+        },
+      )
+    : null;
+  const selectedSessionStageMinutes = selectedStageTotals
+    ? stageBreakdownOrder.reduce((sum, stage) => sum + selectedStageTotals[stage], 0)
+    : 0;
+  const selectedSessionMiddleLabel =
+    selectedSession && selectedSessionStageMinutes > 0
+      ? formatClockRangeFromStartLabel(
+          selectedSession.bedtime,
+          selectedSessionStageMinutes / 2,
+          selectedSessionStageMinutes / 2,
+        ).split('-')[0]
+      : '3:00 AM';
+  const selectedStageBreakdown = selectedStageTotals
+    ? stageBreakdownOrder
+        .filter((stage) => selectedStageTotals[stage] > 0)
+        .map((stage) => ({
+          stage,
+          label: formatStageBadgeLabel(stage),
+          minutes: selectedStageTotals[stage],
+        }))
+    : [];
   const resolvedTargetWakeMinutes = targetWakeMinutes ?? data.sleepPlan.targetWakeMinutes;
   const resolvedAlarmEnabled = alarmEnabled ?? data.sleepPlan.alarmEnabled;
   const displayedOptimalBedtimeMinutes = calculateOptimalBedtimeMinutes(
@@ -122,6 +199,22 @@ export function SleepScreen() {
         ? 'Preparing insights from your first sync...'
         : 'Updating sleep insights with your latest sync...'
       : null;
+
+  const selectOlderSession = () => {
+    if (!hasOlderSession) {
+      return;
+    }
+
+    setSelectedSessionId(sessions[resolvedSelectedSessionIndex + 1]?.id ?? null);
+  };
+
+  const selectNewerSession = () => {
+    if (!hasNewerSession) {
+      return;
+    }
+
+    setSelectedSessionId(sessions[resolvedSelectedSessionIndex - 1]?.id ?? null);
+  };
 
   const queueWakeTargetCommit = () => {
     if (wakeSaveTimeoutRef.current) {
@@ -278,22 +371,27 @@ export function SleepScreen() {
         <Text style={styles.subtitle}>Rhythm, recovery, and stage balance across the last 14 nights.</Text>
       </View>
 
-      <GlowRing caption="Sleep Score" label={data.headlineLabel} score={data.headlineScore} size={238} />
+      <GlowRing
+        caption={selectedSession?.dateLabel ?? 'Sleep Score'}
+        label={displayedSleepLabel}
+        score={displayedSleepScore}
+        size={238}
+      />
 
       <View style={styles.metricGrid}>
         <MetricCard
           accentColor={colors.violet}
           style={styles.metricCard}
-          subtitle={`${data.bedtime} to ${data.wakeTime}`}
+          subtitle={`${displayedBedtime} to ${displayedWakeTime}`}
           title="Time Asleep"
-          value={formatCompactDuration(data.durationMinutes)}
+          value={formatCompactDuration(displayedDurationMinutes)}
         />
         <MetricCard
           accentColor={colors.aqua}
           style={styles.metricCard}
-          subtitle={`Awake ${data.timeInBedMinutes === null || data.durationMinutes === null ? '--' : formatCompactDuration(Math.max(0, data.timeInBedMinutes - data.durationMinutes))}`}
+          subtitle={`Awake ${displayedAwakeMinutes === null ? '--' : formatCompactDuration(displayedAwakeMinutes)}`}
           title="Time in Bed"
-          value={formatCompactDuration(data.timeInBedMinutes)}
+          value={formatCompactDuration(displayedTimeInBedMinutes)}
         />
       </View>
 
@@ -465,14 +563,14 @@ export function SleepScreen() {
               ? durationSelection.point.value === null
                 ? 'No overnight duration recorded for this day'
                 : 'Selected time asleep'
-              : `Bedtime ${data.bedtime} · Wake ${data.wakeTime}`
+              : `Bedtime ${displayedBedtime} · Wake ${displayedWakeTime}`
           }
-          label={durationSelection?.point.label ?? 'Latest duration'}
+          label={durationSelection?.point.label ?? `${selectedSession?.dateLabel ?? 'Latest'} duration`}
           style={styles.readout}
           value={
             durationSelection
               ? formatDuration(durationSelection.point.value)
-              : formatDuration(data.durationMinutes)
+              : formatDuration(displayedDurationMinutes)
           }
         />
         <TrendChart
@@ -481,27 +579,89 @@ export function SleepScreen() {
           points={data.durationTrend}
           testID="sleep-duration-trend-chart"
         />
-        {!durationSelection ? <Text style={styles.footnote}>Latest duration: {formatDuration(data.durationMinutes)}</Text> : null}
+        {!durationSelection ? (
+          <Text style={styles.footnote}>
+            {selectedSession ? `${selectedSession.dateLabel} duration` : 'Latest duration'}:{' '}
+            {formatDuration(displayedDurationMinutes)}
+          </Text>
+        ) : null}
       </GlassCard>
 
       <GlassCard accentColor={colors.indigo}>
-        <SectionHeader title="Last Night Stages" trailing={latestSession?.dateLabel ?? 'Waiting'} />
-        {latestSession ? (
+        <SectionHeader
+          title="Night Stages"
+          trailing={selectedSession ? `${resolvedSelectedSessionIndex + 1} of ${sessions.length}` : 'Waiting'}
+        />
+        {selectedSession ? (
           <>
+            <View style={styles.sessionNavigator}>
+              <Pressable
+                accessibilityLabel="Show older sleep day"
+                accessibilityRole="button"
+                disabled={!hasOlderSession}
+                onPress={selectOlderSession}
+                style={({ pressed }) => [
+                  styles.sessionNavigatorButton,
+                  !hasOlderSession ? styles.sessionNavigatorButtonDisabled : null,
+                  pressed ? styles.targetButtonPressed : null,
+                ]}
+                testID="sleep-day-backward-button">
+                <Ionicons color={hasOlderSession ? colors.text : colors.muted} name="chevron-back" size={14} />
+                <Text style={styles.sessionNavigatorButtonLabel}>Older</Text>
+              </Pressable>
+
+              <View style={styles.sessionNavigatorCenter}>
+                <Text style={styles.sessionNavigatorDate} testID="sleep-selected-session-label">
+                  {selectedSession.dateLabel}
+                </Text>
+                <Text style={styles.sessionNavigatorMeta}>
+                  {selectedSession.bedtime} to {selectedSession.wakeTime}
+                </Text>
+              </View>
+
+              <Pressable
+                accessibilityLabel="Show newer sleep day"
+                accessibilityRole="button"
+                disabled={!hasNewerSession}
+                onPress={selectNewerSession}
+                style={({ pressed }) => [
+                  styles.sessionNavigatorButton,
+                  !hasNewerSession ? styles.sessionNavigatorButtonDisabled : null,
+                  pressed ? styles.targetButtonPressed : null,
+                ]}
+                testID="sleep-day-forward-button">
+                <Text style={styles.sessionNavigatorButtonLabel}>Newer</Text>
+                <Ionicons color={hasNewerSession ? colors.text : colors.muted} name="chevron-forward" size={14} />
+              </Pressable>
+            </View>
+
+            <View style={styles.stageOverview}>
+              <View>
+                <Text style={styles.stageOverviewLabel}>Sleep architecture</Text>
+                <Text style={styles.stageOverviewValue}>{formatCompactDuration(selectedSession.durationMinutes)}</Text>
+              </View>
+              <View style={styles.stageOverviewBadge}>
+                <Text style={styles.stageOverviewBadgeLabel}>
+                  Efficiency {formatNullablePercent(selectedSession.efficiency)}
+                </Text>
+              </View>
+            </View>
+
             <SleepStageChart
               accentColor={colors.indigo}
-              endLabel={latestSession.wakeTime}
-              middleLabel="3:00 AM"
+              endLabel={selectedSession.wakeTime}
+              middleLabel={selectedSessionMiddleLabel}
               onSelectionChange={setStageSelection}
-              segments={latestSession.stages}
-              startLabel={latestSession.bedtime}
+              segments={selectedSession.stages}
+              size="expanded"
+              startLabel={selectedSession.bedtime}
               testID="sleep-last-night-stage-chart"
             />
             {stageSelection ? (
               <ChartReadout
                 accentColor={colors.indigo}
                 detail={`${stageSelection.segment.minutes}m · ${formatClockRangeFromStartLabel(
-                  latestSession.bedtime,
+                  selectedSession.bedtime,
                   stageSelection.startMinute,
                   stageSelection.endMinute,
                 )}`}
@@ -511,12 +671,27 @@ export function SleepScreen() {
                 value={`${stageSelection.segment.minutes}m`}
               />
             ) : (
-              <View style={styles.sessionStats}>
-                <Text style={styles.sessionStat}>Efficiency {formatNullablePercent(latestSession.efficiency)}</Text>
-                <Text style={styles.sessionStat}>REM {latestSession.remMinutes}m</Text>
-                <Text style={styles.sessionStat}>Deep {latestSession.deepMinutes}m</Text>
-              </View>
+              <Text style={styles.stageHint}>Swipe across the bar to inspect each stage slice.</Text>
             )}
+            {selectedStageBreakdown.length > 0 ? (
+              <View style={styles.stageBreakdownGrid}>
+                {selectedStageBreakdown.map(({ stage, label, minutes }) => (
+                  <View
+                    key={stage}
+                    style={[
+                      styles.stageBreakdownChip,
+                      stageSelection?.segment.stage === stage ? styles.stageBreakdownChipSelected : null,
+                      { borderColor: sleepStageColors[stage] },
+                    ]}>
+                    <View style={styles.stageBreakdownChipLeft}>
+                      <View style={[styles.stageBreakdownDot, { backgroundColor: sleepStageColors[stage] }]} />
+                      <Text style={styles.stageBreakdownLabel}>{label}</Text>
+                    </View>
+                    <Text style={styles.stageBreakdownValue}>{formatCompactDuration(minutes)}</Text>
+                  </View>
+                ))}
+              </View>
+            ) : null}
           </>
         ) : (
           <Text style={styles.emptyText}>{data.missingReason ?? 'Sleep stages will appear after the first full overnight sync.'}</Text>
@@ -526,7 +701,18 @@ export function SleepScreen() {
       <GlassCard accentColor={colors.success}>
         <SectionHeader title="Recent Nights" trailing="Most recent sessions" />
         {data.sessions.length > 0 ? data.sessions.map((session, index) => (
-          <View key={session.id} style={[styles.sessionRow, index < data.sessions.length - 1 ? styles.sessionDivider : null]}>
+          <Pressable
+            accessibilityRole="button"
+            key={session.id}
+            onPress={() => {
+              setSelectedSessionId(session.id);
+            }}
+            style={({ pressed }) => [
+              styles.sessionRow,
+              session.id === selectedSession?.id ? styles.sessionRowSelected : null,
+              index < data.sessions.length - 1 ? styles.sessionDivider : null,
+              pressed ? styles.targetButtonPressed : null,
+            ]}>
             <View>
               <Text style={styles.sessionDate}>{session.dateLabel}</Text>
               <Text style={styles.sessionTime}>
@@ -537,7 +723,7 @@ export function SleepScreen() {
               <Text style={styles.sessionScore}>{formatMetricValue(session.score, 0)}</Text>
               <Ionicons color={colors.success} name="moon" size={16} />
             </View>
-          </View>
+          </Pressable>
         )) : (
           <Text style={styles.emptyText}>{data.missingReason ?? 'Recent nights will appear after the first full overnight sync.'}</Text>
         )}
@@ -728,24 +914,143 @@ const styles = StyleSheet.create({
   readout: {
     marginBottom: 10,
   },
-  sessionStats: {
+  sessionNavigator: {
+    alignItems: 'center',
     flexDirection: 'row',
+    gap: 10,
+    marginBottom: 12,
+  },
+  sessionNavigatorButton: {
+    alignItems: 'center',
+    backgroundColor: colors.surfaceMuted,
+    borderColor: colors.border,
+    borderRadius: 14,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 4,
+    minWidth: 78,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+  },
+  sessionNavigatorButtonDisabled: {
+    opacity: 0.45,
+  },
+  sessionNavigatorButtonLabel: {
+    color: colors.text,
+    fontFamily: typography.bodySemiBold,
+    fontSize: 12,
+  },
+  sessionNavigatorCenter: {
+    flex: 1,
+  },
+  sessionNavigatorDate: {
+    color: colors.text,
+    fontFamily: typography.headingMedium,
+    fontSize: 18,
+    textAlign: 'center',
+  },
+  sessionNavigatorMeta: {
+    color: colors.muted,
+    fontFamily: typography.body,
+    fontSize: 12,
+    marginTop: 2,
+    textAlign: 'center',
+  },
+  stageOverview: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 12,
     justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  stageOverviewLabel: {
+    color: colors.subtle,
+    fontFamily: typography.body,
+    fontSize: 11,
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
+  },
+  stageOverviewValue: {
+    color: colors.text,
+    fontFamily: typography.headingMedium,
+    fontSize: 26,
     marginTop: 6,
   },
-  sessionStat: {
-    color: colors.muted,
+  stageOverviewBadge: {
+    backgroundColor: colors.surfaceMuted,
+    borderColor: colors.indigo,
+    borderRadius: 999,
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  stageOverviewBadgeLabel: {
+    color: colors.text,
     fontFamily: typography.bodySemiBold,
     fontSize: 12,
   },
   stageReadout: {
-    marginTop: 8,
+    marginTop: 12,
+  },
+  stageHint: {
+    color: colors.muted,
+    fontFamily: typography.body,
+    fontSize: 12,
+    marginTop: 12,
+  },
+  stageBreakdownGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+    marginTop: 12,
+  },
+  stageBreakdownChip: {
+    alignItems: 'center',
+    backgroundColor: colors.surfaceMuted,
+    borderRadius: 16,
+    borderWidth: 1,
+    flexBasis: '48%',
+    flexDirection: 'row',
+    flexGrow: 1,
+    justifyContent: 'space-between',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  stageBreakdownChipSelected: {
+    backgroundColor: colors.surfaceStrong,
+  },
+  stageBreakdownChipLeft: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 8,
+  },
+  stageBreakdownDot: {
+    borderRadius: 999,
+    height: 8,
+    width: 8,
+  },
+  stageBreakdownLabel: {
+    color: colors.muted,
+    fontFamily: typography.bodySemiBold,
+    fontSize: 12,
+  },
+  stageBreakdownValue: {
+    color: colors.text,
+    fontFamily: typography.bodySemiBold,
+    fontSize: 13,
   },
   sessionRow: {
     alignItems: 'center',
     flexDirection: 'row',
     justifyContent: 'space-between',
+    paddingHorizontal: 10,
     paddingVertical: 12,
+  },
+  sessionRowSelected: {
+    backgroundColor: colors.surfaceMuted,
+    borderColor: colors.borderStrong,
+    borderRadius: 16,
+    borderWidth: 1,
   },
   sessionDivider: {
     borderBottomColor: colors.border,

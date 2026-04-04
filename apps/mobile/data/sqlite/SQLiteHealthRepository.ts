@@ -1,6 +1,7 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 
 import type { HealthCacheScope, HealthRepository } from '@/data/HealthRepository';
+import { generateSleepStageRecords, isAwakePpgValue } from '@/data/sqlite/sleepStages';
 import { DERIVED_DATA_SCHEMA_VERSION } from '@/db/schema';
 import type {
   ActivitySummary,
@@ -21,7 +22,14 @@ import type {
 } from '@/types/health';
 import { addMinutes, dateKey, formatAxisTime, formatClock, formatClockMinutes, formatLongDate, formatShortDate, formatSqliteDateTime, hoursBetween, minutesBetween, parseSqliteDateTime } from '@/utils/dateTime';
 import { describeRecovery, describeSleepScore, formatMetricNumber } from '@/utils/formatters';
-import { sustainedPeakBpm } from '@/utils/heartRate';
+import {
+  filterPlausibleRecordedBpms,
+  isPlausibleRecordedBpm,
+  MAX_PLAUSIBLE_RECORDED_BPM,
+  MIN_PLAUSIBLE_RECORDED_BPM,
+  sanitizeRecordedBpm,
+  sustainedPeakBpm,
+} from '@/utils/heartRate';
 import { clamp, mean, median, stdDev } from '@/utils/math';
 import { BASE_SLEEP_NEED_MINUTES, SLEEP_TARGET_STEP_MINUTES, applyNapCreditToSleepDebt, calculateOptimalBedtimeMinutes, calculateSleepDebtMinutes, calculateSleepNeedMinutes, normalizeClockMinutes, roundClockMinutes } from '@/utils/sleepPlan';
 
@@ -37,6 +45,7 @@ const MIN_SLEEP_DURATION_MINUTES = 60;
 const MAX_SLEEP_PAUSE_MINUTES = 60;
 const ACTIVITY_CHANGE_THRESHOLD_MINUTES = 15;
 const MAX_TRANSIENT_AWAKE_STAGE_MINUTES = 1;
+const MAX_FRAGMENTED_SUMMARY_STAGE_MINUTES = 2;
 const STRESS_WINDOW = 120;
 const SPO2_WINDOW = 30;
 const DEFAULT_TARGET_WAKE_MINUTES = 7 * 60 + 30;
@@ -48,12 +57,6 @@ const SHOULD_LOG_MOBILE_PERF =
   typeof __DEV__ !== 'undefined' &&
   __DEV__ &&
   (typeof process === 'undefined' || process.env.NODE_ENV !== 'test');
-
-const PPG_THRESHOLDS = {
-  inactiveActive: 7629,
-  activeSleep: 15258,
-  sleepAwake: 22888,
-};
 
 type ActivityKind = 'sleep' | 'active';
 
@@ -653,9 +656,10 @@ function createTimeBuckets<T extends { bpm: number; date: Date }>(
 
   for (let bucketStart = firstBucket; bucketStart <= lastBucket; bucketStart += bucketMs) {
     const bucket = buckets.get(bucketStart);
+    const bucketSummary = bucket ? summarizeHeartRows(bucket) : null;
     series.push({
       label: formatAxisTime(new Date(bucketStart)),
-      value: bucket ? Math.round(mean(bucket.map((point) => point.bpm))) : null,
+      value: bucketSummary ? Math.round(bucketSummary.average) : null,
     });
   }
 
@@ -875,28 +879,43 @@ function summarizeNumbers(values: readonly number[]) {
 }
 
 function summarizeHeartRows<T extends { bpm: number }>(rows: readonly T[]) {
-  if (rows.length === 0) {
-    return null;
-  }
-
-  let min = rows[0]!.bpm;
-  let max = rows[0]!.bpm;
+  let min = 0;
+  let max = 0;
   let total = 0;
+  let count = 0;
 
   for (const row of rows) {
-    if (row.bpm < min) {
-      min = row.bpm;
+    const bpm = sanitizeRecordedBpm(row.bpm);
+    if (bpm === null) {
+      continue;
     }
-    if (row.bpm > max) {
-      max = row.bpm;
+
+    if (count === 0) {
+      min = bpm;
+      max = bpm;
+      total = bpm;
+      count = 1;
+      continue;
     }
-    total += row.bpm;
+
+    if (bpm < min) {
+      min = bpm;
+    }
+    if (bpm > max) {
+      max = bpm;
+    }
+    total += bpm;
+    count += 1;
+  }
+
+  if (count === 0) {
+    return null;
   }
 
   return {
     min,
     max,
-    average: total / rows.length,
+    average: total / count,
   };
 }
 
@@ -917,14 +936,17 @@ function buildSleepCycle(period: DetectedPeriod, rows: HeartRateRecord[]): Sleep
 
   const rr = trimmedRows.flatMap((row) => row.rr);
   const hrvValues = calculateRollingHrv(rr);
-  const bpmValues = trimmedRows.map((row) => row.bpm);
   const tempValues = trimmedRows
     .map((row) => resolvedSkinTemp(row))
     .filter((value): value is number => value !== null);
   const sleepId = dateKey(adjustedEnd);
   const trimmedStageRows = buildSleepStageRows(sleepId, trimmedRows);
-  const bpmSummary = summarizeNumbers(bpmValues)!;
+  const bpmSummary = summarizeHeartRows(trimmedRows);
   const hrvSummary = summarizeNumbers(hrvValues);
+
+  if (!bpmSummary) {
+    return null;
+  }
 
   return {
     id: sleepId,
@@ -1050,22 +1072,6 @@ function buildSleepPlanSnapshot(
   };
 }
 
-function classifyPpgStage(ppgGreen: number): SleepStage {
-  if (ppgGreen >= PPG_THRESHOLDS.sleepAwake) {
-    return 'awake';
-  }
-
-  if (ppgGreen >= PPG_THRESHOLDS.activeSleep) {
-    return 'light';
-  }
-
-  if (ppgGreen >= PPG_THRESHOLDS.inactiveActive) {
-    return 'rem';
-  }
-
-  return 'deep';
-}
-
 function buildStageSegments(sleep: SleepCycleRecord, rows: HeartRateRecord[]): SleepStageRecord[] {
   return buildSleepStageRows(sleep.sleepId, rowsInRange(rows, sleep.start, sleep.inBedEnd ?? sleep.end));
 }
@@ -1084,7 +1090,7 @@ function filterRowsForSleepEnd(rows: readonly HeartRateRecord[], sleepEnd: Date)
       return false;
     }
 
-    return row.ppgGreen === null || classifyPpgStage(row.ppgGreen) !== 'awake';
+    return row.ppgGreen === null || !isAwakePpgValue(row.ppgGreen);
   });
 }
 
@@ -1093,45 +1099,21 @@ function exactMinutesBetween(start: Date, end: Date): number {
 }
 
 function buildSleepStageRows(sleepId: string, rows: readonly HeartRateRecord[]): SleepStageRecord[] {
-  const windowRows = rows.filter((row) => row.ppgGreen !== null);
-  if (windowRows.length === 0) {
-    return [];
-  }
-
-  const segments: SleepStageRecord[] = [];
-  let currentStage = classifyPpgStage(windowRows[0].ppgGreen ?? 0);
-  let start = windowRows[0].date;
-  let previous = windowRows[0].date;
-
-  for (let index = 1; index < windowRows.length; index += 1) {
-    const row = windowRows[index];
-    const stage = classifyPpgStage(row.ppgGreen ?? 0);
-    const gapMinutes = minutesBetween(previous, row.date);
-
-    if (stage !== currentStage || gapMinutes > 5) {
-      segments.push({
-        sleepId,
-        start,
-        end: previous,
-        stage: currentStage,
-        isEstimated: true,
-      });
-      currentStage = stage;
-      start = row.date;
-    }
-
-    previous = row.date;
-  }
-
-  segments.push({
+  return generateSleepStageRecords(rows.map((row) => ({
+    date: row.date,
+    bpm: row.bpm,
+    rr: row.rr,
+    ppgGreen: row.ppgGreen,
+    gravity: row.gravity,
+    skinContact: row.skinContact,
+    signalQuality: row.sensorData?.signal_quality ?? null,
+  }))).map((record) => ({
     sleepId,
-    start,
-    end: previous,
-    stage: currentStage,
-    isEstimated: true,
-  });
-
-  return segments;
+    start: record.start,
+    end: record.end,
+    stage: record.stage,
+    isEstimated: record.isEstimated,
+  }));
 }
 
 function trimTrailingAwakeEnd(records: readonly SleepStageRecord[], fallbackEnd: Date): Date {
@@ -1516,28 +1498,32 @@ function resolvedSkinTemp(row: HeartRateRecord): number | null {
 }
 
 function personalizeRestingHr(sleeps: SleepCycleRecord[], dailyMinima: number[]): number {
-  const lastFourteen = sleeps.slice(-14).map((sleep) => sleep.minBpm);
+  const lastFourteen = sleeps
+    .slice(-14)
+    .map((sleep) => sanitizeRecordedBpm(sleep.minBpm))
+    .filter((value): value is number => value !== null);
   const sleepMedian = median(lastFourteen);
   if (sleepMedian !== null) {
     return Math.round(sleepMedian);
   }
 
   const latestSleep = sleeps.at(-1);
-  if (latestSleep) {
-    return latestSleep.minBpm;
+  const latestSleepMinBpm = latestSleep ? sanitizeRecordedBpm(latestSleep.minBpm) : null;
+  if (latestSleepMinBpm !== null) {
+    return latestSleepMinBpm;
   }
 
-  const dailyMedian = median(dailyMinima);
+  const dailyMedian = median(filterPlausibleRecordedBpms(dailyMinima));
   return dailyMedian === null ? 50 : Math.round(dailyMedian);
 }
 
 function personalizeMaxHr(bpms: number[], restingHr: number): number {
-  const observed = (sustainedPeakBpm(bpms) ?? 175) + 5;
+  const observed = (sustainedPeakBpm(filterPlausibleRecordedBpms(bpms)) ?? 175) + 5;
   return clamp(Math.max(observed, restingHr + 100), 180, 205);
 }
 
 function personalizeMaxHrFromObservedPeak(observedPeakBpm: number | null, restingHr: number): number {
-  const observed = (observedPeakBpm ?? 175) + 5;
+  const observed = (sanitizeRecordedBpm(observedPeakBpm) ?? 175) + 5;
   return clamp(Math.max(observed, restingHr + 100), 180, 205);
 }
 
@@ -1629,7 +1615,11 @@ function estimateRecoveryScore(
 
   const priorSleeps = sleeps.slice(-15, -1);
   const hrvBaseline = median(priorSleeps.map((sleep) => sleep.avgHrv).filter((value) => value > 0));
-  const rhrBaseline = median(priorSleeps.map((sleep) => sleep.minBpm));
+  const rhrBaseline = median(
+    priorSleeps
+      .map((sleep) => sanitizeRecordedBpm(sleep.minBpm))
+      .filter((value): value is number => value !== null),
+  );
   const tempBaseline = median(
     priorSleeps
       .map((sleep) => averageTemperatureForRange(heartRows, sleep.start, sleep.end))
@@ -1643,7 +1633,7 @@ function estimateRecoveryScore(
   const breakdown: RecoveryBreakdown = {
     sleepScore: latestSleep?.score ?? null,
     hrvComponent: relativeDelta(latestSleep?.avgHrv ?? null, hrvBaseline),
-    rhrComponent: relativeDelta(latestSleep?.minBpm ?? null, rhrBaseline),
+    rhrComponent: relativeDelta(latestSleep ? sanitizeRecordedBpm(latestSleep.minBpm) : null, rhrBaseline),
     stressComponent: latestStress !== null ? clamp(100 - latestStress * 10, 0, 100) : null,
     tempComponent: tempDelta !== null ? clamp(100 - Math.abs(tempDelta) * 50, 0, 100) : null,
   };
@@ -1704,7 +1694,11 @@ function estimateRecoveryScoreFromSleeps(
 ): { score: number | null; breakdown: RecoveryBreakdown; isEstimated: boolean; missingReason?: string } {
   const priorSleeps = sleeps.slice(-15, -1);
   const hrvBaseline = median(priorSleeps.map((sleep) => sleep.avgHrv).filter((value) => value > 0));
-  const rhrBaseline = median(priorSleeps.map((sleep) => sleep.minBpm));
+  const rhrBaseline = median(
+    priorSleeps
+      .map((sleep) => sanitizeRecordedBpm(sleep.minBpm))
+      .filter((value): value is number => value !== null),
+  );
   const tempBaseline = median(
     priorSleeps
       .map((sleep) => sleep.avgSkinTemp)
@@ -1716,7 +1710,7 @@ function estimateRecoveryScoreFromSleeps(
   const breakdown: RecoveryBreakdown = {
     sleepScore: latestSleep?.score ?? null,
     hrvComponent: relativeDelta(latestSleep?.avgHrv ?? null, hrvBaseline),
-    rhrComponent: relativeDelta(latestSleep?.minBpm ?? null, rhrBaseline),
+    rhrComponent: relativeDelta(latestSleep ? sanitizeRecordedBpm(latestSleep.minBpm) : null, rhrBaseline),
     stressComponent: latestStress !== null ? clamp(100 - latestStress * 10, 0, 100) : null,
     tempComponent: tempDelta !== null ? clamp(100 - Math.abs(tempDelta) * 50, 0, 100) : null,
   };
@@ -1763,15 +1757,20 @@ function buildHeartDayStatsFromRows<T extends { bpm: number; date: Date }>(
   restingHr: number,
   maxHr: number,
 ): HeartDayStatRecord[] {
-  return groupByDay(heartRows).map(([day, rows]) => {
-    const summary = summarizeHeartRows(rows)!;
-    return {
+  return groupByDay(heartRows).flatMap(([day, rows]) => {
+    const validRows = rows.filter((row) => sanitizeRecordedBpm(row.bpm) !== null);
+    const summary = summarizeHeartRows(validRows);
+    if (!summary) {
+      return [];
+    }
+
+    return [{
       day,
       minBpm: summary.min,
       avgBpm: summary.average,
       maxBpm: summary.max,
-      strainScore: calculateStrain(rows, maxHr, restingHr),
-    };
+      strainScore: calculateStrain(validRows, maxHr, restingHr),
+    }];
   });
 }
 
@@ -1841,6 +1840,103 @@ function isTransientAwakeStage(records: readonly SleepStageRecord[], index: numb
   return exactMinutesBetween(record.start, record.end) <= MAX_TRANSIENT_AWAKE_STAGE_MINUTES;
 }
 
+function mergeAdjacentSleepStageSummaries(
+  segments: readonly { stage: SleepStage; exactMinutes: number }[],
+) {
+  const merged: Array<{ stage: SleepStage; exactMinutes: number }> = [];
+
+  for (const segment of segments) {
+    if (segment.exactMinutes <= 0) {
+      continue;
+    }
+
+    const previous = merged.at(-1);
+    if (previous?.stage === segment.stage) {
+      previous.exactMinutes += segment.exactMinutes;
+      continue;
+    }
+
+    merged.push({
+      stage: segment.stage,
+      exactMinutes: segment.exactMinutes,
+    });
+  }
+
+  return merged;
+}
+
+function chooseSummaryStageAbsorptionTarget(
+  segments: readonly { stage: SleepStage; exactMinutes: number }[],
+  previousIndex: number | null,
+  nextIndex: number | null,
+) {
+  if (previousIndex === null) {
+    return nextIndex;
+  }
+
+  if (nextIndex === null) {
+    return previousIndex;
+  }
+
+  const previous = segments[previousIndex];
+  const next = segments[nextIndex];
+  if (previous.stage === next.stage) {
+    return previousIndex;
+  }
+
+  if (previous.stage === 'awake' && next.stage !== 'awake') {
+    return nextIndex;
+  }
+
+  if (next.stage === 'awake' && previous.stage !== 'awake') {
+    return previousIndex;
+  }
+
+  return next.exactMinutes > previous.exactMinutes ? nextIndex : previousIndex;
+}
+
+function simplifySleepStageSummaries(
+  segments: readonly { stage: SleepStage; exactMinutes: number }[],
+) {
+  const simplified = segments.map((segment) => ({
+    stage: segment.stage,
+    exactMinutes: segment.exactMinutes,
+  }));
+
+  for (let index = 0; index < simplified.length; index += 1) {
+    const segment = simplified[index];
+    if (segment.exactMinutes <= 0 || segment.exactMinutes > MAX_FRAGMENTED_SUMMARY_STAGE_MINUTES) {
+      continue;
+    }
+
+    let previousIndex: number | null = null;
+    for (let candidate = index - 1; candidate >= 0; candidate -= 1) {
+      if (simplified[candidate].exactMinutes > 0) {
+        previousIndex = candidate;
+        break;
+      }
+    }
+
+    let nextIndex: number | null = null;
+    for (let candidate = index + 1; candidate < simplified.length; candidate += 1) {
+      if (simplified[candidate].exactMinutes > 0) {
+        nextIndex = candidate;
+        break;
+      }
+    }
+
+    const targetIndex = chooseSummaryStageAbsorptionTarget(simplified, previousIndex, nextIndex);
+    if (targetIndex === null) {
+      continue;
+    }
+
+    simplified[targetIndex].exactMinutes += segment.exactMinutes;
+    segment.exactMinutes = 0;
+  }
+
+  return mergeAdjacentSleepStageSummaries(simplified);
+}
+
 function aggregateSleepStages(records: SleepStageRecord[]): SleepStageSegment[] {
   const merged: Array<{ stage: SleepStage; exactMinutes: number }> = [];
 
@@ -1867,7 +1963,7 @@ function aggregateSleepStages(records: SleepStageRecord[]): SleepStageSegment[] 
     });
   }
 
-  return merged.map((segment) => ({
+  return simplifySleepStageSummaries(merged).map((segment) => ({
     stage: segment.stage,
     minutes: Math.max(1, Math.round(segment.exactMinutes)),
   }));
@@ -2231,27 +2327,32 @@ function bucketEndExclusive(bucketStart: string, bucketMinutes = DASHBOARD_HEART
 function summarizeIntradayBucketRows(
   bucketStart: string,
   rows: readonly HeartRateSampleRow[],
-): HeartIntradayBucketRow {
+): HeartIntradayBucketRow | null {
+  const validRows = rows.filter((row) => sanitizeRecordedBpm(row.bpm) !== null);
+  if (validRows.length === 0) {
+    return null;
+  }
+
   let total = 0;
   let maxTripletAvg: number | null = null;
 
-  for (let index = 0; index < rows.length; index += 1) {
-    total += rows[index].bpm;
+  for (let index = 0; index < validRows.length; index += 1) {
+    total += validRows[index].bpm;
 
-    if (index + 2 < rows.length) {
-      const tripletAvg = (rows[index].bpm + rows[index + 1].bpm + rows[index + 2].bpm) / 3;
+    if (index + 2 < validRows.length) {
+      const tripletAvg = (validRows[index].bpm + validRows[index + 1].bpm + validRows[index + 2].bpm) / 3;
       maxTripletAvg = maxTripletAvg === null || tripletAvg > maxTripletAvg ? tripletAvg : maxTripletAvg;
     }
   }
 
   return {
     bucket_start: bucketStart,
-    sample_count: rows.length,
-    avg_bpm: total / rows.length,
-    first_bpm: rows[0]!.bpm,
-    second_bpm: rows.length > 1 ? rows[1]!.bpm : null,
-    penultimate_bpm: rows.length > 1 ? rows[rows.length - 2]!.bpm : null,
-    last_bpm: rows[rows.length - 1]!.bpm,
+    sample_count: validRows.length,
+    avg_bpm: total / validRows.length,
+    first_bpm: validRows[0]!.bpm,
+    second_bpm: validRows.length > 1 ? validRows[1]!.bpm : null,
+    penultimate_bpm: validRows.length > 1 ? validRows[validRows.length - 2]!.bpm : null,
+    last_bpm: validRows[validRows.length - 1]!.bpm,
     max_triplet_avg: maxTripletAvg,
   };
 }
@@ -2274,8 +2375,49 @@ function buildIntradayBucketRows(
     grouped.set(bucketStart, [row]);
   }
 
-  return [...grouped.entries()].map(([bucketStart, bucketRows]) =>
-    summarizeIntradayBucketRows(bucketStart, bucketRows),
+  return [...grouped.entries()].flatMap(([bucketStart, bucketRows]) => {
+    const summary = summarizeIntradayBucketRows(bucketStart, bucketRows);
+    return summary ? [summary] : [];
+  });
+}
+
+function summarizeBucketWindow(rows: readonly HeartIntradayBucketRow[]) {
+  const rawRowCount = totalBucketSampleCount(rows);
+  const weightedAverageBpm =
+    rawRowCount === 0
+      ? null
+      : Math.round(
+          rows.reduce((sum, row) => sum + row.avg_bpm * row.sample_count, 0) / rawRowCount,
+        );
+
+  return {
+    rawRowCount,
+    bucketSamples: rows.map(toHeartIntradayBucketSample),
+    averageBpm: weightedAverageBpm,
+    sustainedPeakBpm: sustainedPeakBpmFromBucketRows(rows),
+  } satisfies Omit<BucketedHeartWindow, 'latestHeartDate' | 'intradayStart'>;
+}
+
+async function hasInvalidRecordedBpmRowsInRange(db: SQLiteDatabase, fromTime: string, toTime: string) {
+  const row = await db.getFirstAsync<NullableNumberRow>(
+    `
+      SELECT COUNT(*) AS value
+      FROM heart_rate
+      WHERE time >= ? AND time <= ? AND (bpm < ? OR bpm > ?)
+    `,
+    fromTime,
+    toTime,
+    MIN_PLAUSIBLE_RECORDED_BPM,
+    MAX_PLAUSIBLE_RECORDED_BPM,
+  );
+
+  return (row?.value ?? 0) > 0;
+}
+
+function shouldRepairCachedHeartCard(snapshot: DashboardSnapshot) {
+  return (
+    (snapshot.heartCard.maxHr !== null && !isPlausibleRecordedBpm(snapshot.heartCard.maxHr)) ||
+    (snapshot.heartCard.averageHr !== null && !isPlausibleRecordedBpm(snapshot.heartCard.averageHr))
   );
 }
 
@@ -3031,7 +3173,10 @@ async function refreshHeartDayStatsForRange(
       `
         SELECT MAX(max_bpm) AS value
         FROM heart_day_stats
+        WHERE max_bpm BETWEEN ? AND ?
       `,
+      MIN_PLAUSIBLE_RECORDED_BPM,
+      MAX_PLAUSIBLE_RECORDED_BPM,
     );
 
     await persistHeartGlobalStatsRow(db, {
@@ -3623,13 +3768,37 @@ async function loadIntradayHeartWindow(
     };
   }
 
-  await ensureHeartIntradayBucketsReady(db);
-
   const latestHeartDate = parseSqliteDateTime(latestHeartTime);
   const intradayStart = new Date(latestHeartDate.getTime() - 24 * 3600000);
   const intradayStartSql = formatSqliteDateTime(intradayStart);
   const firstBucketStart = bucketStartForDate(intradayStart);
   const lastBucketStart = bucketStartForSqliteTime(latestHeartTime);
+
+  if (await hasInvalidRecordedBpmRowsInRange(db, intradayStartSql, latestHeartTime)) {
+    const rawRows = await queryHeartSampleRows(
+      db,
+      `
+        SELECT bpm, time
+        FROM heart_rate
+        WHERE time >= ? AND time <= ?
+        ORDER BY time ASC
+      `,
+      [intradayStartSql, latestHeartTime],
+    );
+    const bucketRows = buildIntradayBucketRows(rawRows);
+    const rawWindow = summarizeBucketWindow(bucketRows);
+
+    return {
+      latestHeartDate,
+      intradayStart,
+      rawRowCount: rawWindow.rawRowCount,
+      bucketSamples: rawWindow.bucketSamples,
+      averageBpm: rawWindow.averageBpm,
+      sustainedPeakBpm: rawWindow.sustainedPeakBpm,
+    };
+  }
+
+  await ensureHeartIntradayBucketsReady(db);
 
   let partialFirstBucket: HeartIntradayBucketRow[] = [];
   let bucketQueryStart = firstBucketStart;
@@ -3647,7 +3816,8 @@ async function loadIntradayHeartWindow(
     );
 
     if (firstBucketRows.length > 0) {
-      partialFirstBucket = [summarizeIntradayBucketRows(firstBucketStart, firstBucketRows)];
+      const summary = summarizeIntradayBucketRows(firstBucketStart, firstBucketRows);
+      partialFirstBucket = summary ? [summary] : [];
     }
 
     bucketQueryStart = bucketEndExclusive(firstBucketStart);
@@ -3678,21 +3848,15 @@ async function loadIntradayHeartWindow(
         );
 
   const bucketRows = [...partialFirstBucket, ...storedBuckets];
-  const rawRowCount = bucketRows.reduce((sum, row) => sum + row.sample_count, 0);
-  const weightedAverageBpm =
-    rawRowCount === 0
-      ? null
-      : Math.round(
-          bucketRows.reduce((sum, row) => sum + row.avg_bpm * row.sample_count, 0) / rawRowCount,
-        );
+  const summarizedWindow = summarizeBucketWindow(bucketRows);
 
   return {
     latestHeartDate,
     intradayStart,
-    rawRowCount,
-    bucketSamples: bucketRows.map(toHeartIntradayBucketSample),
-    averageBpm: weightedAverageBpm,
-    sustainedPeakBpm: sustainedPeakBpmFromBucketRows(bucketRows),
+    rawRowCount: summarizedWindow.rawRowCount,
+    bucketSamples: summarizedWindow.bucketSamples,
+    averageBpm: summarizedWindow.averageBpm,
+    sustainedPeakBpm: summarizedWindow.sustainedPeakBpm,
   };
 }
 
@@ -4494,6 +4658,19 @@ export class SQLiteHealthRepository implements HealthRepository {
         const cached = await loadDashboardSnapshotCacheRow(this.db);
         const parsed = cached ? parseDashboardSnapshot(cached.snapshot_json) : null;
         if (parsed) {
+          if (shouldRepairCachedHeartCard(parsed)) {
+            await refreshDashboardSnapshot(this.db, 'post_sync_heart_only');
+            const repaired = await loadDashboardSnapshotCacheRow(this.db);
+            const repairedSnapshot = repaired ? parseDashboardSnapshot(repaired.snapshot_json) : null;
+
+            if (repairedSnapshot) {
+              logMobilePerf('repository.getDashboardSnapshot.cacheRepair', startedAt, {
+                snapshotKind: repaired?.snapshot_kind ?? null,
+              });
+              return repairedSnapshot;
+            }
+          }
+
           logMobilePerf('repository.getDashboardSnapshot.cacheHit', startedAt, {
             snapshotKind: cached?.snapshot_kind ?? null,
           });
@@ -4701,9 +4878,15 @@ export class SQLiteHealthRepository implements HealthRepository {
 
         const intradayStart = new Date(latestHeartDate.getTime() - 24 * 3600000);
         const intraday = await loadIntradayHeartWindow(this.db, formatSqliteDateTime(latestHeartDate));
-        const dailyMinima = dailyMinimaRows.map((row) => row.min_bpm);
+        const sanitizedDailyMinimaRows = dailyMinimaRows.map((row) => ({
+          day: row.day,
+          min_bpm: sanitizeRecordedBpm(row.min_bpm),
+        }));
+        const dailyMinima = sanitizedDailyMinimaRows
+          .map((row) => row.min_bpm)
+          .filter((value): value is number => value !== null);
         const restingHr = personalizeRestingHr(sleepCycles, dailyMinima);
-        const dailyMinimaByDay = new Map(dailyMinimaRows.map((row) => [row.day, row.min_bpm]));
+        const dailyMinimaByDay = new Map(sanitizedDailyMinimaRows.map((row) => [row.day, row.min_bpm]));
         const weeklyResting = buildFilledDailySeries(range, latestHeartDate, (day) => dailyMinimaByDay.get(day) ?? null);
         const previousMedian = median(trendValues(weeklyResting.slice(0, -1)));
 

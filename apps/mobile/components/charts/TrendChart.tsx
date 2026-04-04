@@ -14,6 +14,7 @@ import {
   buildTrendCoordinates,
   selectTrendPointAtX,
 } from '@/components/charts/chartSelection';
+import { useAcquireScreenScrollLock } from '@/components/layout/ScreenScrollContext';
 import { colors, typography } from '@/constants/theme';
 import type { TrendPoint, TrendSelection } from '@/types/health';
 
@@ -79,7 +80,9 @@ export function TrendChart({
   const [chartWidth, setChartWidth] = useState(0);
   const [selection, setSelection] = useState<TrendSelection | null>(null);
   const selectionRef = useRef<TrendSelection | null>(null);
+  const releaseScrollLockRef = useRef<(() => void) | null>(null);
   const chartId = useId().replace(/[:]/g, '');
+  const acquireScreenScrollLock = useAcquireScreenScrollLock();
 
   const coordinates = useMemo(() => buildTrendCoordinates(points), [points]);
   const lineSegments = useMemo(() => buildLineSegments(coordinates), [coordinates]);
@@ -129,17 +132,40 @@ export function TrendChart({
     [chartWidth, commitSelection, points],
   );
 
+  const ensureScrollLock = useCallback(() => {
+    if (releaseScrollLockRef.current || !acquireScreenScrollLock) {
+      return;
+    }
+
+    releaseScrollLockRef.current = acquireScreenScrollLock();
+  }, [acquireScreenScrollLock]);
+
+  const releaseScrollLock = useCallback(() => {
+    releaseScrollLockRef.current?.();
+    releaseScrollLockRef.current = null;
+  }, []);
+
   useEffect(() => {
     commitSelection(null);
-  }, [commitSelection, points]);
+    releaseScrollLock();
+  }, [commitSelection, points, releaseScrollLock]);
+
+  useEffect(() => releaseScrollLock, [releaseScrollLock]);
+
+  const shouldCaptureScrub = useCallback(
+    (_: unknown, gestureState: { dx: number; dy: number }) =>
+      Math.abs(gestureState.dx) > 6 && Math.abs(gestureState.dx) > Math.abs(gestureState.dy),
+    [],
+  );
 
   const panResponder = useMemo(
     () =>
       PanResponder.create({
         onStartShouldSetPanResponder: () => false,
-        onMoveShouldSetPanResponder: (_, gestureState) =>
-          Math.abs(gestureState.dx) > 6 && Math.abs(gestureState.dx) > Math.abs(gestureState.dy),
+        onMoveShouldSetPanResponder: shouldCaptureScrub,
+        onMoveShouldSetPanResponderCapture: shouldCaptureScrub,
         onPanResponderGrant: (event) => {
+          ensureScrollLock();
           updateSelection(event.nativeEvent.locationX);
         },
         onPanResponderMove: (event) => {
@@ -147,16 +173,18 @@ export function TrendChart({
         },
         onPanResponderRelease: () => {
           commitSelection(null);
+          releaseScrollLock();
         },
         onPanResponderTerminate: () => {
           commitSelection(null);
+          releaseScrollLock();
         },
         // Keep the scrub gesture attached to the chart until the user lifts
         // their finger so the parent ScrollView cannot steal the interaction
         // when the touch path drifts vertically.
         onPanResponderTerminationRequest: () => false,
       }),
-    [commitSelection, updateSelection],
+    [commitSelection, ensureScrollLock, releaseScrollLock, shouldCaptureScrub, updateSelection],
   );
 
   if (points.length === 0) {

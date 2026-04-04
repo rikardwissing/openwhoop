@@ -17,7 +17,7 @@ export const colors = {
   cyan: '#59f5ff',
   aqua: '#56ffd1',
   violet: '#c8ff63',
-  indigo: '#2bd8b8',
+  indigo: '#5d78ff',
   heart: '#ffd26b',
   alert: '#ff7d70',
   success: '#8dffb3',
@@ -29,8 +29,8 @@ export const colors = {
 export const sleepStageColors = {
   awake: colors.alert,
   rem: colors.primaryBright,
-  deep: colors.aqua,
-  light: colors.cyan,
+  deep: colors.indigo,
+  light: colors.aqua,
 };
 
 export const typography = {
