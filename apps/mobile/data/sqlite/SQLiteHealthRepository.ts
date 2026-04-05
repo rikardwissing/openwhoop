@@ -7,6 +7,7 @@ import type {
   ActivitySummary,
   DerivedRefreshState,
   DashboardSnapshot,
+  HeartIntradayMarker,
   HeartHistorySnapshot,
   HistoryRange,
   MetricSeries,
@@ -1548,6 +1549,7 @@ function buildEmptyDashboardSnapshot(now: Date, deviceState: DeviceStateRow | nu
       averageHr: null,
       maxHr: null,
       series: [],
+      markers: [],
       missingReason: NO_HISTORY_REASON,
     },
     sleepCard: {
@@ -1576,6 +1578,22 @@ function dashboardSyncLabel(deviceState: DeviceStateRow | null): string {
   return deviceState?.last_synced_at
     ? `Last sync ${formatClock(parseSqliteDateTime(deviceState.last_synced_at))}`
     : 'Local seed loaded';
+}
+
+async function loadActivitiesOverlappingRange(db: SQLiteDatabase, start: Date, end: Date) {
+  const startSql = formatSqliteDateTime(start);
+  const endSql = formatSqliteDateTime(end);
+
+  return queryActivities(
+    db,
+    `
+      SELECT id, period_id, start, end, activity
+      FROM activities
+      WHERE start <= ? AND end >= ?
+      ORDER BY start ASC
+    `,
+    [endSql, startSql],
+  );
 }
 
 function groupByDay<T extends { date: Date }>(rows: T[]): Array<[string, T[]]> {
@@ -1969,6 +1987,76 @@ function aggregateSleepStages(records: SleepStageRecord[]): SleepStageSegment[] 
   }));
 }
 
+function buildHeartIntradayMarkerRange(windowStart: Date, windowEnd: Date, start: Date, end: Date) {
+  const rangeStartMs = windowStart.getTime();
+  const rangeEndMs = windowEnd.getTime();
+  const markerStartMs = Math.max(rangeStartMs, start.getTime());
+  const markerEndMs = Math.min(rangeEndMs, end.getTime());
+
+  if (markerEndMs <= markerStartMs) {
+    return null;
+  }
+
+  const totalWindowMs = Math.max(1, rangeEndMs - rangeStartMs);
+  return {
+    start: new Date(markerStartMs),
+    end: new Date(markerEndMs),
+    startFraction: clamp((markerStartMs - rangeStartMs) / totalWindowMs, 0, 1),
+    endFraction: clamp((markerEndMs - rangeStartMs) / totalWindowMs, 0, 1),
+  };
+}
+
+function buildHeartIntradayMarkers(
+  windowStart: Date,
+  windowEnd: Date,
+  sleepCycles: readonly SleepCycleRecord[],
+  activities: readonly ActivityRecord[],
+): HeartIntradayMarker[] {
+  const sleepMarkers = sleepCycles.flatMap((sleep) => {
+    const range = buildHeartIntradayMarkerRange(windowStart, windowEnd, sleep.start, sleep.end);
+    if (!range) {
+      return [];
+    }
+
+    return [{
+      id: `sleep-${sleep.sleepId}`,
+      kind: 'sleep' as const,
+      label: 'Sleep',
+      timeLabel: `${formatClock(range.start)} - ${formatClock(range.end)}`,
+      startFraction: range.startFraction,
+      endFraction: range.endFraction,
+    } satisfies HeartIntradayMarker];
+  });
+
+  const activityMarkers = activities.flatMap((activity) => {
+    const range = buildHeartIntradayMarkerRange(windowStart, windowEnd, activity.start, activity.end);
+    if (!range) {
+      return [];
+    }
+
+    return [{
+      id: activity.id,
+      kind: activity.activity === 'Nap' ? 'nap' : 'activity',
+      label: activity.activity,
+      timeLabel: `${formatClock(range.start)} - ${formatClock(range.end)}`,
+      startFraction: range.startFraction,
+      endFraction: range.endFraction,
+    } satisfies HeartIntradayMarker];
+  });
+
+  return [...sleepMarkers, ...activityMarkers].sort((left, right) => {
+    if (left.startFraction !== right.startFraction) {
+      return left.startFraction - right.startFraction;
+    }
+
+    if (left.endFraction !== right.endFraction) {
+      return left.endFraction - right.endFraction;
+    }
+
+    return left.label.localeCompare(right.label);
+  });
+}
+
 function summarizeSleepStages(
   records: readonly SleepStageRecord[],
   start: Date,
@@ -2298,7 +2386,14 @@ async function persistHeartIntradayBucketStateRow(
 
 function parseDashboardSnapshot(snapshotJson: string): DashboardSnapshot | null {
   try {
-    return JSON.parse(snapshotJson) as DashboardSnapshot;
+    const parsed = JSON.parse(snapshotJson) as DashboardSnapshot;
+    return {
+      ...parsed,
+      heartCard: {
+        ...(parsed.heartCard ?? {}),
+        markers: parsed.heartCard?.markers ?? [],
+      },
+    } as DashboardSnapshot;
   } catch {
     return null;
   }
@@ -3947,17 +4042,24 @@ async function buildFullDashboardSnapshot(db: SQLiteDatabase): Promise<Dashboard
   const dailyMinima = heartDayStats.map((stat) => stat.minBpm);
   const restingHr = personalizeRestingHr(sleepCycles, dailyMinima);
   const recovery = estimateRecoveryScoreFromSleeps(latestSleep, sleepCycles, heartState.latest_stress);
+  const latestHeartDate = intraday.latestHeartDate ?? now;
+  const intradayWindowStart = intraday.intradayStart ?? new Date(latestHeartDate.getTime() - 24 * 3600000);
   const heartCardSeries =
     intraday.bucketSamples.length > 0
       ? createTimeBuckets(
           intraday.bucketSamples,
           DASHBOARD_HEART_BUCKET_MINUTES,
-          intraday.intradayStart ?? undefined,
-          intraday.latestHeartDate ?? undefined,
+          intradayWindowStart,
+          latestHeartDate,
         )
       : [];
+  const heartCardMarkers = buildHeartIntradayMarkers(
+    intradayWindowStart,
+    latestHeartDate,
+    sleepCycles,
+    await loadActivitiesOverlappingRange(db, intradayWindowStart, latestHeartDate),
+  );
   const sleepCard = buildDashboardSleepCard(latestSleep, stageRecords);
-  const latestHeartDate = intraday.latestHeartDate ?? now;
   const dayStatsByDay = new Map(heartDayStats.map((stat) => [stat.day, stat]));
   const todayStrain = dayStatsByDay.get(dateKey(latestHeartDate))?.strainScore ?? null;
   const strainSeries = buildFilledDailySeries('14d', latestHeartDate, (day) => dayStatsByDay.get(day)?.strainScore ?? null);
@@ -4002,6 +4104,7 @@ async function buildFullDashboardSnapshot(db: SQLiteDatabase): Promise<Dashboard
       averageHr: intraday.averageBpm,
       maxHr: intraday.sustainedPeakBpm,
       series: heartCardSeries,
+      markers: heartCardMarkers,
       missingReason: heartCardSeries.length === 0 ? NO_HISTORY_REASON : null,
     },
     sleepCard,
@@ -4024,11 +4127,12 @@ async function buildFullDashboardSnapshot(db: SQLiteDatabase): Promise<Dashboard
 
 async function buildPostSyncHeartOnlySnapshot(db: SQLiteDatabase): Promise<DashboardSnapshot> {
   const now = new Date();
-  const [heartCount, cached, deviceState, heartState] = await Promise.all([
+  const [heartCount, cached, deviceState, heartState, sleepCycles] = await Promise.all([
     countHeartRows(db),
     loadDashboardSnapshotCacheRow(db),
     loadLatestDeviceStateRow(db),
     loadLatestHeartState(db),
+    loadRecentSleepCyclesForDashboard(db, 15),
   ]);
 
   if (heartCount === 0) {
@@ -4038,6 +4142,14 @@ async function buildPostSyncHeartOnlySnapshot(db: SQLiteDatabase): Promise<Dashb
   const baseSnapshot = cached ? parseDashboardSnapshot(cached.snapshot_json) : null;
   const baseline = baseSnapshot ?? buildEmptyDashboardSnapshot(now, deviceState);
   const intraday = await loadDashboardIntradayRows(db, heartState.latest_heart_time);
+  const latestHeartDate = intraday.latestHeartDate ?? now;
+  const intradayWindowStart = intraday.intradayStart ?? new Date(latestHeartDate.getTime() - 24 * 3600000);
+  const heartCardMarkers = buildHeartIntradayMarkers(
+    intradayWindowStart,
+    latestHeartDate,
+    sleepCycles,
+    await loadActivitiesOverlappingRange(db, intradayWindowStart, latestHeartDate),
+  );
 
   return {
     ...baseline,
@@ -4052,10 +4164,11 @@ async function buildPostSyncHeartOnlySnapshot(db: SQLiteDatabase): Promise<Dashb
           ? createTimeBuckets(
               intraday.bucketSamples,
               DASHBOARD_HEART_BUCKET_MINUTES,
-              intraday.intradayStart ?? undefined,
-              intraday.latestHeartDate ?? undefined,
+              intradayWindowStart,
+              latestHeartDate,
             )
           : baseline.heartCard.series,
+      markers: heartCardMarkers,
       missingReason:
         intraday.bucketSamples.length > 0 ? null : baseline.heartCard.missingReason,
     },
@@ -4649,6 +4762,15 @@ export class SQLiteHealthRepository implements HealthRepository {
     );
   }
 
+  private async loadActivitiesOverlapping(start: Date, end: Date) {
+    const startSql = formatSqliteDateTime(start);
+    const endSql = formatSqliteDateTime(end);
+
+    return this.readQuery(`activities:overlap:${startSql}:${endSql}`, () =>
+      loadActivitiesOverlappingRange(this.db, start, end),
+    );
+  }
+
   async getDashboardSnapshot(): Promise<DashboardSnapshot> {
     return this.readSnapshot('dashboard', async () => {
       const startedAt = Date.now();
@@ -4870,6 +4992,7 @@ export class SQLiteHealthRepository implements HealthRepository {
             averageHr: null,
             maxHr: null,
             intraday: [],
+            intradayMarkers: [],
             weeklyResting: [],
             recoveryShift: null,
             missingReason: NO_HISTORY_REASON,
@@ -4878,6 +5001,13 @@ export class SQLiteHealthRepository implements HealthRepository {
 
         const intradayStart = new Date(latestHeartDate.getTime() - 24 * 3600000);
         const intraday = await loadIntradayHeartWindow(this.db, formatSqliteDateTime(latestHeartDate));
+        const intradayWindowStart = intraday.intradayStart ?? intradayStart;
+        const intradayMarkers = buildHeartIntradayMarkers(
+          intradayWindowStart,
+          latestHeartDate,
+          sleepCycles,
+          await this.loadActivitiesOverlapping(intradayWindowStart, latestHeartDate),
+        );
         const sanitizedDailyMinimaRows = dailyMinimaRows.map((row) => ({
           day: row.day,
           min_bpm: sanitizeRecordedBpm(row.min_bpm),
@@ -4897,9 +5027,10 @@ export class SQLiteHealthRepository implements HealthRepository {
           intraday: createTimeBuckets(
             intraday.bucketSamples,
             HEART_INTRADAY_BUCKET_MINUTES,
-            intraday.intradayStart ?? intradayStart,
+            intradayWindowStart,
             latestHeartDate,
           ),
+          intradayMarkers,
           weeklyResting,
           recoveryShift: previousMedian === null ? null : restingHr - previousMedian,
         } satisfies HeartHistorySnapshot;

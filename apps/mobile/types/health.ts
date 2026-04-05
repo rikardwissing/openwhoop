@@ -57,6 +57,7 @@ export interface HeartCardSnapshot extends EstimatedValueMeta {
   averageHr: number | null;
   maxHr: number | null;
   series: TrendPoint[];
+  markers: HeartIntradayMarker[];
 }
 
 export interface SleepCardSnapshot extends EstimatedValueMeta {
@@ -135,6 +136,7 @@ export interface HeartHistorySnapshot extends EstimatedValueMeta {
   averageHr: number | null;
   maxHr: number | null;
   intraday: TrendPoint[];
+  intradayMarkers: HeartIntradayMarker[];
   weeklyResting: TrendPoint[];
   recoveryShift: number | null;
 }
@@ -160,6 +162,17 @@ export interface ActivitySummary extends EstimatedValueMeta {
   calories: number | null;
   strainLabel?: string;
   caloriesLabel?: string;
+}
+
+export type HeartIntradayMarkerKind = 'sleep' | 'nap' | 'activity';
+
+export interface HeartIntradayMarker {
+  id: string;
+  kind: HeartIntradayMarkerKind;
+  label: string;
+  timeLabel: string;
+  startFraction: number;
+  endFraction: number;
 }
 
 export interface WellnessSnapshot extends EstimatedValueMeta {

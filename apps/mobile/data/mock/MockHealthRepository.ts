@@ -3,6 +3,7 @@ import type {
   DerivedRefreshState,
   ActivitySummary,
   DashboardSnapshot,
+  HeartIntradayMarker,
   HeartHistorySnapshot,
   HistoryRange,
   MetricSeries,
@@ -77,6 +78,10 @@ function rangeLength(range: HistoryRange): number {
 
 function takeTail<T>(items: T[], range: HistoryRange): T[] {
   return items.slice(-rangeLength(range));
+}
+
+function fractionOfDay(minutes: number) {
+  return clamp(minutes / (24 * 60), 0, 1);
 }
 
 const intradayHeartSeries = buildIntradayHeartSeries(5);
@@ -181,6 +186,33 @@ const sessions: SleepSession[] = [
   },
 ];
 
+const activitySeeds = [
+  {
+    id: 'activity-tempo-run',
+    title: 'Tempo Run',
+    startMinutes: 8 * 60 + 10,
+    durationMinutes: 42,
+    strain: 12.4,
+    calories: 486,
+  },
+  {
+    id: 'activity-mobility-reset',
+    title: 'Mobility Reset',
+    startMinutes: 12 * 60 + 35,
+    durationMinutes: 18,
+    strain: 3.1,
+    calories: 92,
+  },
+  {
+    id: 'activity-evening-walk',
+    title: 'Evening Walk',
+    startMinutes: 18 * 60 + 42,
+    durationMinutes: 36,
+    strain: 5.4,
+    calories: 210,
+  },
+];
+
 const metricSeries = (metric: Omit<MetricSeries, 'series'> & { values: number[]; labels: string[] }): MetricSeries => ({
   title: metric.title,
   latest: metric.latest,
@@ -193,31 +225,32 @@ const metricSeries = (metric: Omit<MetricSeries, 'series'> & { values: number[];
   series: series(metric.labels, metric.values),
 });
 
-const activities: ActivitySummary[] = [
+const activities: ActivitySummary[] = activitySeeds.map((activity) => ({
+  id: activity.id,
+  title: activity.title,
+  timeLabel: formatClockMinutes(activity.startMinutes),
+  durationMinutes: activity.durationMinutes,
+  strain: activity.strain,
+  calories: activity.calories,
+}));
+
+const intradayMarkers: HeartIntradayMarker[] = [
   {
-    id: 'activity-1',
-    title: 'Tempo Run',
-    timeLabel: '7:10 AM',
-    durationMinutes: 42,
-    strain: 12.4,
-    calories: 486,
+    id: 'sleep-latest',
+    kind: 'sleep',
+    label: 'Sleep',
+    timeLabel: '12:00 AM - 7:45 AM',
+    startFraction: 0,
+    endFraction: fractionOfDay(7 * 60 + 45),
   },
-  {
-    id: 'activity-2',
-    title: 'Mobility Reset',
-    timeLabel: '12:35 PM',
-    durationMinutes: 18,
-    strain: 3.1,
-    calories: 92,
-  },
-  {
-    id: 'activity-3',
-    title: 'Evening Walk',
-    timeLabel: '6:42 PM',
-    durationMinutes: 36,
-    strain: 5.4,
-    calories: 210,
-  },
+  ...activitySeeds.map((activity) => ({
+    id: activity.id,
+    kind: 'activity' as const,
+    label: activity.title,
+    timeLabel: `${formatClockMinutes(activity.startMinutes)} - ${formatClockMinutes(activity.startMinutes + activity.durationMinutes)}`,
+    startFraction: fractionOfDay(activity.startMinutes),
+    endFraction: fractionOfDay(activity.startMinutes + activity.durationMinutes),
+  })),
 ];
 
 export class MockHealthRepository implements HealthRepository {
@@ -277,6 +310,7 @@ export class MockHealthRepository implements HealthRepository {
         averageHr: intradayAverageHr,
         maxHr: intradayMaxHr,
         series: dashboardHeartSeries,
+        markers: intradayMarkers,
       },
       sleepCard: {
         score: 82,
@@ -341,6 +375,7 @@ export class MockHealthRepository implements HealthRepository {
       averageHr: intradayAverageHr,
       maxHr: intradayMaxHr,
       intraday: intradayHeartSeries,
+      intradayMarkers,
       weeklyResting: takeTail(series(scoreLabels, restingHrTrend), range),
       recoveryShift: -4,
     };

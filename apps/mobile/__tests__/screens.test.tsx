@@ -140,6 +140,7 @@ describe('screen rendering', () => {
     expect(await screen.findByText('Good afternoon')).toBeTruthy();
     expect(await screen.findByText('Heart Rate')).toBeTruthy();
     expect(await screen.findByText('Strain')).toBeTruthy();
+    expect(await screen.findByTestId('today-heart-chart-marker-sleep-latest')).toBeTruthy();
   });
 
   it('shows live heart rate on the today dashboard when streaming is active', async () => {
@@ -281,6 +282,9 @@ describe('screen rendering', () => {
 
     expect(await screen.findByText('Intraday Heart Rate')).toBeTruthy();
     expect(await screen.findByText('Resting HR Trend')).toBeTruthy();
+    expect(await screen.findByTestId('heart-intraday-chart-marker-sleep-latest')).toBeTruthy();
+    expect(screen.getByTestId('heart-intraday-chart-marker-activity-tempo-run')).toBeTruthy();
+    expect(screen.getByText('Icons mark sleep and activity windows.')).toBeTruthy();
   });
 
   it('shows live heart rate on the heart screen when streaming is active', async () => {

@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { PanResponder, StyleSheet, Text, View } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import Svg, {
   Circle,
   Defs,
   LinearGradient as SvgLinearGradient,
   Line,
   Path,
+  Rect,
   Stop,
 } from 'react-native-svg';
 
@@ -60,11 +62,30 @@ function buildLineSegments(coordinates: Array<{ x: number; y: number | null }>) 
   return segments;
 }
 
+export interface TrendChartMarker {
+  id: string;
+  iconName: keyof typeof Ionicons.glyphMap;
+  accentColor: string;
+  backgroundColor: string;
+  startFraction: number;
+  endFraction: number;
+  accessibilityLabel?: string;
+}
+
+function clampFraction(value: number) {
+  return Math.min(1, Math.max(0, value));
+}
+
+function sanitizeMarkerId(value: string) {
+  return value.replace(/[^a-zA-Z0-9_-]+/g, '-');
+}
+
 export function TrendChart({
   points,
   accentColor,
   height = 148,
   lineStrokeWidth = 1,
+  markers = [],
   onSelectionChange,
   shadowStrokeWidth = 2.1,
   testID,
@@ -73,6 +94,7 @@ export function TrendChart({
   accentColor: string;
   height?: number;
   lineStrokeWidth?: number;
+  markers?: TrendChartMarker[];
   onSelectionChange?: (selection: TrendSelection | null) => void;
   shadowStrokeWidth?: number;
   testID?: string;
@@ -105,6 +127,24 @@ export function TrendChart({
       ? { x: selectedCoordinate.x, y: selectedCoordinate.y }
       : null;
   const activeX = selectedCoordinate?.x ?? null;
+  const markerVisuals = useMemo(
+    () =>
+      markers.map((marker, index) => {
+        const startFraction = clampFraction(marker.startFraction);
+        const endFraction = clampFraction(Math.max(marker.startFraction, marker.endFraction));
+        const midpoint = clampFraction((startFraction + endFraction) / 2);
+
+        return {
+          ...marker,
+          badgeFraction: clampFraction(Math.min(0.94, Math.max(0.06, midpoint))),
+          bandWidth: Math.max((endFraction - startFraction) * 100, 0.8),
+          lane: index % 2,
+          startX: startFraction * 100,
+          testID: testID ? `${testID}-marker-${sanitizeMarkerId(marker.id)}` : undefined,
+        };
+      }),
+    [markers, testID],
+  );
 
   const commitSelection = useCallback(
     (nextSelection: TrendSelection | null) => {
@@ -212,6 +252,18 @@ export function TrendChart({
               <Stop offset="100%" stopColor={start} stopOpacity="0.02" />
             </SvgLinearGradient>
           </Defs>
+          {markerVisuals.map((marker) => (
+            <Rect
+              key={`marker-band-${marker.id}`}
+              fill={marker.backgroundColor}
+              height="31"
+              rx="3"
+              ry="3"
+              width={marker.bandWidth}
+              x={marker.startX}
+              y="3"
+            />
+          ))}
           <Line
             stroke="rgba(149, 162, 188, 0.22)"
             strokeDasharray="3 3"
@@ -275,6 +327,27 @@ export function TrendChart({
             </>
           ) : null}
         </Svg>
+        {markerVisuals.length > 0 ? (
+          <View pointerEvents="none" style={styles.markerLayer}>
+            {markerVisuals.map((marker) => (
+              <View
+                accessibilityLabel={marker.accessibilityLabel}
+                key={`marker-badge-${marker.id}`}
+                style={[
+                  styles.markerBadge,
+                  {
+                    backgroundColor: colors.surfaceStrong,
+                    borderColor: marker.accentColor,
+                    left: `${marker.badgeFraction * 100}%`,
+                    top: 8 + marker.lane * 24,
+                  },
+                ]}
+                testID={marker.testID}>
+                <Ionicons color={marker.accentColor} name={marker.iconName} size={12} />
+              </View>
+            ))}
+          </View>
+        ) : null}
         <View
           collapsable={false}
           style={styles.overlay}
@@ -300,6 +373,26 @@ const styles = StyleSheet.create({
   },
   overlay: {
     ...StyleSheet.absoluteFillObject,
+  },
+  markerLayer: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  markerBadge: {
+    alignItems: 'center',
+    borderRadius: 999,
+    borderWidth: 1,
+    height: 24,
+    justifyContent: 'center',
+    marginLeft: -12,
+    position: 'absolute',
+    shadowColor: colors.black,
+    shadowOffset: {
+      width: 0,
+      height: 2,
+    },
+    shadowOpacity: 0.22,
+    shadowRadius: 4,
+    width: 24,
   },
   axis: {
     flexDirection: 'row',

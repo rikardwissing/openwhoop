@@ -11,7 +11,10 @@ describe('MockHealthRepository', () => {
     expect(dashboard.recovery.score).toBe(64);
     expect(dashboard.summaryStats).toHaveLength(3);
     expect(dashboard.heartCard.series.length).toBe(288);
+    expect(dashboard.heartCard.markers).toHaveLength(4);
     expect(heart.intraday.length).toBe(288);
+    expect(heart.intradayMarkers).toHaveLength(4);
+    expect(heart.intradayMarkers[0]?.kind).toBe('sleep');
     expect(heart.intraday[1]?.label).toBe('12:05 AM');
     expect(wellness.activities).toHaveLength(3);
     expect(wellness.skinTemperature.hasPartialData).toBe(true);

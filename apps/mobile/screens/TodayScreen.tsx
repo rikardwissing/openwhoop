@@ -1,5 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
 import { ChartReadout } from '@/components/charts/ChartReadout';
@@ -15,6 +15,7 @@ import { colors, typography } from '@/constants/theme';
 import { useDashboardSnapshot, useDerivedRefreshState } from '@/hooks/useHealthData';
 import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
 import { useWearableSyncState } from '@/providers/WearableSyncProvider';
+import { mapHeartIntradayMarkersToTrendMarkers } from '@/utils/heartChartMarkers';
 import { hasFreshLiveHeartRate } from '@/types/device';
 import type { SleepStageSelection, TrendSelection } from '@/types/health';
 import {
@@ -36,6 +37,10 @@ export function TodayScreen() {
   const showLiveHeartRate = hasFreshLiveHeartRate(deviceState);
   const liveHeartRateLabel =
     showLiveHeartRate && deviceState.liveHeartRate !== null ? `${deviceState.liveHeartRate} bpm` : null;
+  const heartMarkers = useMemo(
+    () => (data ? mapHeartIntradayMarkersToTrendMarkers(data.heartCard.markers ?? []) : []),
+    [data?.heartCard.markers],
+  );
 
   if (!data && state.status === 'loading') {
     return (
@@ -180,6 +185,7 @@ export function TodayScreen() {
           accentColor={colors.primary}
           height={164}
           lineStrokeWidth={0.8}
+          markers={heartMarkers}
           onSelectionChange={setHeartSelection}
           points={data.heartCard.series}
           shadowStrokeWidth={1.6}

@@ -1,8 +1,8 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
 import { ChartReadout } from '@/components/charts/ChartReadout';
-import { TrendChart } from '@/components/charts/TrendChart';
+import { TrendChart, type TrendChartMarker } from '@/components/charts/TrendChart';
 import { ScreenShell } from '@/components/layout/ScreenShell';
 import { SectionHeader } from '@/components/layout/SectionHeader';
 import { GlassCard } from '@/components/ui/GlassCard';
@@ -13,6 +13,7 @@ import { colors, typography } from '@/constants/theme';
 import { useHeartHistory } from '@/hooks/useHealthData';
 import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
 import { useWearableSyncState } from '@/providers/WearableSyncProvider';
+import { describeHeartIntradayMarkers, mapHeartIntradayMarkersToTrendMarkers } from '@/utils/heartChartMarkers';
 import { hasFreshLiveHeartRate } from '@/types/device';
 import type { TrendSelection } from '@/types/health';
 import { formatMetricValue, formatSignedValue } from '@/utils/formatters';
@@ -27,6 +28,14 @@ export function HeartScreen() {
   const showLiveHeartRate = hasFreshLiveHeartRate(deviceState);
   const liveHeartRateLabel =
     showLiveHeartRate && deviceState.liveHeartRate !== null ? `${deviceState.liveHeartRate} bpm` : null;
+  const intradayMarkers = useMemo(
+    () => (data ? mapHeartIntradayMarkersToTrendMarkers(data.intradayMarkers) : []),
+    [data?.intradayMarkers],
+  );
+  const intradayMarkerHint = useMemo(
+    () => (data ? describeHeartIntradayMarkers(data.intradayMarkers) : null),
+    [data],
+  );
 
   if (!data && state.status === 'loading') {
     return (
@@ -88,6 +97,7 @@ export function HeartScreen() {
           accentColor={colors.success}
           height={170}
           lineStrokeWidth={0.8}
+          markers={intradayMarkers}
           onSelectionChange={setIntradaySelection}
           points={data.intraday}
           shadowStrokeWidth={1.6}
@@ -97,6 +107,9 @@ export function HeartScreen() {
           <View style={styles.chipRow}>
             <StatChip accent={colors.heart} label="Live" value={liveHeartRateLabel} />
           </View>
+        ) : null}
+        {!intradaySelection && intradayMarkerHint ? (
+          <Text style={styles.markerHint}>{intradayMarkerHint}</Text>
         ) : null}
       </GlassCard>
 
@@ -161,6 +174,12 @@ const styles = StyleSheet.create({
   },
   chipRow: {
     marginTop: 8,
+  },
+  markerHint: {
+    color: colors.subtle,
+    fontFamily: typography.body,
+    fontSize: 12,
+    marginTop: 10,
   },
   chartReadout: {
     marginBottom: 10,

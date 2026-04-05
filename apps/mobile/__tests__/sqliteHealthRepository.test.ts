@@ -15,6 +15,7 @@ import {
   refreshDerivedData,
   shouldRefreshDerivedData,
 } from '@/data/sqlite/SQLiteHealthRepository';
+import { generateSleepStageRecords } from '@/data/sqlite/sleepStages';
 import {
   listRecentPerformanceDiagnosticRuns,
   runFullPerformanceSweep,
@@ -1106,6 +1107,143 @@ describe('SQLiteHealthRepository', () => {
     adapter.close();
   });
 
+  it('collapses repeated late wake bursts and short sleep bridges into a single wake transition cluster', () => {
+    const start = new Date(2026, 3, 9, 0, 0, 0);
+    const sleepingGravity: [number, number, number] = [0.08, -0.03, 0.99];
+    const wakeGravityA: [number, number, number] = [-0.51, -0.78, 0.36];
+    const wakeGravityB: [number, number, number] = [-0.23, -0.91, 0.32];
+    const rows: Array<{
+      date: Date;
+      bpm: number;
+      rr: number[];
+      ppgGreen: number | null;
+      gravity: [number, number, number] | null;
+      skinContact: number | null;
+      signalQuality: number | null;
+    }> = [];
+
+    const pushSegment = (
+      durationMinutes: number,
+      values: {
+        bpm: number;
+        rr: number[];
+        ppgBase: number;
+        ppgStep: number;
+        gravity: [number, number, number];
+        skinContact: number;
+      },
+    ) => {
+      const sampleCount = durationMinutes * 12;
+      for (let index = 0; index < sampleCount; index += 1) {
+        rows.push({
+          date: new Date(start.getTime() + rows.length * 5000),
+          bpm: values.bpm,
+          rr: values.rr,
+          ppgGreen: values.ppgBase + ((rows.length % 7) * values.ppgStep),
+          gravity: index % 2 === 0 ? values.gravity : values.gravity,
+          skinContact: values.skinContact,
+          signalQuality: 3074,
+        });
+      }
+    };
+
+    pushSegment(70, {
+      bpm: 60,
+      rr: [985, 980, 975],
+      ppgBase: 19_050,
+      ppgStep: 45,
+      gravity: sleepingGravity,
+      skinContact: 1,
+    });
+    pushSegment(1.5, {
+      bpm: 78,
+      rr: [905, 895, 900],
+      ppgBase: 19_250,
+      ppgStep: 55,
+      gravity: wakeGravityA,
+      skinContact: 0,
+    });
+    pushSegment(1, {
+      bpm: 66,
+      rr: [980, 975, 970],
+      ppgBase: 18_250,
+      ppgStep: 30,
+      gravity: sleepingGravity,
+      skinContact: 1,
+    });
+    pushSegment(2.5, {
+      bpm: 68,
+      rr: [970, 965, 960],
+      ppgBase: 19_000,
+      ppgStep: 35,
+      gravity: sleepingGravity,
+      skinContact: 1,
+    });
+    pushSegment(2, {
+      bpm: 64,
+      rr: [995, 990, 985],
+      ppgBase: 18_200,
+      ppgStep: 28,
+      gravity: sleepingGravity,
+      skinContact: 1,
+    });
+    pushSegment(0.5, {
+      bpm: 74,
+      rr: [910, 900, 905],
+      ppgBase: 19_100,
+      ppgStep: 40,
+      gravity: wakeGravityB,
+      skinContact: 0,
+    });
+    pushSegment(0.5, {
+      bpm: 67,
+      rr: [965, 960, 955],
+      ppgBase: 18_900,
+      ppgStep: 30,
+      gravity: sleepingGravity,
+      skinContact: 1,
+    });
+    pushSegment(0.5, {
+      bpm: 64,
+      rr: [995, 990, 985],
+      ppgBase: 18_250,
+      ppgStep: 25,
+      gravity: sleepingGravity,
+      skinContact: 1,
+    });
+    pushSegment(2.5, {
+      bpm: 76,
+      rr: [905, 895, 900],
+      ppgBase: 19_350,
+      ppgStep: 45,
+      gravity: wakeGravityA,
+      skinContact: 0,
+    });
+    pushSegment(14, {
+      bpm: 62,
+      rr: [980, 975, 970],
+      ppgBase: 19_050,
+      ppgStep: 40,
+      gravity: sleepingGravity,
+      skinContact: 1,
+    });
+
+    const records = generateSleepStageRecords(rows);
+    const minutesFromStart = (date: Date) => (date.getTime() - start.getTime()) / 60000;
+    const awakeCluster = records.find((record) => (
+      record.stage === 'awake' &&
+      minutesFromStart(record.start) <= 77.1 &&
+      minutesFromStart(record.end) >= 94.5
+    ));
+
+    expect(awakeCluster).toBeDefined();
+    expect(records.some((record) => (
+      record.stage !== 'awake' &&
+      minutesFromStart(record.start) >= 78 &&
+      minutesFromStart(record.end) <= 95
+    ))).toBe(false);
+  });
+
   it('keeps a sustained late wake block awake instead of alternating back into rem', async () => {
     const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
     await initializeDatabase(adapter as never);
@@ -1207,6 +1345,108 @@ describe('SQLiteHealthRepository', () => {
     adapter.close();
   });
 
+  it('keeps a sustained late wake block awake through a short terminal sleepy tail', async () => {
+    const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
+    await initializeDatabase(adapter as never);
+
+    const heartInsert = `
+      INSERT INTO heart_rate (id, bpm, time, rr_intervals, sensor_data, synced)
+      VALUES (?, ?, ?, ?, ?, 0)
+    `;
+    const start = new Date(2026, 3, 8, 0, 0, 0);
+    const sleepingGravity: [number, number, number] = [0.08, -0.03, 0.99];
+    const wakeTransitionA: [number, number, number] = [-0.51, -0.78, 0.36];
+    const wakeTransitionB: [number, number, number] = [-0.23, -0.91, 0.32];
+    const quietWakeGravity: [number, number, number] = [-0.48, -0.64, 0.59];
+
+    await adapter.withExclusiveTransactionAsync(async (tx) => {
+      let id = 1;
+
+      for (let second = 0; second < 243 * 60; second += 5) {
+        const sampleDate = new Date(start.getTime() + second * 1000);
+        const minute = second / 60;
+        const isDeep = minute < 80;
+        const isLight = minute >= 80 && minute < 140;
+        const isRem = minute >= 140 && minute < 180;
+        const wakeTransition = minute >= 180 && minute < 195;
+        const quietWake = minute >= 195 && minute < 240;
+        const sleepyTail = minute >= 240;
+        const ppgGreen = isDeep
+          ? 17_600 + (id % 7) * 90
+          : isLight
+            ? 18_350 + (id % 7) * 80
+            : isRem
+              ? 18_700 + (id % 7) * 70
+              : wakeTransition || quietWake
+                ? 26_200 + (id % 5) * 170
+                : 18_550 + (id % 7) * 65;
+        const bpm = isDeep ? 55 : isLight ? 58 : isRem ? 59 : wakeTransition ? 74 : quietWake ? 68 : 61;
+        const rrIntervals = isDeep
+          ? '1090,960,1110'
+          : isLight
+            ? '1005,995,1010'
+            : isRem
+              ? '985,980,975'
+              : wakeTransition || quietWake
+                ? '905,895,900'
+                : '980,975,970';
+        const gravity = wakeTransition
+          ? id % 6 < 3
+            ? wakeTransitionA
+            : wakeTransitionB
+          : quietWake
+            ? quietWakeGravity
+            : sleepingGravity;
+
+        await tx.runAsync(
+          heartInsert,
+          id,
+          bpm,
+          formatTestSqliteDateTime(sampleDate),
+          rrIntervals,
+          JSON.stringify({
+            ppg_green: ppgGreen,
+            skin_contact: 1,
+            signal_quality: 3074,
+            accel_gravity: gravity,
+          }),
+        );
+        id += 1;
+      }
+    });
+
+    await refreshDerivedData(adapter as never);
+
+    const stageRows = await adapter.getAllAsync<{
+      stage: string;
+      start: string;
+      end: string;
+    }>(
+      `
+        SELECT stage, start, end
+        FROM sleep_stage_segments
+        ORDER BY start ASC
+      `,
+    );
+
+    const sustainedWakeIndex = stageRows.findIndex((row) => {
+      if (row.stage !== 'awake') {
+        return false;
+      }
+
+      const durationMinutes =
+        (new Date(row.end.replace(' ', 'T')).getTime() - new Date(row.start.replace(' ', 'T')).getTime()) /
+        60000;
+      return durationMinutes >= 15;
+    });
+
+    expect(sustainedWakeIndex).toBeGreaterThanOrEqual(0);
+    expect(stageRows.slice(sustainedWakeIndex + 1).every((row) => row.stage === 'awake')).toBe(true);
+    expect(stageRows.at(-1)?.stage).toBe('awake');
+
+    adapter.close();
+  });
+
   it('loads seeded snapshots and refreshes outdated derived data on startup', async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'btwearable-seed-'));
     const source = path.resolve(process.cwd(), 'assets/databases/btwearable-seed.db');
@@ -1289,6 +1529,7 @@ describe('SQLiteHealthRepository', () => {
     const firstDashboard = await repository.getDashboardSnapshot();
     expect(firstDashboard.summaryStats).toHaveLength(3);
     expect(firstDashboard.heartCard.series.length).toBeGreaterThan(0);
+    expect(firstDashboard.heartCard.markers.length).toBeGreaterThan(0);
     expect(adapter.calls).toEqual([
       expect.stringContaining('FROM dashboard_snapshot_cache'),
     ]);
@@ -1296,6 +1537,7 @@ describe('SQLiteHealthRepository', () => {
     adapter.calls.length = 0;
     const secondDashboard = await repository.getDashboardSnapshot();
     expect(secondDashboard.summaryStats).toHaveLength(3);
+    expect(secondDashboard.heartCard.markers).toEqual(firstDashboard.heartCard.markers);
     expect(adapter.calls).toHaveLength(0);
 
     adapter.close();

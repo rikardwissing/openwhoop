@@ -12,6 +12,14 @@ const EPOCH_600S_MS = 600_000;
 const MAX_SLEEP_BRIDGE_STAGE_MINUTES = 2;
 const MAX_AWAKE_BRIDGE_STAGE_MINUTES = 1.5;
 const LATE_AWAKE_BRIDGE_FRACTION = 0.75;
+const TERMINAL_LATE_WAKE_CARRY_FRACTION = 0.82;
+const MIN_SUSTAINED_LATE_WAKE_CARRY_MINUTES = 15;
+const MAX_TERMINAL_LATE_WAKE_TAIL_MINUTES = 5;
+const LATE_WAKE_CLUSTER_FRACTION = 0.72;
+const MIN_LATE_WAKE_CLUSTER_LEAD_MINUTES = 1;
+const MAX_LATE_WAKE_CLUSTER_SLEEP_SEGMENT_MINUTES = 3;
+const MAX_LATE_WAKE_CLUSTER_TOTAL_SLEEP_MINUTES = 8;
+const MAX_LATE_WAKE_CLUSTER_SPAN_MINUTES = 15;
 
 export interface SleepStageInputRow {
   date: Date;
@@ -674,6 +682,91 @@ function mergeAdjacentStageRecords(records: readonly DerivedSleepStageRecord[]) 
   return merged;
 }
 
+function collapseLateWakeTransitionClusters(
+  records: DerivedSleepStageRecord[],
+  sessionStartMs: number,
+  sessionDurationMs: number,
+) {
+  let changed = false;
+
+  for (let startIndex = 0; startIndex < records.length - 2; startIndex += 1) {
+    const startRecord = records[startIndex];
+    if (startRecord.stage !== 'awake') {
+      continue;
+    }
+
+    const startDurationMinutes = exactMinutesBetween(startRecord.start, startRecord.end);
+    const startMidpointFraction = clamp(
+      (((startRecord.start.getTime() + startRecord.end.getTime()) / 2) - sessionStartMs) / sessionDurationMs,
+      0,
+      1,
+    );
+
+    if (
+      startDurationMinutes < MIN_LATE_WAKE_CLUSTER_LEAD_MINUTES ||
+      startMidpointFraction < LATE_WAKE_CLUSTER_FRACTION
+    ) {
+      continue;
+    }
+
+    let awakeCount = 1;
+    let totalSleepMinutes = 0;
+    let clusterEndIndex = startIndex;
+
+    for (let index = startIndex + 1; index < records.length; index += 1) {
+      const record = records[index];
+      const durationMinutes = exactMinutesBetween(record.start, record.end);
+      const spanMinutes = exactMinutesBetween(startRecord.start, record.end);
+
+      if (durationMinutes <= 0 || spanMinutes > MAX_LATE_WAKE_CLUSTER_SPAN_MINUTES || record.stage === 'deep') {
+        break;
+      }
+
+      if (record.stage === 'awake') {
+        awakeCount += 1;
+        clusterEndIndex = index;
+        continue;
+      }
+
+      if (durationMinutes > MAX_LATE_WAKE_CLUSTER_SLEEP_SEGMENT_MINUTES) {
+        break;
+      }
+
+      totalSleepMinutes += durationMinutes;
+      if (totalSleepMinutes > MAX_LATE_WAKE_CLUSTER_TOTAL_SLEEP_MINUTES) {
+        break;
+      }
+
+      clusterEndIndex = index;
+    }
+
+    if (
+      clusterEndIndex <= startIndex ||
+      records[clusterEndIndex].stage !== 'awake' ||
+      awakeCount < 2 ||
+      totalSleepMinutes <= 0
+    ) {
+      continue;
+    }
+
+    for (let index = startIndex; index <= clusterEndIndex; index += 1) {
+      if (records[index].stage === 'deep') {
+        continue;
+      }
+
+      if (records[index].stage !== 'awake') {
+        records[index].stage = 'awake';
+        records[index].confidence = Math.min(records[index].confidence, 0.35);
+        changed = true;
+      }
+    }
+
+    startIndex = clusterEndIndex;
+  }
+
+  return changed;
+}
+
 function simplifyStageRecords(records: readonly DerivedSleepStageRecord[], epochDurationMs: number) {
   if (records.length < 3) {
     return [...records];
@@ -696,6 +789,7 @@ function simplifyStageRecords(records: readonly DerivedSleepStageRecord[], epoch
       const previous = simplified[index - 1];
       const next = simplified[index + 1];
       const durationMinutes = exactMinutesBetween(record.start, record.end);
+      const previousDurationMinutes = exactMinutesBetween(previous.start, previous.end);
 
       if (durationMinutes <= 0) {
         continue;
@@ -724,6 +818,19 @@ function simplifyStageRecords(records: readonly DerivedSleepStageRecord[], epoch
         continue;
       }
 
+      if (
+        record.stage !== 'deep' &&
+        previous.stage === 'awake' &&
+        previousDurationMinutes >= MIN_SUSTAINED_LATE_WAKE_CARRY_MINUTES &&
+        midpointFraction >= TERMINAL_LATE_WAKE_CARRY_FRACTION &&
+        durationMinutes <= MAX_TERMINAL_LATE_WAKE_TAIL_MINUTES
+      ) {
+        record.stage = 'awake';
+        record.confidence = Math.min(record.confidence, 0.4);
+        changed = true;
+        continue;
+      }
+
       if (previous.stage === 'awake' || next.stage === 'awake' || durationMinutes > sleepBridgeMaxMinutes) {
         continue;
       }
@@ -745,6 +852,36 @@ function simplifyStageRecords(records: readonly DerivedSleepStageRecord[], epoch
         record.confidence = Math.min(record.confidence, 0.4);
         changed = true;
       }
+    }
+
+    const lastIndex = simplified.length - 1;
+    if (lastIndex > 0) {
+      const record = simplified[lastIndex];
+      const previous = simplified[lastIndex - 1];
+      const durationMinutes = exactMinutesBetween(record.start, record.end);
+      const previousDurationMinutes = exactMinutesBetween(previous.start, previous.end);
+      const midpointFraction = clamp(
+        (((record.start.getTime() + record.end.getTime()) / 2) - sessionStartMs) / sessionDurationMs,
+        0,
+        1,
+      );
+
+      if (
+        record.stage !== 'awake' &&
+        record.stage !== 'deep' &&
+        previous.stage === 'awake' &&
+        previousDurationMinutes >= MIN_SUSTAINED_LATE_WAKE_CARRY_MINUTES &&
+        midpointFraction >= TERMINAL_LATE_WAKE_CARRY_FRACTION &&
+        durationMinutes <= MAX_TERMINAL_LATE_WAKE_TAIL_MINUTES
+      ) {
+        record.stage = 'awake';
+        record.confidence = Math.min(record.confidence, 0.4);
+        changed = true;
+      }
+    }
+
+    if (collapseLateWakeTransitionClusters(simplified, sessionStartMs, sessionDurationMs)) {
+      changed = true;
     }
 
     if (!changed) {

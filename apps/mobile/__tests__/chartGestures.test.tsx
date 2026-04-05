@@ -2,6 +2,16 @@ import { act, render } from '@testing-library/react-native';
 import { ScrollView } from 'react-native';
 import Svg from 'react-native-svg';
 
+jest.mock('@expo/vector-icons', () => {
+  const React = require('react');
+  const { Text } = require('react-native');
+
+  return {
+    Ionicons: ({ name, testID }: { name: string; testID?: string }) =>
+      React.createElement(Text, { testID }, name),
+  };
+});
+
 import { SleepStageChart } from '@/components/charts/SleepStageChart';
 import { TrendChart } from '@/components/charts/TrendChart';
 import { ScreenShell } from '@/components/layout/ScreenShell';
@@ -46,6 +56,41 @@ function createResponderEvent(locationX: number, isActive: boolean) {
 }
 
 describe('chart gesture ownership', () => {
+  it('renders interval markers on trend charts', () => {
+    const screen = render(
+      <TrendChart
+        accentColor="#00ffff"
+        markers={[
+          {
+            id: 'sleep-session',
+            iconName: 'moon',
+            accentColor: '#5d78ff',
+            backgroundColor: 'rgba(93, 120, 255, 0.14)',
+            startFraction: 0,
+            endFraction: 0.32,
+          },
+          {
+            id: 'tempo-run',
+            iconName: 'walk',
+            accentColor: '#ffd26b',
+            backgroundColor: 'rgba(255, 210, 107, 0.14)',
+            startFraction: 0.4,
+            endFraction: 0.48,
+          },
+        ]}
+        points={[
+          { label: 'Mon', value: 72 },
+          { label: 'Tue', value: 76 },
+          { label: 'Wed', value: 74 },
+        ]}
+        testID="trend-chart"
+      />,
+    );
+
+    expect(screen.getByTestId('trend-chart-marker-sleep-session')).toBeTruthy();
+    expect(screen.getByTestId('trend-chart-marker-tempo-run')).toBeTruthy();
+  });
+
   it('keeps trend scrubbing attached to the chart', () => {
     const screen = render(
       <TrendChart
