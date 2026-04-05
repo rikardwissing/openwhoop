@@ -1,5 +1,5 @@
 import { act, render } from '@testing-library/react-native';
-import { ScrollView } from 'react-native';
+import { ScrollView, StyleSheet } from 'react-native';
 import Svg from 'react-native-svg';
 
 jest.mock('@expo/vector-icons', () => {
@@ -87,8 +87,14 @@ describe('chart gesture ownership', () => {
       />,
     );
 
-    expect(screen.getByTestId('trend-chart-marker-sleep-session')).toBeTruthy();
-    expect(screen.getByTestId('trend-chart-marker-tempo-run')).toBeTruthy();
+    const sleepMarker = screen.getByTestId('trend-chart-marker-sleep-session');
+    const activityMarker = screen.getByTestId('trend-chart-marker-tempo-run');
+
+    expect(sleepMarker).toBeTruthy();
+    expect(activityMarker).toBeTruthy();
+    expect(StyleSheet.flatten(sleepMarker.props.style)?.top).toBe(
+      StyleSheet.flatten(activityMarker.props.style)?.top,
+    );
   });
 
   it('keeps trend scrubbing attached to the chart', () => {

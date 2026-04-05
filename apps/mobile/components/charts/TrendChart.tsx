@@ -138,7 +138,6 @@ export function TrendChart({
           ...marker,
           badgeFraction: clampFraction(Math.min(0.94, Math.max(0.06, midpoint))),
           bandWidth: Math.max((endFraction - startFraction) * 100, 0.8),
-          lane: index % 2,
           startX: startFraction * 100,
           testID: testID ? `${testID}-marker-${sanitizeMarkerId(marker.id)}` : undefined,
         };
@@ -339,7 +338,7 @@ export function TrendChart({
                     backgroundColor: colors.surfaceStrong,
                     borderColor: marker.accentColor,
                     left: `${marker.badgeFraction * 100}%`,
-                    top: 8 + marker.lane * 24,
+                    top: 8,
                   },
                 ]}
                 testID={marker.testID}>
