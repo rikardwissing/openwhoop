@@ -9,9 +9,11 @@ describe('MockHealthRepository', () => {
     const wellness = await repository.getWellnessSnapshot('14d');
 
     expect(dashboard.recovery.score).toBe(64);
-    expect(dashboard.summaryStats).toHaveLength(3);
+    expect(dashboard.summaryStats).toHaveLength(4);
     expect(dashboard.heartCard.series.length).toBe(288);
     expect(dashboard.heartCard.markers).toHaveLength(4);
+    expect(dashboard.activitySummary).toHaveLength(3);
+    expect(dashboard.insights.length).toBeGreaterThan(0);
     expect(heart.intraday.length).toBe(288);
     expect(heart.intradayMarkers).toHaveLength(4);
     expect(heart.intradayMarkers[0]?.kind).toBe('sleep');

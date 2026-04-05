@@ -13,7 +13,7 @@ export type HealthRefreshScope = Exclude<HealthCacheScope, 'all'> | 'all';
 export interface HealthRepository {
   primeDashboardSnapshot(): Promise<boolean>;
   refreshDashboardSnapshot(mode: 'full' | 'post_sync_heart_only'): Promise<boolean>;
-  getDashboardSnapshot(): Promise<DashboardSnapshot>;
+  getDashboardSnapshot(dayKey?: string): Promise<DashboardSnapshot>;
   getSleepHistory(range: HistoryRange): Promise<SleepHistorySnapshot>;
   getHeartHistory(range: HistoryRange): Promise<HeartHistorySnapshot>;
   getWellnessSnapshot(range: HistoryRange): Promise<WellnessSnapshot>;

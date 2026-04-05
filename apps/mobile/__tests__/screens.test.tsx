@@ -139,7 +139,8 @@ describe('screen rendering', () => {
 
     expect(await screen.findByText('Good afternoon')).toBeTruthy();
     expect(await screen.findByText('Heart Rate')).toBeTruthy();
-    expect(await screen.findByText('Strain')).toBeTruthy();
+    expect(await screen.findByTestId('today-stress-chart')).toBeTruthy();
+    expect(await screen.findByTestId('today-strain-chart')).toBeTruthy();
     expect(await screen.findByTestId('today-heart-chart-marker-sleep-latest')).toBeTruthy();
   });
 
@@ -157,6 +158,27 @@ describe('screen rendering', () => {
     expect(await screen.findByText('68 bpm')).toBeTruthy();
   });
 
+  it('moves backward and forward through dashboard days', async () => {
+    const screen = renderWithProviders(<TodayScreen />);
+
+    await screen.findByTestId('today-heart-chart');
+    expect(screen.getByTestId('today-selected-day-label').props.children).toBe('Apr 23');
+    expect(screen.getByText('Good afternoon')).toBeTruthy();
+
+    fireEvent.press(screen.getByTestId('today-day-backward-button'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('today-selected-day-label').props.children).toBe('Apr 22');
+    });
+    expect(screen.getByText('Overview')).toBeTruthy();
+
+    fireEvent.press(screen.getByTestId('today-day-forward-button'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('today-selected-day-label').props.children).toBe('Apr 23');
+    });
+  });
+
   it('opens settings from the shared header and shows the wearable battery badge', async () => {
     const screen = renderWithProviders(<TodayScreen />, {
       deviceState: {
@@ -171,6 +193,21 @@ describe('screen rendering', () => {
     fireEvent.press(screen.getByLabelText('Open settings'));
 
     expect(mockPush).toHaveBeenCalledWith('/settings');
+  });
+
+  it('opens deeper tab screens from dashboard card affordances', async () => {
+    const screen = renderWithProviders(<TodayScreen />);
+
+    await screen.findByTestId('today-heart-chart');
+
+    fireEvent.press(screen.getByTestId('today-open-heart-button'));
+    expect(mockPush).toHaveBeenCalledWith('/heart');
+
+    fireEvent.press(screen.getByTestId('today-open-sleep-button'));
+    expect(mockPush).toHaveBeenCalledWith('/sleep');
+
+    fireEvent.press(screen.getByTestId('today-open-stress-details-button'));
+    expect(mockPush).toHaveBeenCalledWith('/wellness');
   });
 
   it('runs sync from pull-to-refresh on dashboard screens when a wearable is selected', async () => {

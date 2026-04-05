@@ -81,14 +81,14 @@ function useAsyncValue<T>(
   return state;
 }
 
-export function useDashboardSnapshot() {
+export function useDashboardSnapshot(dayKey?: string) {
   const repository = useHealthRepository();
   const version = useHealthDataVersion('dashboard');
   return useAsyncValue<DashboardSnapshot>(
     repository,
-    'dashboard',
-    () => repository.getDashboardSnapshot(),
-    [repository, version],
+    `dashboard:${dayKey ?? 'latest'}`,
+    () => repository.getDashboardSnapshot(dayKey),
+    [repository, dayKey, version],
   );
 }
 

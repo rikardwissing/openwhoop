@@ -18,6 +18,11 @@ function writeF32LE(bytes: Uint8Array, offset: number, value: number) {
   view.setFloat32(offset, value, true);
 }
 
+function writeI16BE(bytes: Uint8Array, offset: number, value: number) {
+  const view = new DataView(bytes.buffer);
+  view.setInt16(offset, value, false);
+}
+
 function asciiBytes(value: string) {
   return Uint8Array.from(value, (character) => character.charCodeAt(0));
 }
@@ -113,6 +118,49 @@ describe('BLE codec', () => {
       signal_quality: 99,
       skin_contact: 1,
       accel_gravity: [0.10999999940395355, -0.019999999552965164, 0.9800000190734863],
+    });
+    expect(parsed.reading.imuData).toBeNull();
+  });
+
+  it('parses IMU history packets into accelerometer and gyro samples', () => {
+    const history = new Uint8Array(1288);
+    writeU32LE(history, 4, 1_710_000_456);
+    history[14] = 88;
+    history[15] = 2;
+    writeU16LE(history, 16, 720);
+    writeU16LE(history, 18, 710);
+
+    for (let index = 0; index < 100; index += 1) {
+      writeI16BE(history, 85 + index * 2, 1875);
+      writeI16BE(history, 285 + index * 2, 0);
+      writeI16BE(history, 485 + index * 2, 0);
+      writeI16BE(history, 688 + index * 2, 300);
+      writeI16BE(history, 888 + index * 2, 450);
+      writeI16BE(history, 1088 + index * 2, 600);
+    }
+
+    const parsed = parseNotification({
+      packetType: PacketType.HistoricalData,
+      seq: 0,
+      cmd: 0,
+      data: history,
+    });
+
+    expect(parsed.type).toBe('history');
+    if (parsed.type !== 'history') {
+      return;
+    }
+
+    expect(parsed.reading.sensorData).toBeNull();
+    expect(parsed.reading.rr).toEqual([720, 710]);
+    expect(parsed.reading.imuData).toHaveLength(100);
+    expect(parsed.reading.imuData?.[0]).toEqual({
+      acc_x_g: 1,
+      acc_y_g: 0,
+      acc_z_g: 0,
+      gyr_x_dps: 20,
+      gyr_y_dps: 30,
+      gyr_z_dps: 40,
     });
   });
 

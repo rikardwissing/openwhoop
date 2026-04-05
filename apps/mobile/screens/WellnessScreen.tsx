@@ -36,32 +36,43 @@ function WellnessMetricCard({ metric }: { metric: MetricSeries }) {
 
   return (
     <GlassCard accentColor={accentColor} style={styles.metricCard}>
-      <SectionHeader title={metric.title} trailing={metric.unit ? `${metric.unit} trend` : 'Trend'} />
-      {selection ? (
-        <ChartReadout
-          accentColor={accentColor}
-          detail={selection.point.value === null ? 'No data recorded for this day' : 'Selected daily average'}
-          label={selection.point.label}
-          style={styles.readout}
-          value={`${formatMetricValue(selection.point.value, digits)}${metric.unit ? ` ${metric.unit}` : ''}`}
-        />
-      ) : (
-        <View style={styles.metricTopRow}>
-          <Text style={styles.metricNumber}>
-            {formatMetricValue(metric.latest, digits)}
-            {metric.unit ? <Text style={styles.metricUnit}> {metric.unit}</Text> : null}
-          </Text>
-          {metric.delta !== null ? (
-            <StatChip accent={accentColor} label="Delta" value={`${formatSignedValue(metric.delta, digits)}${metric.unit}`} />
-          ) : null}
-        </View>
-      )}
-      <Text style={styles.metricDetail}>{metric.detail}</Text>
-      {metric.hasPartialData ? (
-        <View style={styles.partialRow}>
-          <StatChip accent={colors.alert} label="Signal" value="Limited samples" />
-        </View>
-      ) : null}
+      <View style={styles.metricCardIntro}>
+        <SectionHeader title={metric.title} titleNumberOfLines={1} trailing={metric.unit ? `${metric.unit} trend` : 'Trend'} />
+        {selection ? (
+          <ChartReadout
+            accentColor={accentColor}
+            detail={selection.point.value === null ? 'No data recorded for this day' : 'Selected daily average'}
+            label={selection.point.label}
+            style={styles.readout}
+            value={`${formatMetricValue(selection.point.value, digits)}${metric.unit ? ` ${metric.unit}` : ''}`}
+          />
+        ) : (
+          <View style={styles.metricTopRow}>
+            <View style={styles.metricNumberWrap}>
+              <Text adjustsFontSizeToFit minimumFontScale={0.82} numberOfLines={1} style={styles.metricNumber}>
+                {formatMetricValue(metric.latest, digits)}
+                {metric.unit ? <Text style={styles.metricUnit}> {metric.unit}</Text> : null}
+              </Text>
+            </View>
+            {metric.delta !== null ? (
+              <StatChip
+                accent={accentColor}
+                label="Delta"
+                style={styles.metricStatChip}
+                value={`${formatSignedValue(metric.delta, digits)}${metric.unit}`}
+              />
+            ) : null}
+          </View>
+        )}
+        <Text numberOfLines={2} style={styles.metricDetail}>
+          {metric.detail}
+        </Text>
+        {metric.hasPartialData ? (
+          <View style={styles.partialRow}>
+            <StatChip accent={colors.alert} label="Signal" value="Limited samples" />
+          </View>
+        ) : null}
+      </View>
       <TrendChart
         accentColor={accentColor}
         height={126}
@@ -162,14 +173,29 @@ const styles = StyleSheet.create({
   metricCard: {
     marginBottom: 0,
   },
+  metricCardIntro: {
+    marginBottom: 8,
+    minHeight: 116,
+  },
   metricTopRow: {
-    alignItems: 'center',
+    alignItems: 'flex-start',
     flexDirection: 'row',
+    gap: 12,
     justifyContent: 'space-between',
     marginBottom: 8,
+    minHeight: 50,
+  },
+  metricNumberWrap: {
+    flex: 1,
+    minWidth: 0,
+    paddingRight: 4,
+  },
+  metricStatChip: {
+    maxWidth: '44%',
   },
   metricNumber: {
     color: colors.text,
+    flexShrink: 1,
     fontFamily: typography.heading,
     fontSize: 40,
     lineHeight: 46,
@@ -183,10 +209,11 @@ const styles = StyleSheet.create({
     color: colors.muted,
     fontFamily: typography.body,
     fontSize: 13,
-    marginBottom: 8,
+    lineHeight: 18,
+    minHeight: 36,
   },
   partialRow: {
-    marginBottom: 6,
+    marginTop: 6,
   },
   readout: {
     marginBottom: 8,

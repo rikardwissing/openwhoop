@@ -6,7 +6,7 @@ import { acquireBackgroundSyncLock, releaseBackgroundSyncLock } from '@/services
 import { CMD_FROM_STRAP_UUID, CMD_TO_STRAP_UUID, DATA_FROM_STRAP_UUID, EVENTS_FROM_STRAP_UUID, EventNumber, MEMFAULT_UUID, WEARABLE_SERVICE_UUID } from '@/services/ble/constants';
 import { resolveScanDeviceName } from '@/services/ble/deviceNaming';
 import { createWearableBleManager, getRestoredWearableDevice } from '@/services/ble/bleManager';
-import { PacketAssembler, base64ToBytes, bytesToBase64, disableAlarmPacket, enterHighFrequencySyncPacket, exitHighFrequencySyncPacket, getBatteryLevelPacket, getBodyLocationAndStatusPacket, getNamePacket, helloHarvardPacket, historyEndPacket, historyStartPacket, parseNotification, restartPacket, setAlarmPacket, setClockPacket, toggleRealtimeHrPacket, type SensorDataPacket, versionInfoPacket } from '@/services/ble/codec';
+import { PacketAssembler, base64ToBytes, bytesToBase64, disableAlarmPacket, enterHighFrequencySyncPacket, exitHighFrequencySyncPacket, getBatteryLevelPacket, getBodyLocationAndStatusPacket, getNamePacket, helloHarvardPacket, historyEndPacket, historyStartPacket, parseNotification, restartPacket, setAlarmPacket, setClockPacket, toggleRealtimeHrPacket, type ImuSamplePacket, type SensorDataPacket, versionInfoPacket } from '@/services/ble/codec';
 import { HistorySyncWatchdog } from '@/services/ble/syncWatchdog';
 import type { ChargingState, DeviceState, SyncProgress, SyncResult, SyncSource, WearState, WearableLiveEvent, WearableScanResult } from '@/types/device';
 import { formatSqliteDateTime } from '@/utils/dateTime';
@@ -42,12 +42,17 @@ function serializeSensorData(value: SensorDataPacket | null) {
   return value ? JSON.stringify(value) : null;
 }
 
+function serializeImuData(value: ImuSamplePacket[] | null) {
+  return value && value.length > 0 ? JSON.stringify(value) : null;
+}
+
 function shouldPersistHistoryReading(reading: {
   bpm: number;
   rr: number[];
   sensorData: SensorDataPacket | null;
+  imuData: ImuSamplePacket[] | null;
 }) {
-  return isPlausibleRecordedBpm(reading.bpm) || reading.rr.length > 0 || reading.sensorData !== null;
+  return isPlausibleRecordedBpm(reading.bpm) || reading.rr.length > 0 || reading.sensorData !== null || reading.imuData !== null;
 }
 
 function rrToString(rr: number[]) {
@@ -88,6 +93,7 @@ interface PendingHistoryRow {
   bpm: number;
   time: string;
   rrIntervals: string;
+  imuData: string | null;
   sensorData: string | null;
 }
 
@@ -695,15 +701,17 @@ export class WearableSyncService {
           await tx.runAsync(
             `
               INSERT INTO heart_rate (bpm, time, rr_intervals, imu_data, sensor_data, synced)
-              VALUES (?, ?, ?, NULL, ?, 0)
+              VALUES (?, ?, ?, ?, ?, 0)
               ON CONFLICT(time) DO UPDATE SET
                 bpm = excluded.bpm,
                 rr_intervals = excluded.rr_intervals,
+                imu_data = excluded.imu_data,
                 sensor_data = excluded.sensor_data
             `,
             row.bpm,
             row.time,
             row.rrIntervals,
+            row.imuData,
             row.sensorData,
           );
         }
@@ -820,6 +828,7 @@ export class WearableSyncService {
                   bpm: parsed.reading.bpm,
                   time: readingTime,
                   rrIntervals: rrToString(parsed.reading.rr),
+                  imuData: serializeImuData(parsed.reading.imuData),
                   sensorData: serializeSensorData(parsed.reading.sensorData),
                 });
 

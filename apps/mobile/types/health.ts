@@ -76,14 +76,40 @@ export interface StrainCardSnapshot extends EstimatedValueMeta {
   series: TrendPoint[];
 }
 
+export interface DashboardDayState {
+  dayKey: string;
+  shortLabel: string;
+  longLabel: string;
+  isToday: boolean;
+  olderDayKey: string | null;
+  olderDayLabel: string | null;
+  newerDayKey: string | null;
+  newerDayLabel: string | null;
+}
+
+export interface DashboardInsight {
+  id: string;
+  title: string;
+  detail: string;
+  accent: AccentTone;
+}
+
 export interface DashboardSnapshot {
+  layoutVersion?: number;
   greeting: string;
   dateLabel: string;
+  day: DashboardDayState;
   recovery: RecoverySnapshot;
   summaryStats: SummaryStat[];
   heartCard: HeartCardSnapshot;
   sleepCard: SleepCardSnapshot;
   strainCard: StrainCardSnapshot;
+  hrvCard: MetricSeries;
+  stressCard: MetricSeries;
+  spo2Card: MetricSeries;
+  skinTemperatureCard: MetricSeries;
+  activitySummary: ActivitySummary[];
+  insights: DashboardInsight[];
   lastSyncLabel?: string | null;
 }
 

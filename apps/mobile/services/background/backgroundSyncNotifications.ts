@@ -14,7 +14,7 @@ interface SleepNotificationRow {
 
 interface ActivityNotificationRow {
   id: number;
-  activity: 'Nap' | 'Activity';
+  activity: 'Nap' | 'Activity' | 'Walk' | 'Workout';
   start: string;
   end: string;
 }
@@ -118,7 +118,6 @@ async function loadNewActivityNotifications(db: SQLiteDatabase, deviceId: string
       , id
       FROM activities
       WHERE end > ?
-        AND activity IN ('Nap', 'Activity')
         AND NOT EXISTS (
           SELECT 1
           FROM delivered_notifications AS delivered
@@ -212,15 +211,16 @@ export async function deliverNewBackgroundNotifications(db: SQLiteDatabase, devi
     const kind: DeliveredNotificationKind = row.activity === 'Nap' ? 'nap' : 'activity';
     const entityId = String(row.id);
     const identifier = buildNotificationIdentifier(deviceId, kind, entityId);
+    const activityLabel = row.activity === 'Nap' ? 'Nap' : row.activity;
 
     await Notifications.scheduleNotificationAsync({
       identifier,
       content: {
-        title: row.activity === 'Nap' ? 'Nap detected' : 'Activity detected',
+        title: row.activity === 'Nap' ? 'Nap detected' : `${activityLabel} detected`,
         body:
           row.activity === 'Nap'
             ? 'A newly synced nap is ready in the Sleep tab.'
-            : 'A completed activity has been synced and is ready in Wellness.',
+            : `A completed ${activityLabel.toLowerCase()} session has been synced and is ready in Wellness.`,
         data: {
           [NOTIFICATION_ROUTE_KEY]: row.activity === 'Nap' ? '/sleep' : '/wellness',
         },

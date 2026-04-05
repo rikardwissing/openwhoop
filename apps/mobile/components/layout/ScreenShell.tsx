@@ -10,6 +10,7 @@ import { colors, spacing } from '@/constants/theme';
 export function ScreenShell({
   children,
   contentStyle,
+  headerAccessory,
   headerIcon,
   headerSettingsActive = false,
   headerSettingsDisabled = false,
@@ -19,6 +20,7 @@ export function ScreenShell({
 }: {
   children: ReactNode;
   contentStyle?: StyleProp<ViewStyle>;
+  headerAccessory?: ReactNode;
   headerIcon?: AppHeaderIcon;
   headerSettingsActive?: boolean;
   headerSettingsDisabled?: boolean;
@@ -74,12 +76,15 @@ export function ScreenShell({
             scrollEnabled={activeScrollLocks === 0}
             showsVerticalScrollIndicator={false}>
             {headerTitle && headerIcon ? (
-              <AppHeader
-                icon={headerIcon}
-                settingsActive={headerSettingsActive}
-                settingsDisabled={headerSettingsDisabled}
-                title={headerTitle}
-              />
+              <>
+                <AppHeader
+                  icon={headerIcon}
+                  settingsActive={headerSettingsActive}
+                  settingsDisabled={headerSettingsDisabled}
+                  title={headerTitle}
+                />
+                {headerAccessory ? <View style={styles.headerAccessory}>{headerAccessory}</View> : null}
+              </>
             ) : null}
             {children}
           </ScrollView>
@@ -102,6 +107,9 @@ const styles = StyleSheet.create({
     paddingTop: 8,
     paddingBottom: 120,
     gap: spacing.sectionGap,
+  },
+  headerAccessory: {
+    marginTop: 8,
   },
   glow: {
     position: 'absolute',

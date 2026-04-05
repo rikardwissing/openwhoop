@@ -17,11 +17,21 @@ export interface SensorDataPacket {
   accel_gravity: [number, number, number];
 }
 
+export interface ImuSamplePacket {
+  acc_x_g: number;
+  acc_y_g: number;
+  acc_z_g: number;
+  gyr_x_dps: number;
+  gyr_y_dps: number;
+  gyr_z_dps: number;
+}
+
 export interface HistoryReadingPacket {
   unix: number;
   bpm: number;
   rr: number[];
   sensorData: SensorDataPacket | null;
+  imuData: ImuSamplePacket[] | null;
 }
 
 export interface MetadataPacket {
@@ -130,6 +140,11 @@ function readU32LE(bytes: Uint8Array, offset: number) {
     (bytes[offset + 2] << 16) |
     (bytes[offset + 3] << 24)
   ) >>> 0;
+}
+
+function readI16BE(bytes: Uint8Array, offset: number) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return view.getInt16(offset, false);
 }
 
 function readF32LE(bytes: Uint8Array, offset: number) {
@@ -325,6 +340,50 @@ export class PacketAssembler {
 function parseHistoryPacket(packet: FramedPacket): HistoryReadingPacket {
   const bytes = packet.data;
 
+  if (bytes.length >= 1288) {
+    const unix = readU32LE(bytes, 4) * 1000;
+    const bpm = bytes[14];
+    const rrCount = bytes[15];
+    const rr: number[] = [];
+
+    for (let index = 0; index < rrCount; index += 1) {
+      const value = readU16LE(bytes, 16 + index * 2);
+      if (value !== 0) {
+        rr.push(value);
+      }
+    }
+
+    const ACC_X_OFFSET = 85;
+    const ACC_Y_OFFSET = 285;
+    const ACC_Z_OFFSET = 485;
+    const GYR_X_OFFSET = 688;
+    const GYR_Y_OFFSET = 888;
+    const GYR_Z_OFFSET = 1088;
+    const N_SAMPLES_IMU = 100;
+    const ACC_SENS = 1875;
+    const GYR_SENS = 15;
+    const imuData: ImuSamplePacket[] = [];
+
+    for (let index = 0; index < N_SAMPLES_IMU; index += 1) {
+      imuData.push({
+        acc_x_g: readI16BE(bytes, ACC_X_OFFSET + index * 2) / ACC_SENS,
+        acc_y_g: readI16BE(bytes, ACC_Y_OFFSET + index * 2) / ACC_SENS,
+        acc_z_g: readI16BE(bytes, ACC_Z_OFFSET + index * 2) / ACC_SENS,
+        gyr_x_dps: readI16BE(bytes, GYR_X_OFFSET + index * 2) / GYR_SENS,
+        gyr_y_dps: readI16BE(bytes, GYR_Y_OFFSET + index * 2) / GYR_SENS,
+        gyr_z_dps: readI16BE(bytes, GYR_Z_OFFSET + index * 2) / GYR_SENS,
+      });
+    }
+
+    return {
+      unix,
+      bpm,
+      rr,
+      sensorData: null,
+      imuData,
+    };
+  }
+
   if ((packet.seq === 12 || packet.seq === 24) && bytes.length >= 77) {
     const unix = readU32LE(bytes, 4) * 1000;
     const bpm = bytes[14];
@@ -359,6 +418,7 @@ function parseHistoryPacket(packet: FramedPacket): HistoryReadingPacket {
           readF32LE(bytes, 41),
         ],
       },
+      imuData: null,
     };
   }
 
@@ -378,6 +438,7 @@ function parseHistoryPacket(packet: FramedPacket): HistoryReadingPacket {
     bpm,
     rr: rr.slice(0, rrCount),
     sensorData: null,
+    imuData: null,
   };
 }
 

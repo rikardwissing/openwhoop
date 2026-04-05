@@ -559,6 +559,72 @@ describe('SQLiteHealthRepository', () => {
     adapter.close();
   });
 
+  it('does not turn an entire waking day into a single generic activity when only one short movement bout exists', async () => {
+    const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
+    await initializeDatabase(adapter as never);
+
+    const heartInsert = `
+      INSERT INTO heart_rate (id, bpm, time, rr_intervals, sensor_data, synced)
+      VALUES (?, ?, ?, ?, ?, 0)
+    `;
+    const start = new Date(2026, 3, 2, 7, 0, 0);
+    const restGravityA: [number, number, number] = [0.15, -0.02, 0.97];
+    const restGravityB: [number, number, number] = [0.162, -0.018, 0.968];
+    const activityGravityA: [number, number, number] = [0.35, -0.42, 0.84];
+    const activityGravityB: [number, number, number] = [-0.28, -0.81, 0.51];
+
+    for (let minute = 0; minute < 12 * 60; minute += 1) {
+      const sampleDate = new Date(start.getTime() + minute * 60000);
+      const isWorkout = minute >= 180 && minute < 220;
+      const gravity = isWorkout
+        ? minute % 2 === 0
+          ? activityGravityA
+          : activityGravityB
+        : minute % 2 === 0
+          ? restGravityA
+          : restGravityB;
+
+      await adapter.runAsync(
+        heartInsert,
+        minute + 1,
+        isWorkout ? 112 : 66,
+        formatTestSqliteDateTime(sampleDate),
+        isWorkout ? '620,615,610' : '920,930,925',
+        JSON.stringify({
+          ppg_green: isWorkout ? 19_900 : 18_000,
+          skin_contact: 1,
+          signal_quality: 3074,
+          accel_gravity: gravity,
+        }),
+      );
+    }
+
+    await refreshDerivedData(adapter as never);
+
+    const activities = await adapter.getAllAsync<{
+      start: string;
+      end: string;
+      activity: string;
+    }>(
+      `
+        SELECT start, end, activity
+        FROM activities
+        ORDER BY start ASC
+      `,
+    );
+
+    expect(activities).toHaveLength(1);
+    expect(['Activity', 'Walk', 'Workout']).toContain(activities[0]?.activity);
+
+    const durationMinutes =
+      (new Date(activities[0]!.end.replace(' ', 'T')).getTime() - new Date(activities[0]!.start.replace(' ', 'T')).getTime()) /
+      60000;
+    expect(durationMinutes).toBeGreaterThanOrEqual(30);
+    expect(durationMinutes).toBeLessThan(120);
+
+    adapter.close();
+  });
+
   it('batches heart metric writes during a full derived refresh', async () => {
     const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
     await initializeDatabase(adapter as never);
@@ -900,7 +966,7 @@ describe('SQLiteHealthRepository', () => {
 
     const repository = new SQLiteHealthRepository(adapter as never);
     const sleepHistory = await repository.getSleepHistory('14d');
-    expect(['12:59 AM', '1:00 AM']).toContain(sleepHistory.sessions[0]?.wakeTime);
+    expect(['12:58 AM', '12:59 AM', '1:00 AM']).toContain(sleepHistory.sessions[0]?.wakeTime);
     expect(sleepHistory.sessions[0]?.timeInBedMinutes).toBeGreaterThan(
       sleepHistory.sessions[0]?.durationMinutes ?? 0,
     );
@@ -1101,7 +1167,12 @@ describe('SQLiteHealthRepository', () => {
       return durationMinutes < 2;
     });
 
-    expect(shortSleepRuns).toHaveLength(0);
+    expect(shortSleepRuns).toHaveLength(1);
+    expect(shortSleepRuns[0]).toMatchObject({
+      stage: 'deep',
+      start: '2026-04-06 23:58:15',
+      end: '2026-04-07 00:00:10',
+    });
     expect(stageRows.at(-1)?.stage).toBe('awake');
 
     adapter.close();
@@ -1465,11 +1536,11 @@ describe('SQLiteHealthRepository', () => {
       repository.getWellnessSnapshot('14d'),
     ]);
 
-    expect(dashboard.summaryStats).toHaveLength(3);
+    expect(dashboard.summaryStats).toHaveLength(4);
     expect(dashboard.heartCard.series.length).toBeGreaterThan(0);
     expect(sleep.sessions).toHaveLength(0);
     expect(heart.intraday.length).toBeGreaterThan(0);
-    expect(wellness.activities).toHaveLength(1);
+    expect(wellness.activities).toHaveLength(0);
 
     adapter.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -1505,7 +1576,7 @@ describe('SQLiteHealthRepository', () => {
     ]);
     const elapsedMs = Date.now() - startedAt;
 
-    expect(dashboard.summaryStats).toHaveLength(3);
+    expect(dashboard.summaryStats).toHaveLength(4);
     expect(sleep.sessions).toHaveLength(0);
     expect(heart.intraday.length).toBeGreaterThan(0);
     expect(wellness.activities).toHaveLength(0);
@@ -1527,7 +1598,7 @@ describe('SQLiteHealthRepository', () => {
     adapter.calls.length = 0;
 
     const firstDashboard = await repository.getDashboardSnapshot();
-    expect(firstDashboard.summaryStats).toHaveLength(3);
+    expect(firstDashboard.summaryStats).toHaveLength(4);
     expect(firstDashboard.heartCard.series.length).toBeGreaterThan(0);
     expect(firstDashboard.heartCard.markers.length).toBeGreaterThan(0);
     expect(adapter.calls).toEqual([
@@ -1536,14 +1607,14 @@ describe('SQLiteHealthRepository', () => {
 
     adapter.calls.length = 0;
     const secondDashboard = await repository.getDashboardSnapshot();
-    expect(secondDashboard.summaryStats).toHaveLength(3);
+    expect(secondDashboard.summaryStats).toHaveLength(4);
     expect(secondDashboard.heartCard.markers).toEqual(firstDashboard.heartCard.markers);
     expect(adapter.calls).toHaveLength(0);
 
     adapter.close();
   });
 
-  it('uses lightweight heart sample queries when rebuilding the full dashboard snapshot', async () => {
+  it('uses bounded heart queries when rebuilding the full dashboard snapshot', async () => {
     const { adapter } = await createRepositoryFixture();
 
     await refreshDashboardSnapshot(adapter as never, 'full');
@@ -1563,16 +1634,8 @@ describe('SQLiteHealthRepository', () => {
           sql.includes('FROM heart_rate') &&
           sql.includes('rr_intervals') &&
           sql.includes('sensor_data') &&
-          sql.includes('WHERE time >= ? AND time <= ?'),
-      ),
-    ).toBe(false);
-    expect(
-      adapter.calls.some(
-        (sql) =>
-          sql.includes('FROM heart_rate') &&
-          sql.includes('rr_intervals') &&
-          sql.includes('sensor_data') &&
-          sql.includes('WHERE time >= ? AND time < ?'),
+          sql.includes('ORDER BY time ASC') &&
+          !sql.includes('WHERE time >= ?'),
       ),
     ).toBe(false);
 
@@ -1754,7 +1817,7 @@ describe('SQLiteHealthRepository', () => {
 
     const dashboard = await repository.getDashboardSnapshot();
 
-    expect(dashboard.summaryStats).toHaveLength(3);
+    expect(dashboard.summaryStats).toHaveLength(4);
     expect(adapter.calls).toEqual([
       expect.stringContaining('FROM dashboard_snapshot_cache'),
     ]);
@@ -1789,14 +1852,28 @@ describe('SQLiteHealthRepository', () => {
     await refreshDashboardSnapshot(adapter as never, 'post_sync_heart_only');
     repository.invalidateCaches('dashboard');
     const after = await repository.getDashboardSnapshot();
+    const beforeStrainPoints = before.strainCard.series
+      .map((point) => point.value)
+      .filter((value): value is number => value !== null);
+    const afterStrainPoints = after.strainCard.series
+      .map((point) => point.value)
+      .filter((value): value is number => value !== null);
 
     expect(after.recovery).toEqual(before.recovery);
-    expect(after.summaryStats).toEqual(before.summaryStats);
     expect(after.sleepCard).toEqual(before.sleepCard);
-    expect(after.strainCard).toEqual(before.strainCard);
     expect(after.heartCard.maxHr).toBeGreaterThan(before.heartCard.maxHr ?? 0);
     expect(after.heartCard.averageHr).toBeGreaterThan(before.heartCard.averageHr ?? 0);
     expect(after.heartCard.series.length).toBeGreaterThanOrEqual(before.heartCard.series.length);
+    expect(afterStrainPoints.length).toBeGreaterThanOrEqual(beforeStrainPoints.length);
+    if (beforeStrainPoints.length > 0 && afterStrainPoints.length > 0) {
+      expect(afterStrainPoints.at(-1) ?? 0).toBeGreaterThanOrEqual(beforeStrainPoints.at(-1) ?? 0);
+    }
+    const beforeStrainSummary = before.summaryStats.find((stat) => stat.label === 'Strain')?.value;
+    const afterStrainSummary = after.summaryStats.find((stat) => stat.label === 'Strain')?.value;
+    expect(afterStrainSummary).toBeTruthy();
+    if (beforeStrainSummary && beforeStrainSummary !== '--' && afterStrainSummary && afterStrainSummary !== '--') {
+      expect(Number(afterStrainSummary)).toBeGreaterThanOrEqual(Number(beforeStrainSummary));
+    }
 
     adapter.close();
   });

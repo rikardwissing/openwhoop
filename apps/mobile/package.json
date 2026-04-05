@@ -9,7 +9,8 @@
     "web": "expo start --web",
     "test": "jest --runInBand",
     "typecheck": "tsc --noEmit",
-    "replay-sleep": "jest --runInBand --testRegex scripts/replaySleepStages\\.case\\.ts$"
+    "replay-sleep": "jest --runInBand --testRegex scripts/replaySleepStages\\.case\\.ts$",
+    "replay-activity": "jest --runInBand --testRegex scripts/replayActivityDetector\\.case\\.ts$"
   },
   "dependencies": {
     "@expo-google-fonts/manrope": "^0.4.2",
