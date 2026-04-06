@@ -797,6 +797,7 @@ describe('SQLiteHealthRepository', () => {
       durationMinutes: 245,
       timeInBedMinutes: 445,
     });
+    expect(sleepHistory.sessions[0]?.efficiency).toBeCloseTo((245 / 445) * 100, 5);
 
     adapter.close();
   });

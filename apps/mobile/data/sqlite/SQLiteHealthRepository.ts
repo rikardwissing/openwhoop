@@ -5887,7 +5887,10 @@ export class SQLiteHealthRepository implements HealthRepository {
             wakeTime: formatClock(summary.end),
             durationMinutes: summary.timeAsleepMinutes,
             timeInBedMinutes: summary.timeInBedMinutes,
-            efficiency: session.score,
+            efficiency:
+              summary.timeInBedMinutes > 0
+                ? summary.timeAsleepMinutes / summary.timeInBedMinutes * 100
+                : null,
             remMinutes: summary.remMinutes,
             deepMinutes: summary.deepMinutes,
             consistency: Math.round((bedtimeConsistency + wakeConsistency) / 2),
