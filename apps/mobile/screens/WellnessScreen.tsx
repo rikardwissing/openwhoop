@@ -13,6 +13,7 @@ import { useDerivedRefreshState, useWellnessSnapshot } from '@/hooks/useHealthDa
 import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
 import type { MetricSeries, TrendSelection } from '@/types/health';
 import { formatMetricValue, formatSignedValue } from '@/utils/formatters';
+import { getMetricToneColor, getRecoveryMetricTone } from '@/utils/metricTone';
 
 function accentColorFor(series: MetricSeries) {
   switch (series.accent) {
@@ -27,6 +28,18 @@ function accentColorFor(series: MetricSeries) {
     default:
       return colors.success;
   }
+}
+
+function barColorForMetric(metric: MetricSeries, value: number | null) {
+  if (value === null) {
+    return undefined;
+  }
+
+  if (metric.title === 'Recovery Index') {
+    return getMetricToneColor(getRecoveryMetricTone(value));
+  }
+
+  return undefined;
 }
 
 function WellnessMetricCard({ metric }: { metric: MetricSeries }) {
@@ -75,7 +88,9 @@ function WellnessMetricCard({ metric }: { metric: MetricSeries }) {
       </View>
       <TrendChart
         accentColor={accentColor}
+        barColorForPoint={(point) => barColorForMetric(metric, point.value)}
         height={126}
+        mode="bar"
         onSelectionChange={setSelection}
         points={metric.series}
         testID={`wellness-${metric.title.toLowerCase().replace(/\s+/g, '-')}-chart`}

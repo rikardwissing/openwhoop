@@ -72,8 +72,8 @@ export function HeartSnapshotCard({
 }: {
   chartTestID: string;
   liveHeartRateLabel?: string | null;
-  onOpen: () => void;
-  openTestID: string;
+  onOpen?: () => void;
+  openTestID?: string;
   showLiveHeartRate?: boolean;
   snapshot: HeartCardSnapshot;
   trailingLabel: string;
@@ -95,7 +95,7 @@ export function HeartSnapshotCard({
           />
           <Text style={styles.cardTitle}>Heart Rate</Text>
         </View>
-        <CardAction label={trailingLabel} onPress={onOpen} testID={openTestID} />
+        {onOpen ? <CardAction label={trailingLabel} onPress={onOpen} testID={openTestID} /> : <Text style={styles.actionMeta}>{trailingLabel}</Text>}
       </View>
 
       <View style={styles.metricRow}>

@@ -218,7 +218,15 @@ export interface WellnessSnapshot extends EstimatedValueMeta {
   activities: ActivitySummary[];
 }
 
-export type TrendMetricId = 'recovery' | 'sleepScore' | 'strain' | 'restingHr' | 'stress';
+export type TrendMetricId =
+  | 'recovery'
+  | 'hrv'
+  | 'restingHr'
+  | 'sleepScore'
+  | 'sleepDuration'
+  | 'sleepConsistency'
+  | 'stress'
+  | 'skinTemperatureDeviation';
 
 export interface TrendMetricSnapshot extends MetricSeries {
   id: TrendMetricId;

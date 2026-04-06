@@ -1,4 +1,18 @@
+import { colors } from '@/constants/theme';
 import type { MetricTone } from '@/types/health';
+
+export function getMetricToneColor(tone: MetricTone): string {
+  switch (tone) {
+    case 'good':
+      return colors.success;
+    case 'caution':
+      return colors.heart;
+    case 'alert':
+      return colors.alert;
+    default:
+      return colors.cyan;
+  }
+}
 
 export function getRecoveryMetricTone(score: number | null): MetricTone {
   if (score === null) {

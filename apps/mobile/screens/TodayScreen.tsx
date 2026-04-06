@@ -18,18 +18,6 @@ import { useWearableSyncState } from '@/providers/WearableSyncProvider';
 import { hasFreshLiveHeartRate } from '@/types/device';
 import { getRecoveryMetricTone, getSleepMetricTone, getStrainMetricTone } from '@/utils/metricTone';
 
-function HeaderStatusPill({ label }: { label: string }) {
-  return (
-    <View style={styles.headerStatusRow}>
-      <View style={styles.headerStatusPill}>
-        <Text numberOfLines={1} style={styles.headerStatusText}>
-          {label}
-        </Text>
-      </View>
-    </View>
-  );
-}
-
 export function TodayScreen() {
   const router = useRouter();
   const state = useDashboardSnapshot();
@@ -62,19 +50,11 @@ export function TodayScreen() {
     return null;
   }
 
-  const syncStatusLabel =
-    derivedRefresh.data?.status === 'pending' || derivedRefresh.data?.status === 'processing'
-      ? derivedRefresh.data.isFirstSync
-        ? 'Preparing insights from your first sync...'
-        : 'Updating today with your latest sync...'
-      : data.lastSyncLabel ?? 'Today';
-  const openHeart = () => router.push('/heart');
   const openSleep = () => router.push('/sleep');
   const openWellness = () => router.push('/wellness');
 
   return (
     <ScreenShell
-      headerAccessory={<HeaderStatusPill label={syncStatusLabel} />}
       headerIcon="today"
       headerTitle="Today"
       onRefresh={onRefresh}
@@ -126,11 +106,9 @@ export function TodayScreen() {
       <HeartSnapshotCard
         chartTestID="today-heart-chart"
         liveHeartRateLabel={liveHeartRateLabel}
-        onOpen={openHeart}
-        openTestID="today-open-heart-button"
         showLiveHeartRate={showLiveHeartRate}
         snapshot={data.heartCard}
-        trailingLabel="Today"
+        trailingLabel="Last 12h"
       />
 
       <SleepSnapshotCard
@@ -167,22 +145,6 @@ const styles = StyleSheet.create({
     fontFamily: typography.body,
     fontSize: 16,
     marginTop: 4,
-  },
-  headerStatusRow: {
-    alignItems: 'flex-start',
-  },
-  headerStatusPill: {
-    backgroundColor: 'rgba(8, 18, 25, 0.86)',
-    borderColor: colors.border,
-    borderRadius: 14,
-    borderWidth: 1,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-  },
-  headerStatusText: {
-    color: colors.primaryBright,
-    fontFamily: typography.bodySemiBold,
-    fontSize: 12,
   },
   heroRow: {
     flexDirection: 'row',

@@ -1,7 +1,7 @@
 import { LinearGradient } from 'expo-linear-gradient';
-import { useCallback, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useContext, useMemo, useState, type ReactNode } from 'react';
 import { RefreshControl, ScrollView, StyleSheet, View, type StyleProp, type ViewStyle } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaInsetsContext, SafeAreaView } from 'react-native-safe-area-context';
 
 import { AppHeader, type AppHeaderIcon } from '@/components/layout/AppHeader';
 import { ScreenScrollContext } from '@/components/layout/ScreenScrollContext';
@@ -28,8 +28,17 @@ export function ScreenShell({
   onRefresh?: () => void;
   refreshing?: boolean;
 }) {
+  const insets = useContext(SafeAreaInsetsContext);
+  const topInset = insets?.top ?? 0;
+  const bottomInset = insets?.bottom ?? 0;
   const refreshEnabled = typeof onRefresh === 'function';
   const [activeScrollLocks, setActiveScrollLocks] = useState(0);
+  const headerConfig = headerTitle && headerIcon ? { icon: headerIcon, title: headerTitle } : null;
+  const hasHeader = headerConfig !== null;
+  const fallbackHeaderHeight = (headerAccessory ? 118 : 72) + (hasHeader ? topInset : 0);
+  const [headerHeight, setHeaderHeight] = useState(0);
+  const resolvedHeaderHeight = headerHeight === 0 ? fallbackHeaderHeight : headerHeight;
+  const headerFadeHeight = resolvedHeaderHeight + 156;
 
   const acquireScrollLock = useCallback(() => {
     let released = false;
@@ -46,6 +55,10 @@ export function ScreenShell({
   }, []);
 
   const screenScrollContextValue = useMemo(() => acquireScrollLock, [acquireScrollLock]);
+  const contentTopPadding = hasHeader
+    ? resolvedHeaderHeight + 12
+    : topInset + 12;
+  const contentBottomPadding = Math.max(120, bottomInset + 104);
 
   return (
     <View style={styles.root}>
@@ -58,22 +71,11 @@ export function ScreenShell({
       <View style={[styles.glow, styles.glowTop]} />
       <View style={[styles.glow, styles.glowBottom]} />
       <ScreenScrollContext.Provider value={screenScrollContextValue}>
-        <SafeAreaView edges={['top']} style={styles.safeArea}>
-          {headerTitle && headerIcon ? (
-            <View style={styles.headerShell}>
-              <AppHeader
-                icon={headerIcon}
-                settingsActive={headerSettingsActive}
-                settingsDisabled={headerSettingsDisabled}
-                title={headerTitle}
-              />
-              {headerAccessory ? <View style={styles.headerAccessory}>{headerAccessory}</View> : null}
-            </View>
-          ) : null}
+        <SafeAreaView edges={['left', 'right']} style={styles.safeArea}>
           <ScrollView
             alwaysBounceVertical={refreshEnabled && activeScrollLocks === 0}
             bounces={refreshEnabled && activeScrollLocks === 0}
-            contentContainerStyle={[styles.content, contentStyle]}
+            contentContainerStyle={[styles.content, { paddingTop: contentTopPadding, paddingBottom: contentBottomPadding }, contentStyle]}
             refreshControl={
               refreshEnabled ? (
                 <RefreshControl
@@ -88,6 +90,31 @@ export function ScreenShell({
             showsVerticalScrollIndicator={false}>
             {children}
           </ScrollView>
+          {hasHeader ? (
+            <View pointerEvents="box-none" style={styles.headerOverlay}>
+              <LinearGradient
+                colors={['rgba(3, 8, 14, 0.995)', 'rgba(3, 8, 14, 0.94)', 'rgba(3, 8, 14, 0.76)', 'rgba(3, 8, 14, 0.38)', 'rgba(3, 8, 14, 0.1)', 'rgba(3, 8, 14, 0)']}
+                locations={[0, 0.12, 0.28, 0.5, 0.76, 1]}
+                start={{ x: 0.5, y: 0 }}
+                end={{ x: 0.5, y: 1 }}
+                style={[styles.headerGradient, { height: headerFadeHeight }]}
+              />
+              <View
+                onLayout={(event) => {
+                  const nextHeight = Math.ceil(event.nativeEvent.layout.height);
+                  setHeaderHeight((current) => (current === nextHeight ? current : nextHeight));
+                }}
+                style={[styles.headerShell, { paddingTop: topInset + 8 }]}>
+                <AppHeader
+                  icon={headerConfig.icon}
+                  settingsActive={headerSettingsActive}
+                  settingsDisabled={headerSettingsDisabled}
+                  title={headerConfig.title}
+                />
+                {headerAccessory ? <View style={styles.headerAccessory}>{headerAccessory}</View> : null}
+              </View>
+            </View>
+          ) : null}
         </SafeAreaView>
       </ScreenScrollContext.Provider>
     </View>
@@ -108,17 +135,24 @@ const styles = StyleSheet.create({
     paddingBottom: 120,
     gap: spacing.sectionGap,
   },
+  headerOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    elevation: 8,
+    zIndex: 2,
+  },
+  headerGradient: {
+    ...StyleSheet.absoluteFillObject,
+  },
   headerShell: {
     paddingHorizontal: spacing.screenPadding,
-    paddingTop: 8,
-    paddingBottom: 14,
+    paddingBottom: 18,
     gap: 8,
-    borderBottomColor: colors.border,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    backgroundColor: 'rgba(3, 8, 14, 0.94)',
   },
   headerAccessory: {
-    marginTop: 0,
+    marginTop: 2,
   },
   glow: {
     position: 'absolute',

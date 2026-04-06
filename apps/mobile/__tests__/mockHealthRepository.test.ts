@@ -5,13 +5,15 @@ describe('MockHealthRepository', () => {
     const repository = new MockHealthRepository({ delayMs: 0 });
 
     const dashboard = await repository.getDashboardSnapshot();
+    const historyDashboard = await repository.getDashboardSnapshot('2026-04-23');
     const heart = await repository.getHeartHistory('14d');
     const wellness = await repository.getWellnessSnapshot('14d');
 
     expect(dashboard.recovery.score).toBe(64);
     expect(dashboard.summaryStats).toHaveLength(4);
-    expect(dashboard.heartCard.series.length).toBe(288);
-    expect(dashboard.heartCard.markers).toHaveLength(4);
+    expect(dashboard.heartCard.series.length).toBe(145);
+    expect(dashboard.heartCard.markers).toHaveLength(1);
+    expect(historyDashboard.heartCard.series.length).toBe(288);
     expect(dashboard.activitySummary).toHaveLength(3);
     expect(dashboard.insights.length).toBeGreaterThan(0);
     expect(heart.intraday.length).toBe(288);
@@ -20,6 +22,33 @@ describe('MockHealthRepository', () => {
     expect(heart.intraday[1]?.label).toBe('12:05 AM');
     expect(wellness.activities).toHaveLength(3);
     expect(wellness.skinTemperature.hasPartialData).toBe(true);
+  });
+
+  it('returns the curated health trends board', async () => {
+    const repository = new MockHealthRepository({ delayMs: 0 });
+
+    const trends = await repository.getTrendSnapshot('14d');
+
+    expect(trends.primaryMetrics.map((metric) => metric.id)).toEqual([
+      'recovery',
+      'hrv',
+      'restingHr',
+      'sleepScore',
+    ]);
+    expect(trends.secondaryMetrics.map((metric) => metric.id)).toEqual([
+      'sleepDuration',
+      'sleepConsistency',
+      'stress',
+      'skinTemperatureDeviation',
+    ]);
+    expect(trends.primaryMetrics.find((metric) => metric.id === 'hrv')).toMatchObject({
+      latest: 82,
+      unit: 'ms',
+    });
+    expect(trends.secondaryMetrics.find((metric) => metric.id === 'skinTemperatureDeviation')).toMatchObject({
+      latest: 0.2,
+      unit: '°C',
+    });
   });
 
   it('requires alarm confirmation after the wake-up target changes', async () => {

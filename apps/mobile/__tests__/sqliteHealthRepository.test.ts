@@ -1879,6 +1879,88 @@ describe('SQLiteHealthRepository', () => {
     adapter.close();
   });
 
+  it('uses a rolling 12-hour heart window for the latest dashboard snapshot while day snapshots stay day-based', async () => {
+    const { adapter, repository } = await createRepositoryFixture();
+
+    await adapter.runAsync(
+      `
+        INSERT INTO heart_rate (id, bpm, time, rr_intervals, stress, spo2, skin_temp, sensor_data, synced)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+      `,
+      5,
+      118,
+      '2026-03-18 22:30:00',
+      '780,790,800',
+      8,
+      96,
+      33.7,
+      '{"ppg_green":26000}',
+    );
+    await adapter.runAsync(
+      `
+        INSERT INTO activities (period_id, start, end, activity, synced)
+        VALUES (?, ?, ?, ?, 0)
+      `,
+      'late-evening-workout',
+      '2026-03-18 22:20:00',
+      '2026-03-18 22:50:00',
+      'Workout',
+    );
+
+    await refreshDashboardSnapshot(adapter as never, 'full');
+    repository.invalidateCaches('dashboard');
+
+    const latestDashboard = await repository.getDashboardSnapshot();
+    const selectedDayDashboard = await repository.getDashboardSnapshot('2026-03-19');
+
+    expect(latestDashboard.heartCard.series.length).toBe(145);
+    expect(selectedDayDashboard.heartCard.series.length).toBe(288);
+    expect(latestDashboard.heartCard.averageHr).toBeGreaterThan(selectedDayDashboard.heartCard.averageHr ?? 0);
+    expect(latestDashboard.heartCard.maxHr).toBeGreaterThan(selectedDayDashboard.heartCard.maxHr ?? 0);
+    expect(latestDashboard.heartCard.markers.some((marker) => marker.label === 'Workout')).toBe(true);
+    expect(selectedDayDashboard.heartCard.markers.some((marker) => marker.label === 'Workout')).toBe(false);
+
+    adapter.close();
+  });
+
+  it('builds the curated health trends board and leaves baseline-driven metrics empty until enough nights exist', async () => {
+    const { adapter, repository } = await createRepositoryFixture();
+
+    const trends = await repository.getTrendSnapshot('14d');
+
+    expect(trends.primaryMetrics.map((metric) => metric.id)).toEqual([
+      'recovery',
+      'hrv',
+      'restingHr',
+      'sleepScore',
+    ]);
+    expect(trends.secondaryMetrics.map((metric) => metric.id)).toEqual([
+      'sleepDuration',
+      'sleepConsistency',
+      'stress',
+      'skinTemperatureDeviation',
+    ]);
+    expect(trends.primaryMetrics.find((metric) => metric.id === 'hrv')).toMatchObject({
+      latest: 53,
+      unit: 'ms',
+      hasPartialData: true,
+    });
+    expect(trends.secondaryMetrics.find((metric) => metric.id === 'sleepDuration')).toMatchObject({
+      latest: 8,
+      unit: 'h',
+    });
+    expect(trends.secondaryMetrics.find((metric) => metric.id === 'sleepConsistency')).toMatchObject({
+      latest: null,
+      missingReason: 'More nights are needed before sleep consistency can be scored.',
+    });
+    expect(trends.secondaryMetrics.find((metric) => metric.id === 'skinTemperatureDeviation')).toMatchObject({
+      latest: null,
+      missingReason: 'A few nights of temperature data are needed before baseline shifts can be tracked.',
+    });
+
+    adapter.close();
+  });
+
   it('ignores implausible max bpm placeholders when reading the intraday heart window', async () => {
     const { adapter, repository } = await createRepositoryFixture();
 

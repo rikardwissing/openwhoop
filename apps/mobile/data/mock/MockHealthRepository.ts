@@ -53,23 +53,29 @@ function average(values: Array<number | null>) {
   return valid.length === 0 ? null : mean(valid);
 }
 
-function buildIntradayHeartSeries(stepMinutes: number): TrendPoint[] {
-  const baseDate = new Date(2026, 3, 23, 0, 0, 0, 0);
-  const pointCount = (24 * 60) / stepMinutes;
+function heartRateForTime(time: Date) {
+  const minuteOfDay = time.getHours() * 60 + time.getMinutes();
+  const circadianBaseline = 68 + Math.sin((minuteOfDay / (24 * 60)) * Math.PI * 2 - Math.PI / 2) * 7;
+  const morningRise = gaussian(minuteOfDay, 420, 70, 18);
+  const middayPush = gaussian(minuteOfDay, 780, 45, 96);
+  const eveningWalk = gaussian(minuteOfDay, 1110, 70, 20);
+  const overnightDip = gaussian(minuteOfDay, 180, 80, 11);
+
+  return Math.round(clamp(circadianBaseline + morningRise + middayPush + eveningWalk - overnightDip, 52, 172));
+}
+
+function buildIntradayHeartSeries(
+  stepMinutes: number,
+  startDate = new Date(2026, 3, 23, 0, 0, 0, 0),
+  pointCount = (24 * 60) / stepMinutes,
+): TrendPoint[] {
 
   return Array.from({ length: pointCount }, (_, index) => {
-    const minuteOfDay = index * stepMinutes;
-    const time = new Date(baseDate.getTime() + minuteOfDay * 60000);
-    const circadianBaseline = 68 + Math.sin((minuteOfDay / (24 * 60)) * Math.PI * 2 - Math.PI / 2) * 7;
-    const morningRise = gaussian(minuteOfDay, 420, 70, 18);
-    const middayPush = gaussian(minuteOfDay, 780, 45, 96);
-    const eveningWalk = gaussian(minuteOfDay, 1110, 70, 20);
-    const overnightDip = gaussian(minuteOfDay, 180, 80, 11);
-    const value = Math.round(clamp(circadianBaseline + morningRise + middayPush + eveningWalk - overnightDip, 52, 172));
+    const time = new Date(startDate.getTime() + index * stepMinutes * 60000);
 
     return {
       label: formatAxisTime(time),
-      value,
+      value: heartRateForTime(time),
     };
   });
 }
@@ -95,22 +101,42 @@ function fractionOfDay(minutes: number) {
   return clamp(minutes / (24 * 60), 0, 1);
 }
 
+function fractionOfWindow(date: Date, windowStart: Date, windowEnd: Date) {
+  const totalWindowMs = Math.max(1, windowEnd.getTime() - windowStart.getTime());
+  return clamp((date.getTime() - windowStart.getTime()) / totalWindowMs, 0, 1);
+}
+
 const intradayHeartSeries = buildIntradayHeartSeries(5);
 const dashboardHeartSeries = intradayHeartSeries;
+const todayDashboardHeartWindowStart = new Date(2026, 3, 22, 19, 45, 0, 0);
+const todayDashboardHeartWindowEnd = new Date(2026, 3, 23, 7, 45, 0, 0);
+const todayDashboardHeartSeries = buildIntradayHeartSeries(
+  5,
+  todayDashboardHeartWindowStart,
+  (12 * 60) / 5 + 1,
+);
 const intradayValues = intradayHeartSeries
+  .map((point) => point.value)
+  .filter((value): value is number => value !== null);
+const todayDashboardHeartValues = todayDashboardHeartSeries
   .map((point) => point.value)
   .filter((value): value is number => value !== null);
 const intradayAverageHr = Math.round(mean(intradayValues));
 const intradayMaxHr = sustainedPeakBpm(intradayValues) ?? Math.max(...intradayValues);
+const todayDashboardAverageHr = Math.round(mean(todayDashboardHeartValues));
+const todayDashboardMaxHr = sustainedPeakBpm(todayDashboardHeartValues) ?? Math.max(...todayDashboardHeartValues);
 const strainValues = [4.4, 4.8, 5.2, 6.1, 6.8, 7.2, 7.6, 8.1, 9.4, 10.8, 9.9, 10.1, 10.9, 11];
 const scoreLabels = ['Apr 10', 'Apr 11', 'Apr 12', 'Apr 13', 'Apr 14', 'Apr 15', 'Apr 16', 'Apr 17', 'Apr 18', 'Apr 19', 'Apr 20', 'Apr 21', 'Apr 22', 'Apr 23'];
 const sleepScores = [71, 76, 74, 79, 82, 77, 81, 84, 80, 83, 78, 82, 86, 82];
 const sleepDurations = [404, 421, 438, 455, 463, 444, 458, 470, 452, 476, 447, 465, 479, 465];
+const sleepDurationHours = sleepDurations.map((value) => Number((value / 60).toFixed(1)));
+const sleepConsistencyTrend = [78, 79, 80, 82, 83, 82, 84, 85, 83, 84, 85, 87, 89, 88];
 const restingHrTrend = [53, 52, 51, 50, 50, 49, 49, 48, 48, 47, 48, 49, 48, 48];
 const hrvTrend = [71, 74, 69, 72, 77, 75, 78, 81, 76, 79, 74, 78, 84, 82];
 const stressTrend = [42, 39, 37, 34, 33, 32, 31, 31, 30, 29, 30, 29, 28, 29];
 const spo2Trend = [95, 96, 96, 97, 96, 97, 97, 96, 96, 97, 97, 96, 97, 97];
 const skinTemperatureTrend = [33.2, 33.1, 33.3, 33.4, 33.5, 33.6, 33.6, 33.4, 33.5, 33.6, 33.7, 33.7, 33.8, 33.8];
+const skinTemperatureDeviationTrend = [-0.2, -0.3, -0.2, -0.1, 0, 0.1, 0.1, -0.1, 0, 0.1, 0.2, 0.2, 0.3, 0.2];
 const recoveryTrendValues = [75, 77, 73, 71, 74, 72, 69, 70, 72, 68, 66, 65, 64, 64];
 const dayMetricLabels = ['12A', '3A', '6A', '9A', '12P', '3P', '6P', '9P'];
 const overnightMetricLabels = ['11P', '12A', '1A', '2A', '3A', '4A', '5A', '6A', '7A'];
@@ -403,6 +429,25 @@ const intradayMarkers: HeartIntradayMarker[] = [
   })),
 ];
 
+const todayIntradayMarkers: HeartIntradayMarker[] = [
+  {
+    id: 'sleep-latest',
+    kind: 'sleep',
+    label: 'Sleep',
+    timeLabel: '11:07 PM - 7:45 AM',
+    startFraction: fractionOfWindow(
+      new Date(2026, 3, 22, 23, 7, 0, 0),
+      todayDashboardHeartWindowStart,
+      todayDashboardHeartWindowEnd,
+    ),
+    endFraction: fractionOfWindow(
+      new Date(2026, 3, 23, 7, 45, 0, 0),
+      todayDashboardHeartWindowStart,
+      todayDashboardHeartWindowEnd,
+    ),
+  },
+];
+
 export class MockHealthRepository implements HealthRepository {
   private targetWakeMinutes = 7 * 60 + 45;
   private alarmEnabled = true;
@@ -442,8 +487,9 @@ export class MockHealthRepository implements HealthRepository {
   async getDashboardSnapshot(dayKey?: string): Promise<DashboardSnapshot> {
     await this.wait();
 
-    const resolvedIndex = dayKey ? Math.max(0, dashboardDayKeys.indexOf(dayKey)) : dashboardDayKeys.length - 1;
-    const selectedIndex = resolvedIndex === -1 ? dashboardDayKeys.length - 1 : resolvedIndex;
+    const resolvedIndex = dayKey ? dashboardDayKeys.indexOf(dayKey) : dashboardDayKeys.length - 1;
+    const selectedIndex = resolvedIndex >= 0 ? resolvedIndex : dashboardDayKeys.length - 1;
+    const useRollingTodayHeartWindow = dayKey === undefined;
     const day = buildDashboardDayState(selectedIndex);
     const hrvCard = buildDashboardWindowSnapshot({
       title: 'HRV',
@@ -488,6 +534,7 @@ export class MockHealthRepository implements HealthRepository {
     });
     const selectedSession = sessions[Math.max(0, sessions.length - 1 - (dashboardDayKeys.length - 1 - selectedIndex))] ?? sessions[0];
     const strainScore = strainValues[selectedIndex] ?? strainValues.at(-1) ?? null;
+    const dayOffset = Math.max(0, dashboardDayKeys.length - 1 - selectedIndex);
     const selectedActivities = activities.slice(0, selectedIndex >= dashboardDayKeys.length - 2 ? 3 : selectedIndex >= dashboardDayKeys.length - 4 ? 2 : 1);
     const tonightPlan = buildSleepPlanSnapshot(this.targetWakeMinutes, this.alarmEnabled);
 
@@ -510,10 +557,10 @@ export class MockHealthRepository implements HealthRepository {
       ],
       heartCard: {
         restingHr: restingHrTrend[selectedIndex] ?? 48,
-        averageHr: intradayAverageHr - Math.max(0, dashboardDayKeys.length - 1 - selectedIndex),
-        maxHr: intradayMaxHr - Math.max(0, dashboardDayKeys.length - 1 - selectedIndex) * 2,
-        series: dashboardHeartSeries,
-        markers: intradayMarkers,
+        averageHr: useRollingTodayHeartWindow ? todayDashboardAverageHr : intradayAverageHr - dayOffset,
+        maxHr: useRollingTodayHeartWindow ? todayDashboardMaxHr : intradayMaxHr - dayOffset * 2,
+        series: useRollingTodayHeartWindow ? todayDashboardHeartSeries : dashboardHeartSeries,
+        markers: useRollingTodayHeartWindow ? todayIntradayMarkers : intradayMarkers,
       },
       sleepCard: {
         score: selectedSession.score,
@@ -710,6 +757,23 @@ export class MockHealthRepository implements HealthRepository {
       }),
       series: takeTail(series(scoreLabels, recoveryTrendValues), range),
     } satisfies MetricSeries;
+    const hrvMetric = {
+      ...metricSeries({
+        title: 'HRV',
+        latest: hrvTrend.at(-1) ?? null,
+        average: average(hrvTrend),
+        delta:
+          hrvTrend.length < 2
+            ? null
+            : (hrvTrend.at(-1) ?? 0) - (hrvTrend.at(-2) ?? 0),
+        unit: 'ms',
+        detail: 'Overnight HRV across the selected range.',
+        accent: 'green',
+        values: hrvTrend,
+        labels: scoreLabels,
+      }),
+      series: takeTail(series(scoreLabels, hrvTrend), range),
+    } satisfies MetricSeries;
     const sleepScoreMetric = {
       ...metricSeries({
         title: 'Sleep Score',
@@ -726,24 +790,6 @@ export class MockHealthRepository implements HealthRepository {
         labels: scoreLabels,
       }),
       series: takeTail(series(scoreLabels, sleepScores), range),
-    } satisfies MetricSeries;
-    const strainMetric = {
-      ...metricSeries({
-        title: 'Strain',
-        latest: strainValues.at(-1) ?? null,
-        average: average(strainValues),
-        delta:
-          strainValues.length < 2
-            ? null
-            : (strainValues.at(-1) ?? 0) - (strainValues.at(-2) ?? 0),
-        unit: '',
-        detail: 'Daily load across the selected range.',
-        accent: 'heart',
-        values: strainValues,
-        labels: scoreLabels,
-      }),
-      series: takeTail(series(scoreLabels, strainValues), range),
-      isEstimated: true,
     } satisfies MetricSeries;
     const restingMetric = {
       ...metricSeries({
@@ -762,6 +808,40 @@ export class MockHealthRepository implements HealthRepository {
       }),
       series: takeTail(series(scoreLabels, restingHrTrend), range),
     } satisfies MetricSeries;
+    const sleepDurationMetric = {
+      ...metricSeries({
+        title: 'Sleep Duration',
+        latest: sleepDurationHours.at(-1) ?? null,
+        average: average(sleepDurationHours),
+        delta:
+          sleepDurationHours.length < 2
+            ? null
+            : (sleepDurationHours.at(-1) ?? 0) - (sleepDurationHours.at(-2) ?? 0),
+        unit: 'h',
+        detail: 'Nightly time asleep across the selected range.',
+        accent: 'cyan',
+        values: sleepDurationHours,
+        labels: scoreLabels,
+      }),
+      series: takeTail(series(scoreLabels, sleepDurationHours), range),
+    } satisfies MetricSeries;
+    const sleepConsistencyMetric = {
+      ...metricSeries({
+        title: 'Sleep Consistency',
+        latest: sleepConsistencyTrend.at(-1) ?? null,
+        average: average(sleepConsistencyTrend),
+        delta:
+          sleepConsistencyTrend.length < 2
+            ? null
+            : (sleepConsistencyTrend.at(-1) ?? 0) - (sleepConsistencyTrend.at(-2) ?? 0),
+        unit: '%',
+        detail: 'Rolling bedtime and wake-time stability across recent nights.',
+        accent: 'violet',
+        values: sleepConsistencyTrend,
+        labels: scoreLabels,
+      }),
+      series: takeTail(series(scoreLabels, sleepConsistencyTrend), range),
+    } satisfies MetricSeries;
     const stressMetric = {
       ...metricSeries({
         title: 'Stress',
@@ -777,7 +857,23 @@ export class MockHealthRepository implements HealthRepository {
         values: stressTrend,
         labels: scoreLabels,
       }),
-      series: takeTail(series(scoreLabels, stressTrend), range),
+    } satisfies MetricSeries;
+    const skinTemperatureDeviationMetric = {
+      ...metricSeries({
+        title: 'Skin Temp Deviation',
+        latest: skinTemperatureDeviationTrend.at(-1) ?? null,
+        average: average(skinTemperatureDeviationTrend),
+        delta:
+          skinTemperatureDeviationTrend.length < 2
+            ? null
+            : (skinTemperatureDeviationTrend.at(-1) ?? 0) - (skinTemperatureDeviationTrend.at(-2) ?? 0),
+        unit: '°C',
+        detail: 'Overnight temperature stayed above your recent baseline.',
+        accent: 'heart',
+        values: skinTemperatureDeviationTrend,
+        labels: scoreLabels,
+      }),
+      series: takeTail(series(scoreLabels, skinTemperatureDeviationTrend), range),
     } satisfies MetricSeries;
 
     return {
@@ -785,12 +881,15 @@ export class MockHealthRepository implements HealthRepository {
       latestLabel: buildDashboardDayState(dashboardDayKeys.length - 1).longLabel,
       primaryMetrics: [
         buildTrendMetricSnapshot(recoveryMetric, 'recovery'),
+        buildTrendMetricSnapshot(hrvMetric, 'hrv'),
+        buildTrendMetricSnapshot(restingMetric, 'restingHr'),
         buildTrendMetricSnapshot(sleepScoreMetric, 'sleepScore'),
-        buildTrendMetricSnapshot(strainMetric, 'strain'),
       ],
       secondaryMetrics: [
-        buildTrendMetricSnapshot(restingMetric, 'restingHr'),
+        buildTrendMetricSnapshot(sleepDurationMetric, 'sleepDuration'),
+        buildTrendMetricSnapshot(sleepConsistencyMetric, 'sleepConsistency'),
         buildTrendMetricSnapshot(stressMetric, 'stress'),
+        buildTrendMetricSnapshot(skinTemperatureDeviationMetric, 'skinTemperatureDeviation'),
       ],
     };
   }

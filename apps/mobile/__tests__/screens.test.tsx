@@ -1,17 +1,15 @@
 import type { ReactElement } from 'react';
 import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
-import { ScrollView } from 'react-native';
+import { ScrollView, processColor } from 'react-native';
 
 const mockPush = jest.fn();
-const mockBack = jest.fn();
-const mockReplace = jest.fn();
 let mockSegments: string[] = ['(tabs)', 'settings'];
 
 jest.mock('expo-router', () => ({
   useRouter: () => ({
     push: mockPush,
-    back: mockBack,
-    replace: mockReplace,
+    back: jest.fn(),
+    replace: jest.fn(),
   }),
   useSegments: () => mockSegments,
 }));
@@ -47,13 +45,13 @@ jest.mock('@/services/background/backgroundSyncTask', () => ({
 import { SleepStageChart } from '@/components/charts/SleepStageChart';
 import { TrendChart } from '@/components/charts/TrendChart';
 import { WearableProgressOverlay } from '@/components/ui/WearableProgressOverlay';
+import { colors } from '@/constants/theme';
 import { MockHealthRepository } from '@/data/mock/MockHealthRepository';
 import { HealthDataProvider } from '@/providers/HealthDataProvider';
 import {
   WearableSyncContextProvider,
   defaultWearableSyncContextValue,
 } from '@/providers/WearableSyncProvider';
-import { HeartScreen } from '@/screens/HeartScreen';
 import { LiveEventsScreen } from '@/screens/LiveEventsScreen';
 import { PairWearableScreen } from '@/screens/PairWearableScreen';
 import { SettingsScreen } from '@/screens/SettingsScreen';
@@ -99,13 +97,23 @@ function createWearableContextValue(overrides: Partial<{
 }
 
 function renderWithProviders(children: ReactElement, wearableOverrides = {}) {
+  return renderWithRepository(new MockHealthRepository({ delayMs: 0 }), children, wearableOverrides);
+}
+
+function renderWithRepository(repository: MockHealthRepository, children: ReactElement, wearableOverrides = {}) {
   return render(
-    <HealthDataProvider repository={new MockHealthRepository({ delayMs: 0 })}>
+    <HealthDataProvider repository={repository}>
       <WearableSyncContextProvider value={createWearableContextValue(wearableOverrides)}>
         {children}
       </WearableSyncContextProvider>
     </HealthDataProvider>,
   );
+}
+
+function getChartInstance(screen: ReturnType<typeof renderWithProviders>, component: any, testID: string) {
+  const chart = screen.UNSAFE_getAllByType(component).find((node) => node.props.testID === testID);
+  expect(chart).toBeTruthy();
+  return chart;
 }
 
 function applyChartSelection(
@@ -114,12 +122,20 @@ function applyChartSelection(
   testID: string,
   selection: unknown,
 ) {
-  const chart = screen.UNSAFE_getAllByType(component).find((node) => node.props.testID === testID);
-  expect(chart).toBeTruthy();
+  const chart = getChartInstance(screen, component, testID);
 
   act(() => {
     chart?.props.onSelectionChange?.(selection);
   });
+}
+
+function expectTrendChartMode(
+  screen: ReturnType<typeof renderWithProviders>,
+  testID: string,
+  mode: 'line' | 'bar',
+) {
+  const chart = getChartInstance(screen, TrendChart, testID);
+  expect(chart?.props.mode ?? 'line').toBe(mode);
 }
 
 function getRefreshControl(screen: ReturnType<typeof renderWithProviders>) {
@@ -128,11 +144,15 @@ function getRefreshControl(screen: ReturnType<typeof renderWithProviders>) {
   return scrollView?.props.refreshControl;
 }
 
+function normalizeSvgColor(value: unknown) {
+  return typeof value === 'object' && value !== null && 'payload' in value
+    ? (value as { payload: number }).payload
+    : value;
+}
+
 describe('screen rendering', () => {
   beforeEach(() => {
     mockPush.mockClear();
-    mockBack.mockClear();
-    mockReplace.mockClear();
     mockSegments = ['(tabs)', 'settings'];
   });
 
@@ -142,6 +162,7 @@ describe('screen rendering', () => {
     expect(await screen.findByText('Good afternoon')).toBeTruthy();
     expect(await screen.findByText('Tonight')).toBeTruthy();
     expect(await screen.findByText('Heart Rate')).toBeTruthy();
+    expect(await screen.findByText('Last 12h')).toBeTruthy();
     expect(await screen.findByTestId('today-strain-chart')).toBeTruthy();
     expect(await screen.findByTestId('today-heart-chart-marker-sleep-latest')).toBeTruthy();
   });
@@ -181,8 +202,7 @@ describe('screen rendering', () => {
 
     await screen.findByTestId('today-heart-chart');
 
-    fireEvent.press(screen.getByTestId('today-open-heart-button'));
-    expect(mockPush).toHaveBeenCalledWith('/heart');
+    expect(screen.queryByTestId('today-open-heart-button')).toBeNull();
 
     fireEvent.press(screen.getByTestId('today-open-sleep-button'));
     expect(mockPush).toHaveBeenCalledWith('/sleep');
@@ -197,7 +217,61 @@ describe('screen rendering', () => {
     expect(await screen.findByText('Patterns over time')).toBeTruthy();
     expect(await screen.findByText('Top Signals')).toBeTruthy();
     expect(await screen.findByTestId('trends-recovery-chart')).toBeTruthy();
+    expect(await screen.findByTestId('trends-hrv-chart')).toBeTruthy();
+    expect(await screen.findByTestId('trends-sleepConsistency-chart')).toBeTruthy();
     expect(await screen.findByTestId('trends-stress-chart')).toBeTruthy();
+  });
+
+  it('opens the right drill-in screen from curated trend cards', async () => {
+    const screen = renderWithProviders(<TrendsScreen />);
+
+    await screen.findByTestId('trends-hrv-chart');
+
+    fireEvent.press(screen.getByTestId('trends-open-hrv-button'));
+    expect(mockPush).toHaveBeenCalledWith('/sleep');
+
+    expect(screen.queryByTestId('trends-open-restingHr-button')).toBeNull();
+
+    fireEvent.press(screen.getByTestId('trends-open-skinTemperatureDeviation-button'));
+    expect(mockPush).toHaveBeenCalledWith('/wellness');
+  });
+
+  it('shows the selected trends value while scrubbing a trend card', async () => {
+    const screen = renderWithProviders(<TrendsScreen />);
+
+    await screen.findByTestId('trends-hrv-chart');
+
+    applyChartSelection(screen, TrendChart, 'trends-hrv-chart', {
+      index: 0,
+      point: { label: 'Apr 10', value: 71 },
+    });
+
+    expect(screen.getByText('71 ms')).toBeTruthy();
+    expect(screen.getByText('Selected overnight HRV')).toBeTruthy();
+  });
+
+  it('uses line charts for continuous or cumulative series and bars for daily buckets', async () => {
+    const todayScreen = renderWithProviders(<TodayScreen />);
+    await todayScreen.findByTestId('today-heart-chart');
+    expectTrendChartMode(todayScreen, 'today-heart-chart', 'line');
+    expectTrendChartMode(todayScreen, 'today-strain-chart', 'line');
+    todayScreen.unmount();
+
+    const trendsScreen = renderWithProviders(<TrendsScreen />);
+    await trendsScreen.findByTestId('trends-hrv-chart');
+    expectTrendChartMode(trendsScreen, 'trends-recovery-chart', 'bar');
+    expectTrendChartMode(trendsScreen, 'trends-hrv-chart', 'bar');
+    trendsScreen.unmount();
+
+    const sleepScreen = renderWithProviders(<SleepScreen />);
+    await sleepScreen.findByTestId('sleep-score-trend-chart');
+    expectTrendChartMode(sleepScreen, 'sleep-score-trend-chart', 'bar');
+    expectTrendChartMode(sleepScreen, 'sleep-duration-trend-chart', 'bar');
+    sleepScreen.unmount();
+
+    const wellnessScreen = renderWithProviders(<WellnessScreen />);
+    await wellnessScreen.findByTestId('wellness-stress-chart');
+    expectTrendChartMode(wellnessScreen, 'wellness-stress-chart', 'bar');
   });
 
   it('renders the history screen and moves between days', async () => {
@@ -281,6 +355,31 @@ describe('screen rendering', () => {
     expect(screen.queryByText('82.4%')).toBeNull();
   });
 
+  it('colors low sleep-score bars as alert values instead of the base chart accent', async () => {
+    const repository = new MockHealthRepository({ delayMs: 0 });
+    const sleepHistory = await repository.getSleepHistory('14d');
+
+    jest.spyOn(repository, 'getSleepHistory').mockResolvedValue({
+      ...sleepHistory,
+      scoreTrend: [
+        { label: 'Apr 10', value: 50 },
+        { label: 'Apr 11', value: 84 },
+        { label: 'Apr 12', value: 67 },
+      ],
+    });
+
+    const screen = renderWithRepository(repository, <SleepScreen />);
+
+    await screen.findByTestId('sleep-score-trend-chart');
+
+    expect(normalizeSvgColor(screen.getByTestId('sleep-score-trend-chart-bar-0').props.fill)).toEqual(
+      processColor(colors.alert),
+    );
+    expect(normalizeSvgColor(screen.getByTestId('sleep-score-trend-chart-bar-1').props.fill)).toEqual(
+      processColor(colors.success),
+    );
+  });
+
   it('moves backward and forward through sleep days', async () => {
     const screen = renderWithProviders(<SleepScreen />);
 
@@ -321,51 +420,6 @@ describe('screen rendering', () => {
     applyChartSelection(screen, SleepStageChart, 'sleep-last-night-stage-chart', null);
 
     expect(screen.getByText('Efficiency 91%')).toBeTruthy();
-  });
-
-  it('renders the heart screen', async () => {
-    const screen = renderWithProviders(<HeartScreen />);
-
-    expect(await screen.findByText('Intraday Heart Rate')).toBeTruthy();
-    expect(await screen.findByText('Resting HR Trend')).toBeTruthy();
-    expect(await screen.findByTestId('heart-intraday-chart-marker-sleep-latest')).toBeTruthy();
-    expect(screen.getByTestId('heart-intraday-chart-marker-activity-tempo-run')).toBeTruthy();
-    expect(screen.getByText('Icons mark sleep and activity windows.')).toBeTruthy();
-  });
-
-  it('shows live heart rate on the heart screen when streaming is active', async () => {
-    const screen = renderWithProviders(<HeartScreen />, {
-      deviceState: {
-        id: 'strap-1',
-        name: 'Neo Strap',
-        liveHeartRate: 72,
-        liveHeartRateAt: Date.now(),
-      },
-    });
-
-    expect(await screen.findByText('Live')).toBeTruthy();
-    expect(await screen.findByText('72 bpm')).toBeTruthy();
-  });
-
-  it('swaps heart chart readout while scrubbing and restores on release', async () => {
-    const screen = renderWithProviders(<HeartScreen />);
-    await screen.findByTestId('heart-intraday-chart');
-
-    expect(await screen.findByText('24-hour average')).toBeTruthy();
-    expect(await screen.findByText('79 BPM')).toBeTruthy();
-
-    applyChartSelection(screen, TrendChart, 'heart-intraday-chart', {
-      index: 13,
-      point: { label: '8:15 PM', value: 142 },
-    });
-
-    expect(screen.getAllByText('8:15 PM').length).toBeGreaterThan(0);
-    expect(screen.getByText('142 BPM')).toBeTruthy();
-
-    applyChartSelection(screen, TrendChart, 'heart-intraday-chart', null);
-
-    expect(screen.getByText('24-hour average')).toBeTruthy();
-    expect(screen.getByText('79 BPM')).toBeTruthy();
   });
 
   it('renders the wellness screen', async () => {

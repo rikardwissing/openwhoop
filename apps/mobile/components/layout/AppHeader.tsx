@@ -144,8 +144,8 @@ const styles = StyleSheet.create({
   },
   iconWrap: {
     alignItems: 'center',
-    backgroundColor: 'rgba(8, 18, 25, 0.94)',
-    borderColor: colors.border,
+    backgroundColor: 'rgba(8, 18, 25, 0.62)',
+    borderColor: 'rgba(173, 209, 223, 0.18)',
     borderRadius: 16,
     borderWidth: 1,
     height: 40,
@@ -164,8 +164,8 @@ const styles = StyleSheet.create({
   },
   settingsButton: {
     alignItems: 'center',
-    backgroundColor: 'rgba(8, 18, 25, 0.94)',
-    borderColor: colors.border,
+    backgroundColor: 'rgba(8, 18, 25, 0.62)',
+    borderColor: 'rgba(173, 209, 223, 0.18)',
     borderRadius: 16,
     borderWidth: 1,
     height: 40,

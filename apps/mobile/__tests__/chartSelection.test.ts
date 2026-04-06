@@ -1,4 +1,6 @@
 import {
+  buildTrendCoordinates,
+  buildTrendDomain,
   buildSleepStageFrames,
   selectSleepStageAtX,
   selectTrendPointAtX,
@@ -37,6 +39,70 @@ describe('chart selection helpers', () => {
       index: 1,
       point: { label: 'B', value: null },
     });
+  });
+
+  it('pads positive line-chart domains beyond the raw min and max', () => {
+    const domain = buildTrendDomain(
+      [
+        { label: 'A', value: 48 },
+        { label: 'B', value: 52 },
+        { label: 'C', value: 50 },
+      ],
+      { mode: 'line' },
+    );
+
+    expect(domain).toEqual(
+      expect.objectContaining({
+        min: expect.any(Number),
+        max: expect.any(Number),
+      }),
+    );
+    expect(domain?.min).toBeLessThan(48);
+    expect(domain?.max).toBeGreaterThan(52);
+  });
+
+  it('does not anchor positive bar charts to the exact series minimum', () => {
+    const domain = buildTrendDomain(
+      [
+        { label: 'A', value: 71 },
+        { label: 'B', value: 76 },
+        { label: 'C', value: 82 },
+      ],
+      { mode: 'bar' },
+    );
+
+    expect(domain?.min).toBeLessThan(71);
+    expect(domain?.max).toBeGreaterThan(82);
+  });
+
+  it('centers signed bar domains around zero for deviation charts', () => {
+    const domain = buildTrendDomain(
+      [
+        { label: 'A', value: -0.3 },
+        { label: 'B', value: 0.1 },
+        { label: 'C', value: 0.25 },
+      ],
+      { mode: 'bar' },
+    );
+
+    expect(domain).not.toBeNull();
+    expect(domain!.min).toBeLessThan(0);
+    expect(domain!.max).toBeGreaterThan(0);
+    expect(Math.abs(domain!.max + domain!.min)).toBeLessThan(0.0001);
+  });
+
+  it('places negative signed bars below the zero line', () => {
+    const coordinates = buildTrendCoordinates(
+      [
+        { label: 'A', value: -0.2 },
+        { label: 'B', value: 0.3 },
+      ],
+      { mode: 'bar' },
+    );
+
+    expect(coordinates[0]?.y).not.toBeNull();
+    expect(coordinates[1]?.y).not.toBeNull();
+    expect((coordinates[0]?.y ?? 0) > (coordinates[1]?.y ?? 0)).toBe(true);
   });
 
   it('builds cumulative sleep-stage offsets', () => {

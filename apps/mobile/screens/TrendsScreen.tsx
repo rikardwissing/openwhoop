@@ -19,10 +19,13 @@ const trendRanges: Array<{ label: string; value: HistoryRange }> = [
 
 function routeForMetric(metric: TrendMetricSnapshot['id']) {
   switch (metric) {
+    case 'hrv':
     case 'sleepScore':
+    case 'sleepDuration':
+    case 'sleepConsistency':
       return '/sleep' as const;
     case 'restingHr':
-      return '/heart' as const;
+      return null;
     default:
       return '/wellness' as const;
   }
@@ -83,7 +86,7 @@ export function TrendsScreen() {
       <View>
         <Text style={styles.title}>Patterns over time</Text>
         <Text style={styles.subtitle}>
-          Compare recovery, sleep, load, and daily regulation across the selected range. Latest day:
+          Track recovery, sleep rhythm, stress load, and overnight baseline shifts across the selected range. Latest day:
           {' '}
           {data.latestLabel}.
         </Text>
@@ -91,30 +94,38 @@ export function TrendsScreen() {
 
       <View style={styles.section}>
         <Text style={styles.sectionLabel}>Top Signals</Text>
-        {data.primaryMetrics.map((metric) => (
-          <TrendMetricCard
-            key={metric.id}
-            metric={metric}
-            onOpen={() => router.push(routeForMetric(metric.id))}
-            openLabel="Open"
-            openTestID={`trends-open-${metric.id}-button`}
-            testID={`trends-${metric.id}-chart`}
-          />
-        ))}
+        {data.primaryMetrics.map((metric) => {
+          const route = routeForMetric(metric.id);
+
+          return (
+            <TrendMetricCard
+              key={metric.id}
+              metric={metric}
+              onOpen={route ? () => router.push(route) : undefined}
+              openLabel={route ? 'Open' : undefined}
+              openTestID={route ? `trends-open-${metric.id}-button` : undefined}
+              testID={`trends-${metric.id}-chart`}
+            />
+          );
+        })}
       </View>
 
       <View style={styles.section}>
         <Text style={styles.sectionLabel}>Supporting Signals</Text>
-        {data.secondaryMetrics.map((metric) => (
-          <TrendMetricCard
-            key={metric.id}
-            metric={metric}
-            onOpen={() => router.push(routeForMetric(metric.id))}
-            openLabel="Open"
-            openTestID={`trends-open-${metric.id}-button`}
-            testID={`trends-${metric.id}-chart`}
-          />
-        ))}
+        {data.secondaryMetrics.map((metric) => {
+          const route = routeForMetric(metric.id);
+
+          return (
+            <TrendMetricCard
+              key={metric.id}
+              metric={metric}
+              onOpen={route ? () => router.push(route) : undefined}
+              openLabel={route ? 'Open' : undefined}
+              openTestID={route ? `trends-open-${metric.id}-button` : undefined}
+              testID={`trends-${metric.id}-chart`}
+            />
+          );
+        })}
       </View>
     </ScreenShell>
   );

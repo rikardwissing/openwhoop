@@ -45,12 +45,14 @@ const NO_HISTORY_REASON = 'No local history yet. Sync the wearable from Settings
 const NO_SLEEP_REASON = 'No overnight sleep has been detected yet. Leave the wearable on long enough for a full sleep window.';
 const LIMITED_SENSOR_REASON = 'The wearable has not collected enough samples for this signal yet.';
 const LIMITED_LOAD_REASON = 'More heart data is needed before daily load can be estimated.';
+const BUILDING_SLEEP_CONSISTENCY_REASON = 'More nights are needed before sleep consistency can be scored.';
+const BUILDING_TEMPERATURE_BASELINE_REASON = 'A few nights of temperature data are needed before baseline shifts can be tracked.';
 
 const dashboardAggregateEnsurePromises = new WeakMap<SQLiteDatabase, Promise<void>>();
 const heartIntradayEnsurePromises = new WeakMap<SQLiteDatabase, Promise<void>>();
 const wellnessDayEnsurePromises = new WeakMap<SQLiteDatabase, Promise<void>>();
 
-const DASHBOARD_LAYOUT_VERSION = 3;
+const DASHBOARD_LAYOUT_VERSION = 4;
 const MIN_SLEEP_DURATION_MINUTES = 60;
 const MAX_SLEEP_PAUSE_MINUTES = 60;
 const ACTIVITY_CHANGE_THRESHOLD_MINUTES = 15;
@@ -64,6 +66,12 @@ const DASHBOARD_HEART_BUCKET_MINUTES = 5;
 const DASHBOARD_DAY_METRIC_BUCKET_MINUTES = 60;
 const DASHBOARD_SLEEP_METRIC_BUCKET_MINUTES = 30;
 const HEART_INTRADAY_BUCKET_MINUTES = 5;
+const TODAY_HEART_WINDOW_HOURS = 12;
+const SLEEP_CONSISTENCY_WINDOW_NIGHTS = 7;
+const MIN_SLEEP_CONSISTENCY_NIGHTS = 3;
+const TEMPERATURE_BASELINE_WINDOW_NIGHTS = 14;
+const MIN_TEMPERATURE_BASELINE_NIGHTS = 3;
+const TEMPERATURE_BASELINE_NEUTRAL_DELTA = 0.15;
 
 const SHOULD_LOG_MOBILE_PERF =
   typeof __DEV__ !== 'undefined' &&
@@ -613,6 +621,106 @@ function relativeDelta(current: number | null, baseline: number | null): number 
   }
 
   return (current - baseline) / baseline;
+}
+
+function sleepClockMinutes(date: Date) {
+  return date.getHours() * 60 + date.getMinutes();
+}
+
+function calculateSleepConsistencyScore(sleeps: readonly SleepCycleRecord[]) {
+  if (sleeps.length < MIN_SLEEP_CONSISTENCY_NIGHTS) {
+    return null;
+  }
+
+  const bedtimeValues = sleeps.map((sleep) => sleepClockMinutes(sleep.start));
+  const wakeValues = sleeps.map((sleep) => sleepClockMinutes(sleep.end));
+  const bedtimeMean = mean(bedtimeValues);
+  const wakeMean = mean(wakeValues);
+  const bedtimeConsistency = clamp(100 - stdDev(bedtimeValues, bedtimeMean) / Math.max(1, bedtimeMean) * 100, 0, 100);
+  const wakeConsistency = clamp(100 - stdDev(wakeValues, wakeMean) / Math.max(1, wakeMean) * 100, 0, 100);
+
+  return Math.round((bedtimeConsistency + wakeConsistency) / 2);
+}
+
+function buildSleepCycleTrendSeries(options: {
+  sleeps: readonly SleepCycleRecord[];
+  range: HistoryRange;
+  endDate: Date;
+  digits?: number;
+  valueForSleep: (sleep: SleepCycleRecord, index: number, sleeps: readonly SleepCycleRecord[]) => number | null;
+}) {
+  const digits = options.digits ?? 0;
+  const valuesByDay = new Map<string, number | null>();
+
+  options.sleeps.forEach((sleep, index) => {
+    const value = options.valueForSleep(sleep, index, options.sleeps);
+    valuesByDay.set(dateKey(sleep.end), value === null ? null : Number(value.toFixed(digits)));
+  });
+
+  return buildFilledDailySeries(options.range, options.endDate, (day) => valuesByDay.get(day) ?? null);
+}
+
+function latestSeriesValue(series: readonly TrendPoint[]) {
+  return series.at(-1)?.value ?? null;
+}
+
+function previousSeriesValue(series: readonly TrendPoint[]) {
+  for (let index = series.length - 2; index >= 0; index -= 1) {
+    const value = series[index]?.value ?? null;
+    if (value !== null) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+function buildTrendMetricSeries(options: {
+  title: string;
+  unit: string;
+  accent: MetricSeries['accent'];
+  detail: string;
+  series: TrendPoint[];
+  missingReason: string;
+  digits?: number;
+  minFilledPoints?: number;
+  isEstimated?: boolean;
+}) {
+  const digits = options.digits ?? 0;
+  const latest = latestSeriesValue(options.series);
+  const previous = previousSeriesValue(options.series);
+  const values = trendValues(options.series);
+
+  return {
+    title: options.title,
+    latest: latest === null ? null : Number(latest.toFixed(digits)),
+    average: values.length === 0 ? null : Number(mean(values).toFixed(digits)),
+    delta:
+      latest === null || previous === null
+        ? null
+        : Number((latest - previous).toFixed(digits)),
+    unit: options.unit,
+    detail: latest === null ? options.missingReason : options.detail,
+    accent: options.accent,
+    series: options.series,
+    isEstimated: options.isEstimated ?? true,
+    hasPartialData: values.length > 0 && values.length < (options.minFilledPoints ?? 4),
+    missingReason: latest === null ? options.missingReason : null,
+  } satisfies MetricSeries;
+}
+
+function describeSkinTemperatureDeviation(delta: number | null) {
+  if (delta === null) {
+    return BUILDING_TEMPERATURE_BASELINE_REASON;
+  }
+
+  if (Math.abs(delta) < TEMPERATURE_BASELINE_NEUTRAL_DELTA) {
+    return 'Overnight temperature stayed close to your recent baseline.';
+  }
+
+  return delta > 0
+    ? 'Overnight temperature stayed above your recent baseline.'
+    : 'Overnight temperature stayed below your recent baseline.';
 }
 
 function rrToRmssd(rr: number[]): number | null {
@@ -4540,13 +4648,17 @@ async function loadDashboardIntradayRows(
   latestHeartTime: string | null,
   options?: { ensureBuckets?: boolean },
 ) {
-  return loadIntradayHeartWindow(db, latestHeartTime, options);
+  return loadIntradayHeartWindow(db, latestHeartTime, {
+    ...options,
+    useStoredBuckets: false,
+    windowHours: TODAY_HEART_WINDOW_HOURS,
+  });
 }
 
 async function loadIntradayHeartWindow(
   db: SQLiteDatabase,
   latestHeartTime: string | null,
-  options?: { ensureBuckets?: boolean },
+  options?: { ensureBuckets?: boolean; useStoredBuckets?: boolean; windowHours?: number },
 ): Promise<BucketedHeartWindow> {
   if (!latestHeartTime) {
     return {
@@ -4560,34 +4672,11 @@ async function loadIntradayHeartWindow(
   }
 
   const latestHeartDate = parseSqliteDateTime(latestHeartTime);
-  const intradayStart = new Date(latestHeartDate.getTime() - 24 * 3600000);
+  const windowHours = options?.windowHours ?? 24;
+  const intradayStart = new Date(latestHeartDate.getTime() - windowHours * 3600000);
   const intradayStartSql = formatSqliteDateTime(intradayStart);
   const firstBucketStart = bucketStartForDate(intradayStart);
   const lastBucketStart = bucketStartForSqliteTime(latestHeartTime);
-
-  if (await hasInvalidRecordedBpmRowsInRange(db, intradayStartSql, latestHeartTime)) {
-    const rawRows = await queryHeartSampleRows(
-      db,
-      `
-        SELECT bpm, time
-        FROM heart_rate
-        WHERE time >= ? AND time <= ?
-        ORDER BY time ASC
-      `,
-      [intradayStartSql, latestHeartTime],
-    );
-    const bucketRows = buildIntradayBucketRows(rawRows);
-    const rawWindow = summarizeBucketWindow(bucketRows);
-
-    return {
-      latestHeartDate,
-      intradayStart,
-      rawRowCount: rawWindow.rawRowCount,
-      bucketSamples: rawWindow.bucketSamples,
-      averageBpm: rawWindow.averageBpm,
-      sustainedPeakBpm: rawWindow.sustainedPeakBpm,
-    };
-  }
 
   const loadRawWindow = async () => {
     const rawRows = await queryHeartSampleRows(
@@ -4612,6 +4701,10 @@ async function loadIntradayHeartWindow(
       sustainedPeakBpm: rawWindow.sustainedPeakBpm,
     } satisfies BucketedHeartWindow;
   };
+
+  if (options?.useStoredBuckets === false || (await hasInvalidRecordedBpmRowsInRange(db, intradayStartSql, latestHeartTime))) {
+    return loadRawWindow();
+  }
 
   if (options?.ensureBuckets !== false) {
     await ensureHeartIntradayBucketsReady(db);
@@ -4678,6 +4771,47 @@ async function loadIntradayHeartWindow(
     bucketSamples: summarizedWindow.bucketSamples,
     averageBpm: summarizedWindow.averageBpm,
     sustainedPeakBpm: summarizedWindow.sustainedPeakBpm,
+  };
+}
+
+async function loadLatestDashboardHeartCard(
+  db: SQLiteDatabase,
+  latestHeartTime: string | null,
+  sleepCycles: readonly SleepCycleRecord[],
+) {
+  const heartWindow = await loadDashboardIntradayRows(db, latestHeartTime);
+
+  if (!heartWindow.intradayStart || !heartWindow.latestHeartDate) {
+    return {
+      heartWindow,
+      heartCardSeries: [],
+      heartCardMarkers: [],
+    };
+  }
+
+  const heartMarkerActivities = await loadActivitiesOverlappingRange(
+    db,
+    heartWindow.intradayStart,
+    heartWindow.latestHeartDate,
+  );
+
+  return {
+    heartWindow,
+    heartCardSeries:
+      heartWindow.bucketSamples.length > 0
+        ? createTimeBuckets(
+            heartWindow.bucketSamples,
+            DASHBOARD_HEART_BUCKET_MINUTES,
+            heartWindow.intradayStart,
+            heartWindow.latestHeartDate,
+          )
+        : [],
+    heartCardMarkers: buildHeartIntradayMarkers(
+      heartWindow.intradayStart,
+      heartWindow.latestHeartDate,
+      sleepCycles,
+      heartMarkerActivities,
+    ),
   };
 }
 
@@ -4774,11 +4908,11 @@ async function buildFullDashboardSnapshot(db: SQLiteDatabase): Promise<Dashboard
   const selectedDayStart = startOfDayFromDayKey(selectedDayKey);
   const selectedDayEnd = endOfDashboardDayWindow(selectedDayKey, true, latestHeartDate);
   const detailLoadStartedAt = Date.now();
-  const [selectedDayHeartRows, selectedSleepHeartRows, stageRecords, heartMarkerActivities] = await Promise.all([
+  const [selectedDayHeartRows, selectedSleepHeartRows, stageRecords, latestDashboardHeartCard] = await Promise.all([
     loadHeartRowsForDay(db, selectedDayKey),
     latestSleep ? loadHeartRowsBetweenRange(db, latestSleep.start, latestSleep.end) : Promise.resolve([]),
     loadLatestSleepStagesForDashboard(db, latestSleep),
-    loadActivitiesOverlappingRange(db, selectedDayStart, selectedDayEnd),
+    loadLatestDashboardHeartCard(db, heartState.latest_heart_time, sleepCycles),
   ]);
   logMobilePerf('dashboard.full.loadDetail', detailLoadStartedAt, {
     dayRows: selectedDayHeartRows.length,
@@ -4792,25 +4926,6 @@ async function buildFullDashboardSnapshot(db: SQLiteDatabase): Promise<Dashboard
   const maxHr = personalizeMaxHrFromObservedPeak(heartState.observed_peak_bpm, restingHr);
   const recovery = estimateRecoveryScoreFromSleeps(latestSleep, sleepCycles, heartState.latest_stress);
   const tonightPlan = buildSleepPlanSnapshot(sleepPreferences, sleepCycles, napActivities);
-  const heartDayBucketRows = buildIntradayBucketRows(
-    selectedDayHeartRows.map((row) => ({ bpm: row.bpm, time: row.time })),
-  );
-  const heartDayWindow = summarizeBucketWindow(heartDayBucketRows);
-  const heartCardSeries =
-    heartDayWindow.bucketSamples.length > 0
-      ? createTimeBuckets(
-          heartDayWindow.bucketSamples,
-          DASHBOARD_HEART_BUCKET_MINUTES,
-          selectedDayStart,
-          selectedDayEnd,
-        )
-      : [];
-  const heartCardMarkers = buildHeartIntradayMarkers(
-    selectedDayStart,
-    selectedDayEnd,
-    latestSleep ? [latestSleep] : [],
-    heartMarkerActivities,
-  );
   const sleepCard = buildDashboardSleepCard(latestSleep, stageRecords);
   const dayStatsByDay = new Map(heartDayStats.map((stat) => [stat.day, stat]));
   const todayStrain = dayStatsByDay.get(selectedDayKey)?.strainScore ?? null;
@@ -4842,7 +4957,7 @@ async function buildFullDashboardSnapshot(db: SQLiteDatabase): Promise<Dashboard
     selectedSleepHeartRows,
   });
   logMobilePerf('dashboard.full.computeCards', computeStartedAt, {
-    intradayPoints: heartCardSeries.length,
+    intradayPoints: latestDashboardHeartCard.heartCardSeries.length,
     strainPoints: strainSeries.length,
     hasSleep: latestSleep !== null,
   });
@@ -4888,11 +5003,11 @@ async function buildFullDashboardSnapshot(db: SQLiteDatabase): Promise<Dashboard
     ],
     heartCard: {
       restingHr,
-      averageHr: heartDayWindow.averageBpm,
-      maxHr: heartDayWindow.sustainedPeakBpm,
-      series: heartCardSeries,
-      markers: heartCardMarkers,
-      missingReason: heartCardSeries.length === 0 ? NO_HISTORY_REASON : null,
+      averageHr: latestDashboardHeartCard.heartWindow.averageBpm,
+      maxHr: latestDashboardHeartCard.heartWindow.sustainedPeakBpm,
+      series: latestDashboardHeartCard.heartCardSeries,
+      markers: latestDashboardHeartCard.heartCardMarkers,
+      missingReason: latestDashboardHeartCard.heartCardSeries.length === 0 ? NO_HISTORY_REASON : null,
     },
     sleepCard,
     strainCard: {
@@ -4946,7 +5061,7 @@ async function buildPostSyncHeartOnlySnapshot(db: SQLiteDatabase): Promise<Dashb
   const selectedDayStart = startOfDayFromDayKey(selectedDayKey);
   const restingHr = baseline.heartCard.restingHr ?? 50;
   const maxHr = personalizeMaxHrFromObservedPeak(heartState.observed_peak_bpm, restingHr);
-  const [selectedDayHeartSamples, heartMarkerActivities] = await Promise.all([
+  const [selectedDayHeartSamples, latestDashboardHeartCard] = await Promise.all([
     queryHeartSamples(
       db,
       `
@@ -4957,18 +5072,8 @@ async function buildPostSyncHeartOnlySnapshot(db: SQLiteDatabase): Promise<Dashb
       `,
       [formatSqliteDateTime(selectedDayStart), formatSqliteDateTime(latestHeartDate)],
     ),
-    loadActivitiesOverlappingRange(db, selectedDayStart, latestHeartDate),
+    loadLatestDashboardHeartCard(db, heartState.latest_heart_time, sleepCycles),
   ]);
-  const heartDayBucketRows = buildIntradayBucketRows(
-    selectedDayHeartSamples.map((row) => ({ bpm: row.bpm, time: row.time })),
-  );
-  const heartDayWindow = summarizeBucketWindow(heartDayBucketRows);
-  const heartCardMarkers = buildHeartIntradayMarkers(
-    selectedDayStart,
-    latestHeartDate,
-    sleepCycles,
-    heartMarkerActivities,
-  );
   const strainSeries = buildCumulativeStrainSeries(
     selectedDayHeartSamples,
     selectedDayStart,
@@ -4992,20 +5097,15 @@ async function buildPostSyncHeartOnlySnapshot(db: SQLiteDatabase): Promise<Dashb
     dateLabel: formatLongDate(now),
     heartCard: {
       ...baseline.heartCard,
-      averageHr: heartDayWindow.averageBpm ?? baseline.heartCard.averageHr,
-      maxHr: heartDayWindow.sustainedPeakBpm ?? baseline.heartCard.maxHr,
+      averageHr: latestDashboardHeartCard.heartWindow.averageBpm ?? baseline.heartCard.averageHr,
+      maxHr: latestDashboardHeartCard.heartWindow.sustainedPeakBpm ?? baseline.heartCard.maxHr,
       series:
-        heartDayWindow.bucketSamples.length > 0
-          ? createTimeBuckets(
-              heartDayWindow.bucketSamples,
-              DASHBOARD_HEART_BUCKET_MINUTES,
-              selectedDayStart,
-              latestHeartDate,
-            )
+        latestDashboardHeartCard.heartCardSeries.length > 0
+          ? latestDashboardHeartCard.heartCardSeries
           : baseline.heartCard.series,
-      markers: heartCardMarkers,
+      markers: latestDashboardHeartCard.heartCardMarkers,
       missingReason:
-        heartDayWindow.bucketSamples.length > 0 ? null : baseline.heartCard.missingReason,
+        latestDashboardHeartCard.heartCardSeries.length > 0 ? null : baseline.heartCard.missingReason,
     },
     summaryStats: baseline.summaryStats.map((stat) =>
       stat.label === 'Strain'
@@ -6350,6 +6450,11 @@ export class SQLiteHealthRepository implements HealthRepository {
           this.getWellnessSnapshot(range),
           this.loadLatestHeartDate(),
         ]);
+        const trendSleepCycles = await this.loadRecentSleepCycles(
+          rangeDays(range) + TEMPERATURE_BASELINE_WINDOW_NIGHTS,
+        );
+        const selectedSleepCycles = trendSleepCycles.slice(-rangeDays(range));
+        const latestTrendSleep = selectedSleepCycles.at(-1) ?? null;
 
         const emptyMetric = (
           id: TrendMetricSnapshot['id'],
@@ -6379,23 +6484,77 @@ export class SQLiteHealthRepository implements HealthRepository {
             latestLabel: 'No history',
             primaryMetrics: [
               emptyMetric('recovery', 'Recovery', 'green', '%', NO_HISTORY_REASON),
+              emptyMetric('hrv', 'HRV', 'green', 'ms', NO_SLEEP_REASON),
+              emptyMetric('restingHr', 'Resting HR', 'cyan', 'bpm', NO_HISTORY_REASON),
               emptyMetric('sleepScore', 'Sleep Score', 'violet', '%', NO_SLEEP_REASON),
-              emptyMetric('strain', 'Strain', 'heart', '', NO_HISTORY_REASON),
             ],
             secondaryMetrics: [
-              emptyMetric('restingHr', 'Resting HR', 'cyan', 'bpm', NO_HISTORY_REASON),
+              emptyMetric('sleepDuration', 'Sleep Duration', 'cyan', 'h', NO_SLEEP_REASON),
+              emptyMetric('sleepConsistency', 'Sleep Consistency', 'violet', '%', BUILDING_SLEEP_CONSISTENCY_REASON),
               emptyMetric('stress', 'Stress', 'alert', '', NO_HISTORY_REASON),
+              emptyMetric('skinTemperatureDeviation', 'Skin Temp Deviation', 'heart', '°C', BUILDING_TEMPERATURE_BASELINE_REASON),
             ],
             missingReason: NO_HISTORY_REASON,
           } satisfies TrendSnapshot;
         }
 
-        const heartDayStats = await loadHeartDayStatsThroughDay(this.db, dateKey(latestHeartDate), rangeDays(range));
-        const strainByDay = new Map(heartDayStats.map((stat) => [stat.day, stat.strainScore]));
-        const strainSeries = buildFilledDailySeries(range, latestHeartDate, (day) => strainByDay.get(day) ?? null);
-        const strainValues = trendValues(strainSeries);
         const sleepScoreValues = trendValues(sleep.scoreTrend);
         const restingValues = trendValues(heart.weeklyResting);
+        const hrvSeries = latestTrendSleep
+          ? buildSleepCycleTrendSeries({
+              sleeps: selectedSleepCycles,
+              range,
+              endDate: latestTrendSleep.end,
+              valueForSleep: (session) => (session.avgHrv > 0 ? session.avgHrv : null),
+            })
+          : [];
+        const sleepDurationSeries = sleep.durationTrend.map((point) => ({
+          ...point,
+          value: point.value === null ? null : Number((point.value / 60).toFixed(1)),
+        }));
+        const sleepConsistencySeries = latestTrendSleep
+          ? buildSleepCycleTrendSeries({
+              sleeps: selectedSleepCycles,
+              range,
+              endDate: latestTrendSleep.end,
+              valueForSleep: (_sleep, index) => {
+                const globalIndex = trendSleepCycles.length - selectedSleepCycles.length + index;
+                const windowStart = Math.max(0, globalIndex - (SLEEP_CONSISTENCY_WINDOW_NIGHTS - 1));
+                return calculateSleepConsistencyScore(trendSleepCycles.slice(windowStart, globalIndex + 1));
+              },
+            })
+          : [];
+        const skinTemperatureDeviationSeries = latestTrendSleep
+          ? buildSleepCycleTrendSeries({
+              sleeps: selectedSleepCycles,
+              range,
+              endDate: latestTrendSleep.end,
+              digits: 1,
+              valueForSleep: (_sleep, index) => {
+                const globalIndex = trendSleepCycles.length - selectedSleepCycles.length + index;
+                const current = trendSleepCycles[globalIndex] ?? null;
+                if (!current || current.avgSkinTemp === null) {
+                  return null;
+                }
+
+                const priorTemps = trendSleepCycles
+                  .slice(Math.max(0, globalIndex - TEMPERATURE_BASELINE_WINDOW_NIGHTS), globalIndex)
+                  .map((sleepCycle) => sleepCycle.avgSkinTemp)
+                  .filter((value): value is number => value !== null);
+
+                if (priorTemps.length < MIN_TEMPERATURE_BASELINE_NIGHTS) {
+                  return null;
+                }
+
+                const priorMedianTemp = median(priorTemps);
+                return priorMedianTemp === null ? null : current.avgSkinTemp - priorMedianTemp;
+              },
+            })
+          : [];
+        const latestTemperatureDeviation = latestSeriesValue(skinTemperatureDeviationSeries);
+        const hrvMissingReason = selectedSleepCycles.length === 0 ? NO_SLEEP_REASON : LIMITED_SENSOR_REASON;
+        const consistencyMissingReason = selectedSleepCycles.length === 0 ? NO_SLEEP_REASON : BUILDING_SLEEP_CONSISTENCY_REASON;
+        const temperatureMissingReason = selectedSleepCycles.length === 0 ? NO_SLEEP_REASON : BUILDING_TEMPERATURE_BASELINE_REASON;
 
         const snapshot = {
           range,
@@ -6410,49 +6569,17 @@ export class SQLiteHealthRepository implements HealthRepository {
               'recovery',
             ),
             buildTrendMetricSnapshot(
-              {
-                title: 'Sleep Score',
-                latest: sleep.headlineScore,
-                average: sleepScoreValues.length === 0 ? null : mean(sleepScoreValues),
-                delta:
-                  sleepScoreValues.length < 2
-                    ? null
-                    : sleepScoreValues.at(-1)! - sleepScoreValues.at(-2)!,
-                unit: '%',
-                detail:
-                  sleep.headlineScore === null
-                    ? sleep.missingReason ?? NO_SLEEP_REASON
-                    : 'Nightly sleep score across the selected range.',
-                accent: 'violet',
-                series: sleep.scoreTrend,
-                missingReason: sleep.headlineScore === null ? sleep.missingReason ?? NO_SLEEP_REASON : null,
-              },
-              'sleepScore',
+              buildTrendMetricSeries({
+                title: 'HRV',
+                unit: 'ms',
+                accent: 'green',
+                detail: 'Overnight HRV across the selected range.',
+                series: hrvSeries,
+                missingReason: hrvMissingReason,
+                minFilledPoints: 3,
+              }),
+              'hrv',
             ),
-            buildTrendMetricSnapshot(
-              {
-                title: 'Strain',
-                latest: strainValues.at(-1) ?? null,
-                average: strainValues.length === 0 ? null : mean(strainValues),
-                delta:
-                  strainValues.length < 2
-                    ? null
-                    : strainValues.at(-1)! - strainValues.at(-2)!,
-                unit: '',
-                detail:
-                  strainValues.length === 0
-                    ? NO_HISTORY_REASON
-                    : 'Daily load across the selected range.',
-                accent: 'heart',
-                series: strainSeries,
-                isEstimated: true,
-                hasPartialData: strainValues.length < Math.min(rangeDays(range), 7),
-                missingReason: strainValues.length === 0 ? NO_HISTORY_REASON : null,
-              },
-              'strain',
-            ),
-          ],
-          secondaryMetrics: [
             buildTrendMetricSnapshot(
               {
                 title: 'Resting HR',
@@ -6475,10 +6602,70 @@ export class SQLiteHealthRepository implements HealthRepository {
             ),
             buildTrendMetricSnapshot(
               {
+                title: 'Sleep Score',
+                latest: sleep.headlineScore,
+                average: sleepScoreValues.length === 0 ? null : mean(sleepScoreValues),
+                delta:
+                  sleepScoreValues.length < 2
+                    ? null
+                    : sleepScoreValues.at(-1)! - sleepScoreValues.at(-2)!,
+                unit: '%',
+                detail:
+                  sleep.headlineScore === null
+                    ? sleep.missingReason ?? NO_SLEEP_REASON
+                    : 'Nightly sleep score across the selected range.',
+                accent: 'violet',
+                series: sleep.scoreTrend,
+                missingReason: sleep.headlineScore === null ? sleep.missingReason ?? NO_SLEEP_REASON : null,
+              },
+              'sleepScore',
+            ),
+          ],
+          secondaryMetrics: [
+            buildTrendMetricSnapshot(
+              buildTrendMetricSeries({
+                title: 'Sleep Duration',
+                unit: 'h',
+                accent: 'cyan',
+                detail: 'Nightly time asleep across the selected range.',
+                series: sleepDurationSeries,
+                digits: 1,
+                missingReason: sleep.missingReason ?? NO_SLEEP_REASON,
+                minFilledPoints: 3,
+              }),
+              'sleepDuration',
+            ),
+            buildTrendMetricSnapshot(
+              buildTrendMetricSeries({
+                title: 'Sleep Consistency',
+                unit: '%',
+                accent: 'violet',
+                detail: 'Rolling bedtime and wake-time stability across recent nights.',
+                series: sleepConsistencySeries,
+                missingReason: consistencyMissingReason,
+                minFilledPoints: 3,
+              }),
+              'sleepConsistency',
+            ),
+            buildTrendMetricSnapshot(
+              {
                 ...wellness.stress,
                 title: 'Stress',
               },
               'stress',
+            ),
+            buildTrendMetricSnapshot(
+              buildTrendMetricSeries({
+                title: 'Skin Temp Deviation',
+                unit: '°C',
+                accent: 'heart',
+                detail: describeSkinTemperatureDeviation(latestTemperatureDeviation),
+                series: skinTemperatureDeviationSeries,
+                digits: 1,
+                missingReason: temperatureMissingReason,
+                minFilledPoints: 3,
+              }),
+              'skinTemperatureDeviation',
             ),
           ],
         } satisfies TrendSnapshot;

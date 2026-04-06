@@ -16,6 +16,7 @@ import { colors, typography } from '@/constants/theme';
 import { useDashboardSnapshot } from '@/hooks/useHealthData';
 import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
 import { getRecoveryMetricTone, getSleepMetricTone, getStrainMetricTone } from '@/utils/metricTone';
+import { dateKey } from '@/utils/dateTime';
 
 function HistoryHeaderAccessory({
   canGoBack,
@@ -78,7 +79,7 @@ function HistoryHeaderAccessory({
 
 export function HistoryScreen() {
   const router = useRouter();
-  const [selectedDayKey, setSelectedDayKey] = useState<string | undefined>(undefined);
+  const [selectedDayKey, setSelectedDayKey] = useState<string | undefined>(() => dateKey(new Date()));
   const [pickerVisible, setPickerVisible] = useState(false);
   const state = useDashboardSnapshot(selectedDayKey);
   const { onRefresh, refreshing } = useWearableRefreshControl();
@@ -109,7 +110,6 @@ export function HistoryScreen() {
     return null;
   }
 
-  const openHeart = () => router.push('/heart');
   const openSleep = () => router.push('/sleep');
   const openWellness = () => router.push('/wellness');
 
@@ -173,8 +173,6 @@ export function HistoryScreen() {
 
         <HeartSnapshotCard
           chartTestID="history-heart-chart"
-          onOpen={openHeart}
-          openTestID="history-open-heart-button"
           snapshot={data.heartCard}
           trailingLabel={data.day.shortLabel}
         />

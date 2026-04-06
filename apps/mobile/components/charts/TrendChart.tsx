@@ -13,12 +13,19 @@ import Svg, {
 
 import {
   TREND_VIEWBOX_BASELINE,
+  TREND_VIEWBOX_WIDTH,
+  buildTrendDomain,
   buildTrendCoordinates,
+  mapTrendValueToY,
   selectTrendPointAtX,
 } from '@/components/charts/chartSelection';
 import { useAcquireScreenScrollLock } from '@/components/layout/ScreenScrollContext';
 import { colors, typography } from '@/constants/theme';
 import type { TrendPoint, TrendSelection } from '@/types/health';
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
 
 function colorStops(accent: string) {
   switch (accent) {
@@ -62,6 +69,44 @@ function buildLineSegments(coordinates: Array<{ x: number; y: number | null }>) 
   return segments;
 }
 
+interface TrendBarFrame {
+  baselineY: number;
+  height: number;
+  index: number;
+  width: number;
+  x: number;
+  y: number;
+}
+
+function buildBarFrames(
+  coordinates: Array<{ x: number; y: number | null }>,
+  domain: { min: number; max: number } | null,
+): Array<TrendBarFrame | null> {
+  if (coordinates.length === 0 || !domain) {
+    return [];
+  }
+
+  const spacing = coordinates.length === 1 ? 22 : coordinates[1]!.x - coordinates[0]!.x;
+  const width = clamp(spacing * 0.62, 1.8, 18);
+  const baselineValue = domain.min < 0 && domain.max > 0 ? 0 : domain.max <= 0 ? domain.max : domain.min;
+  const baselineY = mapTrendValueToY(baselineValue, domain);
+
+  return coordinates.map((coordinate, index) => {
+    if (coordinate.y === null) {
+      return null;
+    }
+
+    return {
+      baselineY,
+      height: Math.max(Math.abs(baselineY - coordinate.y), 0.9),
+      index,
+      width,
+      x: clamp(coordinate.x - width / 2, 0, TREND_VIEWBOX_WIDTH - width),
+      y: Math.min(coordinate.y, baselineY),
+    };
+  });
+}
+
 export interface TrendChartMarker {
   id: string;
   iconName: keyof typeof Ionicons.glyphMap;
@@ -83,18 +128,22 @@ function sanitizeMarkerId(value: string) {
 export function TrendChart({
   points,
   accentColor,
+  barColorForPoint,
   height = 148,
   lineStrokeWidth = 1,
   markers = [],
+  mode = 'line',
   onSelectionChange,
   shadowStrokeWidth = 2.1,
   testID,
 }: {
   points: TrendPoint[];
   accentColor: string;
+  barColorForPoint?: (point: TrendPoint, index: number) => string | undefined;
   height?: number;
   lineStrokeWidth?: number;
   markers?: TrendChartMarker[];
+  mode?: 'line' | 'bar';
   onSelectionChange?: (selection: TrendSelection | null) => void;
   shadowStrokeWidth?: number;
   testID?: string;
@@ -106,7 +155,9 @@ export function TrendChart({
   const chartId = useId().replace(/[:]/g, '');
   const acquireScreenScrollLock = useAcquireScreenScrollLock();
 
-  const coordinates = useMemo(() => buildTrendCoordinates(points), [points]);
+  const domain = useMemo(() => buildTrendDomain(points, { mode }), [mode, points]);
+  const coordinates = useMemo(() => buildTrendCoordinates(points, { mode, domain }), [domain, mode, points]);
+  const barFrames = useMemo(() => buildBarFrames(coordinates, domain), [coordinates, domain]);
   const lineSegments = useMemo(() => buildLineSegments(coordinates), [coordinates]);
   const paths = useMemo(() => lineSegments.map((segment) => buildLine(segment)), [lineSegments]);
   const areas = useMemo(
@@ -122,11 +173,21 @@ export function TrendChart({
     [lineSegments],
   );
   const selectedCoordinate = selection ? coordinates[selection.index] ?? null : null;
+  const selectedBar = selection ? barFrames[selection.index] ?? null : null;
   const activeCoordinate =
-    selectedCoordinate && selectedCoordinate.y !== null
+    mode === 'line' && selectedCoordinate && selectedCoordinate.y !== null
       ? { x: selectedCoordinate.x, y: selectedCoordinate.y }
       : null;
-  const activeX = selectedCoordinate?.x ?? null;
+  const activeX =
+    mode === 'bar'
+      ? selectedBar
+        ? selectedBar.x + selectedBar.width / 2
+        : selectedCoordinate?.x ?? null
+      : selectedCoordinate?.x ?? null;
+  const guideLineY =
+    domain && domain.min < 0 && domain.max > 0
+      ? mapTrendValueToY(0, domain)
+      : 24;
   const markerVisuals = useMemo(
     () =>
       markers.map((marker, index) => {
@@ -166,9 +227,9 @@ export function TrendChart({
 
   const updateSelection = useCallback(
     (touchX: number) => {
-      commitSelection(selectTrendPointAtX(points, chartWidth, touchX));
+      commitSelection(selectTrendPointAtX(points, chartWidth, touchX, { mode }));
     },
-    [chartWidth, commitSelection, points],
+    [chartWidth, commitSelection, mode, points],
   );
 
   const ensureScrollLock = useCallback(() => {
@@ -250,6 +311,10 @@ export function TrendChart({
               <Stop offset="0%" stopColor={end} stopOpacity="0.32" />
               <Stop offset="100%" stopColor={start} stopOpacity="0.02" />
             </SvgLinearGradient>
+            <SvgLinearGradient id={`${chartId}-bar`} x1="0%" x2="0%" y1="0%" y2="100%">
+              <Stop offset="0%" stopColor={end} stopOpacity="0.94" />
+              <Stop offset="100%" stopColor={start} stopOpacity="0.34" />
+            </SvgLinearGradient>
           </Defs>
           {markerVisuals.map((marker) => (
             <Rect
@@ -269,14 +334,63 @@ export function TrendChart({
             strokeWidth="0.7"
             x1="0"
             x2="100"
-            y1="24"
-            y2="24"
+            y1={guideLineY}
+            y2={guideLineY}
           />
+          {mode === 'line'
+            ? areas.map((area, index) => <Path key={`area-${index}`} d={area} fill={`url(#${chartId}-fill)`} />)
+            : barFrames.map((bar) =>
+                bar ? (
+                  <Rect
+                    key={`bar-${bar.index}`}
+                    fill={barColorForPoint?.(points[bar.index] ?? { label: '', value: null }, bar.index) ?? `url(#${chartId}-bar)`}
+                    fillOpacity={selection?.index === bar.index ? 1 : 0.88}
+                    height={bar.height}
+                    opacity={selection?.index === bar.index ? 1 : 0.92}
+                    rx={Math.min(bar.width / 2, 1.6)}
+                    ry={Math.min(bar.width / 2, 1.6)}
+                    stroke={
+                      selection?.index === bar.index
+                        ? barColorForPoint?.(points[bar.index] ?? { label: '', value: null }, bar.index) ?? accentColor
+                        : 'transparent'
+                    }
+                    strokeOpacity={selection?.index === bar.index ? 0.44 : 0}
+                    strokeWidth={selection?.index === bar.index ? 0.5 : 0}
+                    testID={testID ? `${testID}-bar-${bar.index}` : undefined}
+                    width={bar.width}
+                    x={bar.x}
+                    y={bar.y}
+                  />
+                ) : null,
+              )}
+          {mode === 'line'
+            ? paths.map((path, index) => (
+                <Path
+                  key={`shadow-${index}`}
+                  d={path}
+                  fill="none"
+                  stroke="rgba(86, 246, 255, 0.12)"
+                  strokeWidth={shadowStrokeWidth}
+                />
+              ))
+            : null}
+          {mode === 'line'
+            ? paths.map((path, index) => (
+                <Path
+                  key={`line-${index}`}
+                  d={path}
+                  fill="none"
+                  stroke={`url(#${chartId}-stroke)`}
+                  strokeLinecap="round"
+                  strokeWidth={lineStrokeWidth}
+                />
+              ))
+            : null}
           {activeX !== null ? (
             <Line
               stroke={accentColor}
               strokeDasharray="2 2"
-              strokeOpacity="0.35"
+              strokeOpacity={mode === 'bar' ? '0.26' : '0.35'}
               strokeWidth="0.7"
               x1={activeX}
               x2={activeX}
@@ -284,28 +398,6 @@ export function TrendChart({
               y2={TREND_VIEWBOX_BASELINE}
             />
           ) : null}
-          {areas.map((area, index) => (
-            <Path key={`area-${index}`} d={area} fill={`url(#${chartId}-fill)`} />
-          ))}
-          {paths.map((path, index) => (
-            <Path
-              key={`shadow-${index}`}
-              d={path}
-              fill="none"
-              stroke="rgba(86, 246, 255, 0.12)"
-              strokeWidth={shadowStrokeWidth}
-            />
-          ))}
-          {paths.map((path, index) => (
-            <Path
-              key={`line-${index}`}
-              d={path}
-              fill="none"
-              stroke={`url(#${chartId}-stroke)`}
-              strokeLinecap="round"
-              strokeWidth={lineStrokeWidth}
-            />
-          ))}
           {activeCoordinate ? (
             <>
               <Circle

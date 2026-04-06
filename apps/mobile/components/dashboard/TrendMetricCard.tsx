@@ -1,13 +1,16 @@
+import { useState } from 'react';
 import { Ionicons } from '@expo/vector-icons';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
+import { ChartReadout } from '@/components/charts/ChartReadout';
 import { TrendChart } from '@/components/charts/TrendChart';
 import { SectionHeader } from '@/components/layout/SectionHeader';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { StatChip } from '@/components/ui/StatChip';
 import { colors, typography } from '@/constants/theme';
-import type { TrendMetricSnapshot } from '@/types/health';
+import type { TrendMetricSnapshot, TrendSelection } from '@/types/health';
 import { formatMetricValue, formatSignedValue } from '@/utils/formatters';
+import { getMetricToneColor, getRecoveryMetricTone, getSleepMetricTone } from '@/utils/metricTone';
 
 function accentColorFor(metric: TrendMetricSnapshot) {
   switch (metric.accent) {
@@ -24,6 +27,21 @@ function accentColorFor(metric: TrendMetricSnapshot) {
   }
 }
 
+function barColorForMetric(metric: TrendMetricSnapshot, value: number | null) {
+  if (value === null) {
+    return undefined;
+  }
+
+  switch (metric.id) {
+    case 'recovery':
+      return getMetricToneColor(getRecoveryMetricTone(value));
+    case 'sleepScore':
+      return getMetricToneColor(getSleepMetricTone(value));
+    default:
+      return undefined;
+  }
+}
+
 export function TrendMetricCard({
   metric,
   onOpen,
@@ -32,19 +50,44 @@ export function TrendMetricCard({
   testID,
 }: {
   metric: TrendMetricSnapshot;
-  onOpen: () => void;
-  openLabel: string;
-  openTestID: string;
+  onOpen?: () => void;
+  openLabel?: string;
+  openTestID?: string;
   testID: string;
 }) {
   const accentColor = accentColorFor(metric);
-  const digits = metric.unit === 'bpm' || metric.unit === '%' || metric.unit === '' ? (metric.id === 'strain' ? 1 : 0) : 1;
+  const [selection, setSelection] = useState<TrendSelection | null>(null);
+  const digits =
+    metric.id === 'sleepDuration' || metric.id === 'skinTemperatureDeviation'
+      ? 1
+      : metric.id === 'hrv' || metric.unit === 'bpm' || metric.unit === '%' || metric.unit === '' || metric.unit === 'ms'
+        ? 0
+        : 1;
+  const selectionDetail = selection
+    ? selection.point.value === null
+      ? 'No data recorded for this day'
+      : metric.id === 'hrv'
+        ? 'Selected overnight HRV'
+        : metric.id === 'restingHr'
+          ? 'Selected nightly resting HR'
+          : metric.id === 'sleepScore'
+            ? 'Selected nightly sleep score'
+            : metric.id === 'sleepDuration'
+              ? 'Selected nightly time asleep'
+              : metric.id === 'sleepConsistency'
+                ? 'Selected rolling sleep consistency'
+                : metric.id === 'skinTemperatureDeviation'
+                  ? 'Selected overnight temperature deviation'
+                  : metric.id === 'stress'
+                    ? 'Selected daily stress average'
+                    : 'Selected daily value'
+            : undefined;
 
   return (
     <GlassCard accentColor={accentColor}>
       <SectionHeader
         title={metric.title}
-        trailing={
+        trailing={onOpen && openLabel ? (
           <Pressable
             accessibilityRole="button"
             onPress={onOpen}
@@ -53,31 +96,56 @@ export function TrendMetricCard({
             <Text style={styles.openText}>{openLabel}</Text>
             <Ionicons color={colors.primaryBright} name="chevron-forward" size={14} />
           </Pressable>
-        }
+        ) : undefined}
       />
 
-      <View style={styles.topRow}>
-        <View style={styles.valueWrap}>
-          <Text adjustsFontSizeToFit minimumFontScale={0.82} numberOfLines={1} style={styles.value}>
-            {formatMetricValue(metric.latest, digits)}
-            {metric.unit ? <Text style={styles.unit}> {metric.unit}</Text> : null}
-          </Text>
+      {selection ? (
+        <ChartReadout
+          accentColor={accentColor}
+          detail={selectionDetail}
+          label={selection.point.label}
+          size="compact"
+          style={styles.readout}
+          value={`${formatMetricValue(selection.point.value, digits)}${metric.unit ? ` ${metric.unit}` : ''}`}
+        />
+      ) : (
+        <View style={styles.topRow}>
+          <View style={styles.valueWrap}>
+            <Text adjustsFontSizeToFit minimumFontScale={0.82} numberOfLines={1} style={styles.value}>
+              {formatMetricValue(metric.latest, digits)}
+              {metric.unit ? <Text style={styles.unit}> {metric.unit}</Text> : null}
+            </Text>
+          </View>
+          {metric.delta !== null ? (
+            <StatChip
+              accent={accentColor}
+              label="Delta"
+              style={styles.deltaChip}
+              value={`${formatSignedValue(metric.delta, digits)}${metric.unit}`}
+            />
+          ) : null}
         </View>
-        {metric.delta !== null ? (
-          <StatChip
-            accent={accentColor}
-            label="Delta"
-            style={styles.deltaChip}
-            value={`${formatSignedValue(metric.delta, digits)}${metric.unit}`}
-          />
-        ) : null}
-      </View>
+      )}
 
       <Text numberOfLines={2} style={styles.detail}>
         {metric.detail}
       </Text>
 
-      <TrendChart accentColor={accentColor} height={132} points={metric.series} testID={testID} />
+      {metric.hasPartialData ? (
+        <View style={styles.signalRow}>
+          <StatChip accent={colors.alert} label="Signal" value="Limited samples" />
+        </View>
+      ) : null}
+
+      <TrendChart
+        accentColor={accentColor}
+        barColorForPoint={(point) => barColorForMetric(metric, point.value)}
+        height={132}
+        mode="bar"
+        onSelectionChange={setSelection}
+        points={metric.series}
+        testID={testID}
+      />
     </GlassCard>
   );
 }
@@ -132,5 +200,11 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     marginBottom: 10,
     minHeight: 36,
+  },
+  readout: {
+    marginBottom: 8,
+  },
+  signalRow: {
+    marginBottom: 10,
   },
 });

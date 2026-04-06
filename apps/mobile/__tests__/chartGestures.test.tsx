@@ -97,6 +97,48 @@ describe('chart gesture ownership', () => {
     );
   });
 
+  it('renders daily aggregate series as rounded bars when bar mode is enabled', () => {
+    const screen = render(
+      <TrendChart
+        accentColor="#00ffff"
+        mode="bar"
+        points={[
+          { label: 'Mon', value: 72 },
+          { label: 'Tue', value: 76 },
+          { label: 'Wed', value: 74 },
+        ]}
+        testID="trend-chart"
+      />,
+    );
+
+    expect(screen.getByTestId('trend-chart-bar-0')).toBeTruthy();
+    expect(screen.getByTestId('trend-chart-bar-1')).toBeTruthy();
+    expect(screen.getByTestId('trend-chart-bar-2')).toBeTruthy();
+  });
+
+  it('keeps the last bar gap consistent with the preceding bars', () => {
+    const screen = render(
+      <TrendChart
+        accentColor="#00ffff"
+        mode="bar"
+        points={Array.from({ length: 14 }, (_, index) => ({
+          label: `${index}`,
+          value: 60 + index,
+        }))}
+        testID="trend-chart"
+      />,
+    );
+
+    const bar10 = screen.getByTestId('trend-chart-bar-10');
+    const bar11 = screen.getByTestId('trend-chart-bar-11');
+    const bar12 = screen.getByTestId('trend-chart-bar-12');
+    const bar13 = screen.getByTestId('trend-chart-bar-13');
+    const gapBeforeLast = Number(bar13.props.x) - (Number(bar12.props.x) + Number(bar12.props.width));
+    const priorGap = Number(bar11.props.x) - (Number(bar10.props.x) + Number(bar10.props.width));
+
+    expect(Math.abs(gapBeforeLast - priorGap)).toBeLessThan(0.01);
+  });
+
   it('keeps trend scrubbing attached to the chart', () => {
     const screen = render(
       <TrendChart

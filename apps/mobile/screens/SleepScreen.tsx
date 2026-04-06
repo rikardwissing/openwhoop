@@ -28,7 +28,7 @@ import {
   formatSleepStageLabel,
 } from '@/utils/formatters';
 import { formatClockMinutes } from '@/utils/dateTime';
-import { getSleepMetricTone } from '@/utils/metricTone';
+import { getMetricToneColor, getSleepMetricTone } from '@/utils/metricTone';
 import { calculateOptimalBedtimeMinutes, nextUpcomingClockDate, roundClockMinutes } from '@/utils/sleepPlan';
 
 const stageBreakdownOrder: SleepStage[] = ['deep', 'light', 'rem', 'awake'];
@@ -550,6 +550,10 @@ export function SleepScreen() {
         />
         <TrendChart
           accentColor={colors.violet}
+          barColorForPoint={(point) =>
+            point.value === null ? undefined : getMetricToneColor(getSleepMetricTone(point.value))
+          }
+          mode="bar"
           onSelectionChange={setScoreSelection}
           points={data.scoreTrend}
           testID="sleep-score-trend-chart"
@@ -577,6 +581,7 @@ export function SleepScreen() {
         />
         <TrendChart
           accentColor={colors.aqua}
+          mode="bar"
           onSelectionChange={setDurationSelection}
           points={data.durationTrend}
           testID="sleep-duration-trend-chart"
