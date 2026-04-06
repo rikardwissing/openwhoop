@@ -7,6 +7,7 @@ import { generateSleepStageRecords, isAwakePpgValue } from '@/data/sqlite/sleepS
 import { DERIVED_DATA_SCHEMA_VERSION } from '@/db/schema';
 import type {
   ActivitySummary,
+  DashboardDayOption,
   DashboardDayState,
   DashboardInsight,
   DerivedRefreshState,
@@ -22,7 +23,9 @@ import type {
   SleepSession,
   SleepStage,
   SleepStageSegment,
+  TrendMetricSnapshot,
   TrendPoint,
+  TrendSnapshot,
   WellnessSnapshot,
 } from '@/types/health';
 import { addMinutes, dateKey, formatAxisTime, formatClock, formatClockMinutes, formatLongDate, formatShortDate, formatSqliteDateTime, hoursBetween, minutesBetween, parseSqliteDateTime } from '@/utils/dateTime';
@@ -47,7 +50,7 @@ const dashboardAggregateEnsurePromises = new WeakMap<SQLiteDatabase, Promise<voi
 const heartIntradayEnsurePromises = new WeakMap<SQLiteDatabase, Promise<void>>();
 const wellnessDayEnsurePromises = new WeakMap<SQLiteDatabase, Promise<void>>();
 
-const DASHBOARD_LAYOUT_VERSION = 2;
+const DASHBOARD_LAYOUT_VERSION = 3;
 const MIN_SLEEP_DURATION_MINUTES = 60;
 const MAX_SLEEP_PAUSE_MINUTES = 60;
 const ACTIVITY_CHANGE_THRESHOLD_MINUTES = 15;
@@ -1644,6 +1647,14 @@ function buildDashboardDayState(dayKey: string, availableDayKeys: readonly strin
   const selectedDate = dateFromDayKey(dayKey);
   const selectedIndex = availableDayKeys.indexOf(dayKey);
   const todayKey = dateKey(new Date());
+  const availableDays: DashboardDayOption[] = availableDayKeys.map((availableDayKey) => {
+    const availableDate = dateFromDayKey(availableDayKey);
+    return {
+      dayKey: availableDayKey,
+      shortLabel: formatShortDate(availableDate),
+      longLabel: formatLongDate(availableDate),
+    };
+  });
 
   return {
     dayKey,
@@ -1663,6 +1674,14 @@ function buildDashboardDayState(dayKey: string, availableDayKeys: readonly strin
       selectedIndex >= 0 && selectedIndex < availableDayKeys.length - 1 && availableDayKeys[selectedIndex + 1]
         ? formatShortDate(dateFromDayKey(availableDayKeys[selectedIndex + 1]!))
         : null,
+    availableDays,
+  };
+}
+
+function buildTrendMetricSnapshot(metric: MetricSeries, id: TrendMetricSnapshot['id']): TrendMetricSnapshot {
+  return {
+    ...metric,
+    id,
   };
 }
 
@@ -1724,6 +1743,11 @@ function buildDashboardInsights(options: {
 
 function buildEmptyDashboardSnapshot(now: Date, deviceState: DeviceStateRow | null): DashboardSnapshot {
   const dayKey = dateKey(now);
+  const defaultSleepNeedMinutes = BASE_SLEEP_NEED_MINUTES;
+  const defaultOptimalBedtimeMinutes = calculateOptimalBedtimeMinutes(
+    DEFAULT_TARGET_WAKE_MINUTES,
+    defaultSleepNeedMinutes,
+  );
   return {
     layoutVersion: DASHBOARD_LAYOUT_VERSION,
     greeting: greetingForHour(now.getHours()),
@@ -1735,6 +1759,16 @@ function buildEmptyDashboardSnapshot(now: Date, deviceState: DeviceStateRow | nu
       caption: 'Recovery',
       isEstimated: true,
       missingReason: NO_HISTORY_REASON,
+    },
+    tonightPlan: {
+      targetWakeMinutes: DEFAULT_TARGET_WAKE_MINUTES,
+      targetWakeTime: formatClockMinutes(DEFAULT_TARGET_WAKE_MINUTES),
+      optimalBedtimeMinutes: defaultOptimalBedtimeMinutes,
+      optimalBedtime: formatClockMinutes(defaultOptimalBedtimeMinutes),
+      sleepNeedMinutes: defaultSleepNeedMinutes,
+      sleepDebtMinutes: 0,
+      napCreditMinutes: 0,
+      alarmEnabled: false,
     },
     summaryStats: [
       { label: 'HRV', value: '-- ms', accent: 'green', missingReason: NO_HISTORY_REASON },
@@ -2782,20 +2816,57 @@ function parseDashboardSnapshot(snapshotJson: string): DashboardSnapshot | null 
     const parsed = JSON.parse(snapshotJson) as DashboardSnapshot;
     const now = new Date();
     const fallbackDayKey = dateKey(now);
-    return {
-      ...parsed,
-      layoutVersion: parsed.layoutVersion ?? 1,
-      day:
-        parsed.day ?? {
+    const fallbackDay = {
+      dayKey: fallbackDayKey,
+      shortLabel: formatShortDate(now),
+      longLabel: formatLongDate(now),
+      isToday: true,
+      olderDayKey: null,
+      olderDayLabel: null,
+      newerDayKey: null,
+      newerDayLabel: null,
+      availableDays: [
+        {
           dayKey: fallbackDayKey,
           shortLabel: formatShortDate(now),
           longLabel: formatLongDate(now),
-          isToday: true,
-          olderDayKey: null,
-          olderDayLabel: null,
-          newerDayKey: null,
-          newerDayLabel: null,
         },
+      ],
+    } satisfies DashboardDayState;
+    const fallbackTonightPlan = {
+      targetWakeMinutes: DEFAULT_TARGET_WAKE_MINUTES,
+      targetWakeTime: formatClockMinutes(DEFAULT_TARGET_WAKE_MINUTES),
+      optimalBedtimeMinutes: calculateOptimalBedtimeMinutes(
+        DEFAULT_TARGET_WAKE_MINUTES,
+        BASE_SLEEP_NEED_MINUTES,
+      ),
+      optimalBedtime: formatClockMinutes(
+        calculateOptimalBedtimeMinutes(DEFAULT_TARGET_WAKE_MINUTES, BASE_SLEEP_NEED_MINUTES),
+      ),
+      sleepNeedMinutes: BASE_SLEEP_NEED_MINUTES,
+      sleepDebtMinutes: 0,
+      napCreditMinutes: 0,
+      alarmEnabled: false,
+    } satisfies SleepPlanSnapshot;
+    return {
+      ...parsed,
+      layoutVersion: parsed.layoutVersion ?? 1,
+      day: parsed.day
+        ? {
+            ...parsed.day,
+            availableDays:
+              parsed.day.availableDays && parsed.day.availableDays.length > 0
+                ? parsed.day.availableDays
+                : [
+                    {
+                      dayKey: parsed.day.dayKey,
+                      shortLabel: parsed.day.shortLabel,
+                      longLabel: parsed.day.longLabel,
+                    },
+                  ],
+          }
+        : fallbackDay,
+      tonightPlan: parsed.tonightPlan ?? fallbackTonightPlan,
       heartCard: {
         ...(parsed.heartCard ?? {}),
         markers: parsed.heartCard?.markers ?? [],
@@ -2819,6 +2890,8 @@ function hasExpandedDashboardSnapshot(snapshot: DashboardSnapshot) {
     (snapshot.layoutVersion ?? 1) >= DASHBOARD_LAYOUT_VERSION &&
     snapshot.summaryStats.length >= 4 &&
     snapshot.day !== undefined &&
+    snapshot.day.availableDays !== undefined &&
+    snapshot.tonightPlan !== undefined &&
     snapshot.hrvCard !== undefined &&
     snapshot.stressCard !== undefined &&
     snapshot.spo2Card !== undefined &&
@@ -4681,6 +4754,21 @@ async function buildFullDashboardSnapshot(db: SQLiteDatabase): Promise<Dashboard
   }
 
   const latestSleep = sleepCycles.at(-1) ?? null;
+  const [sleepPreferences, napActivities] = await Promise.all([
+    loadSleepPreferences(db, sleepCycles),
+    latestSleep
+      ? queryActivities(
+          db,
+          `
+            SELECT id, period_id, start, end, activity
+            FROM activities
+            WHERE activity = 'Nap' AND start >= ?
+            ORDER BY start ASC
+          `,
+          [formatSqliteDateTime(latestSleep.end)],
+        )
+      : Promise.resolve([]),
+  ]);
   const latestHeartDate = heartState.latest_heart_time ? parseSqliteDateTime(heartState.latest_heart_time) : now;
   const selectedDayKey = dateKey(latestHeartDate);
   const selectedDayStart = startOfDayFromDayKey(selectedDayKey);
@@ -4703,6 +4791,7 @@ async function buildFullDashboardSnapshot(db: SQLiteDatabase): Promise<Dashboard
   const restingHr = personalizeRestingHr(sleepCycles, dailyMinima);
   const maxHr = personalizeMaxHrFromObservedPeak(heartState.observed_peak_bpm, restingHr);
   const recovery = estimateRecoveryScoreFromSleeps(latestSleep, sleepCycles, heartState.latest_stress);
+  const tonightPlan = buildSleepPlanSnapshot(sleepPreferences, sleepCycles, napActivities);
   const heartDayBucketRows = buildIntradayBucketRows(
     selectedDayHeartRows.map((row) => ({ bpm: row.bpm, time: row.time })),
   );
@@ -4771,6 +4860,7 @@ async function buildFullDashboardSnapshot(db: SQLiteDatabase): Promise<Dashboard
       missingReason: recovery.missingReason,
       breakdown: recovery.breakdown,
     },
+    tonightPlan,
     summaryStats: [
       {
         label: 'HRV',
@@ -5168,7 +5258,7 @@ export class SQLiteHealthRepository implements HealthRepository {
           const processed = await processPendingDerivedRefresh(this.db);
           if (processed) {
             await refreshDashboardSnapshot(this.db, 'full');
-            this.invalidateCaches(['dashboard', 'sleep', 'wellness', 'derived']);
+            this.invalidateCaches(['dashboard', 'sleep', 'wellness', 'trends', 'derived']);
           } else {
             this.invalidateCaches('derived');
           }
@@ -5229,7 +5319,7 @@ export class SQLiteHealthRepository implements HealthRepository {
       const refreshed = await refreshDashboardSnapshot(this.db, mode);
 
       if (refreshed) {
-        this.invalidateCaches('dashboard');
+        this.invalidateCaches(['dashboard', 'trends']);
       }
 
       return refreshed;
@@ -5242,7 +5332,7 @@ export class SQLiteHealthRepository implements HealthRepository {
 
       if (processed) {
         await refreshDashboardSnapshot(this.db, 'full');
-        this.invalidateCaches(['dashboard', 'sleep', 'wellness', 'derived']);
+        this.invalidateCaches(['dashboard', 'sleep', 'wellness', 'trends', 'derived']);
       } else {
         this.invalidateCaches('derived');
       }
@@ -5563,10 +5653,16 @@ export class SQLiteHealthRepository implements HealthRepository {
       loadLatestHeartRowBefore(this.db, nextDayFromDayKey(selectedDayKey)),
       loadLatestHeartTimeForDay(this.db, selectedDayKey),
     ]);
+    const latestSleepForPlan = sleepCycles.at(-1) ?? null;
+    const [sleepPreferences, napActivities] = await Promise.all([
+      loadSleepPreferences(this.db, sleepCycles),
+      latestSleepForPlan ? this.loadNapActivitiesSince(latestSleepForPlan.end) : Promise.resolve([]),
+    ]);
     const dailyMinima = heartDayStats.map((stat) => stat.minBpm);
     const restingHr = personalizeRestingHr(sleepCycles, dailyMinima);
     const maxHr = personalizeMaxHrFromObservedPeak(heartState.observed_peak_bpm, restingHr);
     const recovery = estimateRecoveryScoreFromSleeps(selectedSleep, sleepCycles, selectedHeartRow?.stress ?? null);
+    const tonightPlan = buildSleepPlanSnapshot(sleepPreferences, sleepCycles, napActivities);
     const selectedDayStart = startOfDayFromDayKey(selectedDayKey);
     const selectedDayLatestHeartDate = latestHeartTime ? parseSqliteDateTime(latestHeartTime) : null;
 
@@ -5646,6 +5742,7 @@ export class SQLiteHealthRepository implements HealthRepository {
         missingReason: recovery.missingReason,
         breakdown: recovery.breakdown,
       },
+      tonightPlan,
       summaryStats: [
         {
           label: 'HRV',
@@ -5795,7 +5892,7 @@ export class SQLiteHealthRepository implements HealthRepository {
         targetWakeMinutes: nextTargetWakeMinutes,
         alarmEnabled: false,
       });
-      this.invalidateCaches('sleep');
+      this.invalidateCaches(['dashboard', 'sleep']);
     });
   }
 
@@ -5809,7 +5906,7 @@ export class SQLiteHealthRepository implements HealthRepository {
         targetWakeMinutes: nextTargetWakeMinutes,
         alarmEnabled: true,
       });
-      this.invalidateCaches('sleep');
+      this.invalidateCaches(['dashboard', 'sleep']);
     });
   }
 
@@ -5823,7 +5920,7 @@ export class SQLiteHealthRepository implements HealthRepository {
         targetWakeMinutes: nextTargetWakeMinutes,
         alarmEnabled: false,
       });
-      this.invalidateCaches('sleep');
+      this.invalidateCaches(['dashboard', 'sleep']);
     });
   }
 
@@ -6231,6 +6328,168 @@ export class SQLiteHealthRepository implements HealthRepository {
         return snapshot;
       } catch (error) {
         logMobilePerfError('repository.getWellnessSnapshot', error, {
+          range,
+        });
+        throw error;
+      }
+    });
+  }
+
+  async getTrendSnapshot(range: HistoryRange): Promise<TrendSnapshot> {
+    return this.readSnapshot(`trends:${range}`, async () => {
+      const startedAt = Date.now();
+      try {
+        await this.waitForRepositoryMutations();
+        await this.ensurePrepared();
+        await waitForAggregateMutations(this.db);
+        await ensureDashboardAggregatesReady(this.db);
+
+        const [sleep, heart, wellness, latestHeartDate] = await Promise.all([
+          this.getSleepHistory(range),
+          this.getHeartHistory(range),
+          this.getWellnessSnapshot(range),
+          this.loadLatestHeartDate(),
+        ]);
+
+        const emptyMetric = (
+          id: TrendMetricSnapshot['id'],
+          title: string,
+          accent: TrendMetricSnapshot['accent'],
+          unit: string,
+          missingReason: string,
+        ): TrendMetricSnapshot =>
+          buildTrendMetricSnapshot(
+            {
+              title,
+              latest: null,
+              average: null,
+              delta: null,
+              unit,
+              detail: missingReason,
+              accent,
+              series: [],
+              missingReason,
+            },
+            id,
+          );
+
+        if (!latestHeartDate) {
+          return {
+            range,
+            latestLabel: 'No history',
+            primaryMetrics: [
+              emptyMetric('recovery', 'Recovery', 'green', '%', NO_HISTORY_REASON),
+              emptyMetric('sleepScore', 'Sleep Score', 'violet', '%', NO_SLEEP_REASON),
+              emptyMetric('strain', 'Strain', 'heart', '', NO_HISTORY_REASON),
+            ],
+            secondaryMetrics: [
+              emptyMetric('restingHr', 'Resting HR', 'cyan', 'bpm', NO_HISTORY_REASON),
+              emptyMetric('stress', 'Stress', 'alert', '', NO_HISTORY_REASON),
+            ],
+            missingReason: NO_HISTORY_REASON,
+          } satisfies TrendSnapshot;
+        }
+
+        const heartDayStats = await loadHeartDayStatsThroughDay(this.db, dateKey(latestHeartDate), rangeDays(range));
+        const strainByDay = new Map(heartDayStats.map((stat) => [stat.day, stat.strainScore]));
+        const strainSeries = buildFilledDailySeries(range, latestHeartDate, (day) => strainByDay.get(day) ?? null);
+        const strainValues = trendValues(strainSeries);
+        const sleepScoreValues = trendValues(sleep.scoreTrend);
+        const restingValues = trendValues(heart.weeklyResting);
+
+        const snapshot = {
+          range,
+          latestLabel: formatLongDate(latestHeartDate),
+          primaryMetrics: [
+            buildTrendMetricSnapshot(
+              {
+                ...wellness.recoveryIndex,
+                title: 'Recovery',
+                unit: '%',
+              },
+              'recovery',
+            ),
+            buildTrendMetricSnapshot(
+              {
+                title: 'Sleep Score',
+                latest: sleep.headlineScore,
+                average: sleepScoreValues.length === 0 ? null : mean(sleepScoreValues),
+                delta:
+                  sleepScoreValues.length < 2
+                    ? null
+                    : sleepScoreValues.at(-1)! - sleepScoreValues.at(-2)!,
+                unit: '%',
+                detail:
+                  sleep.headlineScore === null
+                    ? sleep.missingReason ?? NO_SLEEP_REASON
+                    : 'Nightly sleep score across the selected range.',
+                accent: 'violet',
+                series: sleep.scoreTrend,
+                missingReason: sleep.headlineScore === null ? sleep.missingReason ?? NO_SLEEP_REASON : null,
+              },
+              'sleepScore',
+            ),
+            buildTrendMetricSnapshot(
+              {
+                title: 'Strain',
+                latest: strainValues.at(-1) ?? null,
+                average: strainValues.length === 0 ? null : mean(strainValues),
+                delta:
+                  strainValues.length < 2
+                    ? null
+                    : strainValues.at(-1)! - strainValues.at(-2)!,
+                unit: '',
+                detail:
+                  strainValues.length === 0
+                    ? NO_HISTORY_REASON
+                    : 'Daily load across the selected range.',
+                accent: 'heart',
+                series: strainSeries,
+                isEstimated: true,
+                hasPartialData: strainValues.length < Math.min(rangeDays(range), 7),
+                missingReason: strainValues.length === 0 ? NO_HISTORY_REASON : null,
+              },
+              'strain',
+            ),
+          ],
+          secondaryMetrics: [
+            buildTrendMetricSnapshot(
+              {
+                title: 'Resting HR',
+                latest: heart.restingHr,
+                average: restingValues.length === 0 ? null : mean(restingValues),
+                delta:
+                  restingValues.length < 2
+                    ? null
+                    : restingValues.at(-1)! - restingValues.at(-2)!,
+                unit: 'bpm',
+                detail:
+                  heart.restingHr === null
+                    ? heart.missingReason ?? NO_HISTORY_REASON
+                    : 'Nightly resting heart rate across the selected range.',
+                accent: 'cyan',
+                series: heart.weeklyResting,
+                missingReason: heart.restingHr === null ? heart.missingReason ?? NO_HISTORY_REASON : null,
+              },
+              'restingHr',
+            ),
+            buildTrendMetricSnapshot(
+              {
+                ...wellness.stress,
+                title: 'Stress',
+              },
+              'stress',
+            ),
+          ],
+        } satisfies TrendSnapshot;
+
+        logMobilePerf('repository.getTrendSnapshot', startedAt, {
+          range,
+          primaryMetrics: snapshot.primaryMetrics.length,
+        });
+        return snapshot;
+      } catch (error) {
+        logMobilePerfError('repository.getTrendSnapshot', error, {
           range,
         });
         throw error;

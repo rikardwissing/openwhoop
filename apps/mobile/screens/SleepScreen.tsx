@@ -28,6 +28,7 @@ import {
   formatSleepStageLabel,
 } from '@/utils/formatters';
 import { formatClockMinutes } from '@/utils/dateTime';
+import { getSleepMetricTone } from '@/utils/metricTone';
 import { calculateOptimalBedtimeMinutes, nextUpcomingClockDate, roundClockMinutes } from '@/utils/sleepPlan';
 
 const stageBreakdownOrder: SleepStage[] = ['deep', 'light', 'rem', 'awake'];
@@ -376,6 +377,7 @@ export function SleepScreen() {
         label={displayedSleepLabel}
         score={displayedSleepScore}
         size={238}
+        tone={getSleepMetricTone(displayedSleepScore)}
       />
 
       <View style={styles.metricGrid}>

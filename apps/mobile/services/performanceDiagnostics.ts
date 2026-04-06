@@ -418,7 +418,7 @@ export async function runFullPerformanceSweep({
         }
 
         await refreshDerivedData(db);
-        repository.invalidateCaches(['dashboard', 'sleep', 'heart', 'wellness', 'derived']);
+        repository.invalidateCaches(['dashboard', 'sleep', 'heart', 'wellness', 'trends', 'derived']);
         return true;
       },
     );
@@ -478,7 +478,7 @@ export async function runFullPerformanceSweep({
       () => rebuildAggregateTablesForDebug(db),
     );
 
-    repository.invalidateCaches(['dashboard', 'heart', 'wellness']);
+    repository.invalidateCaches(['dashboard', 'heart', 'wellness', 'trends']);
     await measureReadStep(
       steps,
       'dashboard.read.after_aggregate',

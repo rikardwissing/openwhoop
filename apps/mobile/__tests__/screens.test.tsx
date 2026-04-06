@@ -58,7 +58,9 @@ import { LiveEventsScreen } from '@/screens/LiveEventsScreen';
 import { PairWearableScreen } from '@/screens/PairWearableScreen';
 import { SettingsScreen } from '@/screens/SettingsScreen';
 import { SleepScreen } from '@/screens/SleepScreen';
+import { TrendsScreen } from '@/screens/TrendsScreen';
 import { TodayScreen } from '@/screens/TodayScreen';
+import { HistoryScreen } from '@/screens/HistoryScreen';
 import { WellnessScreen } from '@/screens/WellnessScreen';
 import type { DeviceState, SyncProgress, SyncResult, WearableLiveEvent, WearableScanResult } from '@/types/device';
 
@@ -138,8 +140,8 @@ describe('screen rendering', () => {
     const screen = renderWithProviders(<TodayScreen />);
 
     expect(await screen.findByText('Good afternoon')).toBeTruthy();
+    expect(await screen.findByText('Tonight')).toBeTruthy();
     expect(await screen.findByText('Heart Rate')).toBeTruthy();
-    expect(await screen.findByTestId('today-stress-chart')).toBeTruthy();
     expect(await screen.findByTestId('today-strain-chart')).toBeTruthy();
     expect(await screen.findByTestId('today-heart-chart-marker-sleep-latest')).toBeTruthy();
   });
@@ -156,27 +158,6 @@ describe('screen rendering', () => {
 
     expect(await screen.findByText('Live')).toBeTruthy();
     expect(await screen.findByText('68 bpm')).toBeTruthy();
-  });
-
-  it('moves backward and forward through dashboard days', async () => {
-    const screen = renderWithProviders(<TodayScreen />);
-
-    await screen.findByTestId('today-heart-chart');
-    expect(screen.getByTestId('today-selected-day-label').props.children).toBe('Apr 23');
-    expect(screen.getByText('Good afternoon')).toBeTruthy();
-
-    fireEvent.press(screen.getByTestId('today-day-backward-button'));
-
-    await waitFor(() => {
-      expect(screen.getByTestId('today-selected-day-label').props.children).toBe('Apr 22');
-    });
-    expect(screen.getByText('Overview')).toBeTruthy();
-
-    fireEvent.press(screen.getByTestId('today-day-forward-button'));
-
-    await waitFor(() => {
-      expect(screen.getByTestId('today-selected-day-label').props.children).toBe('Apr 23');
-    });
   });
 
   it('opens settings from the shared header and shows the wearable battery badge', async () => {
@@ -206,8 +187,36 @@ describe('screen rendering', () => {
     fireEvent.press(screen.getByTestId('today-open-sleep-button'));
     expect(mockPush).toHaveBeenCalledWith('/sleep');
 
-    fireEvent.press(screen.getByTestId('today-open-stress-details-button'));
+    fireEvent.press(screen.getByTestId('today-open-activity-button'));
     expect(mockPush).toHaveBeenCalledWith('/wellness');
+  });
+
+  it('renders the trends screen', async () => {
+    const screen = renderWithProviders(<TrendsScreen />);
+
+    expect(await screen.findByText('Patterns over time')).toBeTruthy();
+    expect(await screen.findByText('Top Signals')).toBeTruthy();
+    expect(await screen.findByTestId('trends-recovery-chart')).toBeTruthy();
+    expect(await screen.findByTestId('trends-stress-chart')).toBeTruthy();
+  });
+
+  it('renders the history screen and moves between days', async () => {
+    const screen = renderWithProviders(<HistoryScreen />);
+
+    await screen.findByTestId('history-heart-chart');
+    expect(screen.getByTestId('history-selected-day-label').props.children).toBe('Thursday, April 23');
+
+    fireEvent.press(screen.getByTestId('history-day-backward-button'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('history-selected-day-label').props.children).toBe('Wednesday, April 22');
+    });
+
+    fireEvent.press(screen.getByTestId('history-day-forward-button'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('history-selected-day-label').props.children).toBe('Thursday, April 23');
+    });
   });
 
   it('runs sync from pull-to-refresh on dashboard screens when a wearable is selected', async () => {

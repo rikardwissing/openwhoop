@@ -1,5 +1,6 @@
 export type HistoryRange = '24h' | '7d' | '14d' | '30d';
 export type AccentTone = 'green' | 'cyan' | 'alert' | 'heart' | 'violet';
+export type MetricTone = 'good' | 'caution' | 'alert' | 'neutral';
 export type SleepStage = 'awake' | 'rem' | 'deep' | 'light';
 export type PartialDataReason = string;
 export type DerivedRefreshStatus = 'idle' | 'pending' | 'processing' | 'error';
@@ -76,6 +77,12 @@ export interface StrainCardSnapshot extends EstimatedValueMeta {
   series: TrendPoint[];
 }
 
+export interface DashboardDayOption {
+  dayKey: string;
+  shortLabel: string;
+  longLabel: string;
+}
+
 export interface DashboardDayState {
   dayKey: string;
   shortLabel: string;
@@ -85,6 +92,7 @@ export interface DashboardDayState {
   olderDayLabel: string | null;
   newerDayKey: string | null;
   newerDayLabel: string | null;
+  availableDays: DashboardDayOption[];
 }
 
 export interface DashboardInsight {
@@ -100,6 +108,7 @@ export interface DashboardSnapshot {
   dateLabel: string;
   day: DashboardDayState;
   recovery: RecoverySnapshot;
+  tonightPlan: SleepPlanSnapshot;
   summaryStats: SummaryStat[];
   heartCard: HeartCardSnapshot;
   sleepCard: SleepCardSnapshot;
@@ -207,6 +216,19 @@ export interface WellnessSnapshot extends EstimatedValueMeta {
   skinTemperature: MetricSeries;
   recoveryIndex: MetricSeries;
   activities: ActivitySummary[];
+}
+
+export type TrendMetricId = 'recovery' | 'sleepScore' | 'strain' | 'restingHr' | 'stress';
+
+export interface TrendMetricSnapshot extends MetricSeries {
+  id: TrendMetricId;
+}
+
+export interface TrendSnapshot extends EstimatedValueMeta {
+  range: HistoryRange;
+  latestLabel: string;
+  primaryMetrics: TrendMetricSnapshot[];
+  secondaryMetrics: TrendMetricSnapshot[];
 }
 
 export interface DerivedRefreshState {

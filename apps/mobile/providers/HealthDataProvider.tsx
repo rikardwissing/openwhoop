@@ -9,6 +9,7 @@ interface HealthVersionState {
   sleep: number;
   heart: number;
   wellness: number;
+  trends: number;
   derived: number;
 }
 
@@ -17,6 +18,7 @@ const INITIAL_VERSIONS: HealthVersionState = {
   sleep: 0,
   heart: 0,
   wellness: 0,
+  trends: 0,
   derived: 0,
 };
 
@@ -25,6 +27,7 @@ const ALL_REFRESH_SCOPES: Array<Exclude<HealthRefreshScope, 'all'>> = [
   'sleep',
   'heart',
   'wellness',
+  'trends',
   'derived',
 ];
 
@@ -36,6 +39,7 @@ const DashboardVersionContext = createContext(0);
 const SleepVersionContext = createContext(0);
 const HeartVersionContext = createContext(0);
 const WellnessVersionContext = createContext(0);
+const TrendsVersionContext = createContext(0);
 const DerivedVersionContext = createContext(0);
 
 function normalizeScopes(scope: HealthRefreshScope | readonly HealthRefreshScope[] = 'all') {
@@ -97,9 +101,11 @@ function HealthRepositoryProvider({
           <SleepVersionContext.Provider value={versions.sleep}>
             <HeartVersionContext.Provider value={versions.heart}>
               <WellnessVersionContext.Provider value={versions.wellness}>
-                <DerivedVersionContext.Provider value={versions.derived}>
-                  {children}
-                </DerivedVersionContext.Provider>
+                <TrendsVersionContext.Provider value={versions.trends}>
+                  <DerivedVersionContext.Provider value={versions.derived}>
+                    {children}
+                  </DerivedVersionContext.Provider>
+                </TrendsVersionContext.Provider>
               </WellnessVersionContext.Provider>
             </HeartVersionContext.Provider>
           </SleepVersionContext.Provider>
@@ -158,6 +164,8 @@ export function useHealthDataVersion(scope: Exclude<HealthRefreshScope, 'all'>) 
       return useContext(HeartVersionContext);
     case 'wellness':
       return useContext(WellnessVersionContext);
+    case 'trends':
+      return useContext(TrendsVersionContext);
     case 'derived':
       return useContext(DerivedVersionContext);
   }

@@ -6,6 +6,7 @@ import type {
   HeartHistorySnapshot,
   HistoryRange,
   SleepHistorySnapshot,
+  TrendSnapshot,
   WellnessSnapshot,
 } from '@/types/health';
 import { useHealthDataVersion, useHealthRepository } from '@/providers/HealthDataProvider';
@@ -133,5 +134,16 @@ export function useDerivedRefreshState() {
     'derived:state',
     () => repository.getDerivedRefreshState(),
     [repository, version],
+  );
+}
+
+export function useTrendSnapshot(range: HistoryRange) {
+  const repository = useHealthRepository();
+  const version = useHealthDataVersion('trends');
+  return useAsyncValue<TrendSnapshot>(
+    repository,
+    `trends:${range}`,
+    () => repository.getTrendSnapshot(range),
+    [repository, range, version],
   );
 }

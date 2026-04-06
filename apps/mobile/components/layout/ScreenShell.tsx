@@ -59,6 +59,17 @@ export function ScreenShell({
       <View style={[styles.glow, styles.glowBottom]} />
       <ScreenScrollContext.Provider value={screenScrollContextValue}>
         <SafeAreaView edges={['top']} style={styles.safeArea}>
+          {headerTitle && headerIcon ? (
+            <View style={styles.headerShell}>
+              <AppHeader
+                icon={headerIcon}
+                settingsActive={headerSettingsActive}
+                settingsDisabled={headerSettingsDisabled}
+                title={headerTitle}
+              />
+              {headerAccessory ? <View style={styles.headerAccessory}>{headerAccessory}</View> : null}
+            </View>
+          ) : null}
           <ScrollView
             alwaysBounceVertical={refreshEnabled && activeScrollLocks === 0}
             bounces={refreshEnabled && activeScrollLocks === 0}
@@ -75,17 +86,6 @@ export function ScreenShell({
             }
             scrollEnabled={activeScrollLocks === 0}
             showsVerticalScrollIndicator={false}>
-            {headerTitle && headerIcon ? (
-              <>
-                <AppHeader
-                  icon={headerIcon}
-                  settingsActive={headerSettingsActive}
-                  settingsDisabled={headerSettingsDisabled}
-                  title={headerTitle}
-                />
-                {headerAccessory ? <View style={styles.headerAccessory}>{headerAccessory}</View> : null}
-              </>
-            ) : null}
             {children}
           </ScrollView>
         </SafeAreaView>
@@ -104,12 +104,21 @@ const styles = StyleSheet.create({
   },
   content: {
     paddingHorizontal: spacing.screenPadding,
-    paddingTop: 8,
+    paddingTop: 12,
     paddingBottom: 120,
     gap: spacing.sectionGap,
   },
+  headerShell: {
+    paddingHorizontal: spacing.screenPadding,
+    paddingTop: 8,
+    paddingBottom: 14,
+    gap: 8,
+    borderBottomColor: colors.border,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    backgroundColor: 'rgba(3, 8, 14, 0.94)',
+  },
   headerAccessory: {
-    marginTop: 8,
+    marginTop: 0,
   },
   glow: {
     position: 'absolute',

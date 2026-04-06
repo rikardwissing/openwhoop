@@ -8,7 +8,7 @@ import { colors, typography } from '@/constants/theme';
 import { useWearableSyncState } from '@/providers/WearableSyncProvider';
 import { hasFreshLiveHeartRate } from '@/types/device';
 
-export type AppHeaderIcon = 'today' | 'sleep' | 'heart' | 'wellness' | 'settings' | 'pair' | 'live-events';
+export type AppHeaderIcon = 'today' | 'sleep' | 'heart' | 'wellness' | 'trends' | 'history' | 'settings' | 'pair' | 'live-events';
 
 function iconNameFor(icon: Exclude<AppHeaderIcon, 'today'>): keyof typeof Ionicons.glyphMap {
   switch (icon) {
@@ -18,6 +18,10 @@ function iconNameFor(icon: Exclude<AppHeaderIcon, 'today'>): keyof typeof Ionico
       return 'heart';
     case 'wellness':
       return 'pulse';
+    case 'trends':
+      return 'stats-chart';
+    case 'history':
+      return 'time';
     case 'settings':
       return 'sparkles';
     case 'pair':

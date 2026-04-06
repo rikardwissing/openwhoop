@@ -283,7 +283,7 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
 
   const triggerDerivedRefresh = useCallback(() => {
     const heartSnapshotStartedAt = Date.now();
-    refreshHealthData(['heart', 'derived']);
+    refreshHealthData(['heart', 'trends', 'derived']);
     void healthRepository
       .refreshDashboardSnapshot('post_sync_heart_only')
       .then((refreshed) => {
@@ -291,7 +291,7 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
           refreshed,
         });
         if (refreshed) {
-          refreshHealthData('dashboard');
+          refreshHealthData(['dashboard', 'trends']);
         }
       })
       .catch(() => {});
@@ -303,7 +303,7 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
         logMobileSyncPerf('foreground.processPendingDerivedRefresh', derivedRefreshStartedAt, {
           processed,
         });
-        refreshHealthData(processed ? ['dashboard', 'sleep', 'wellness', 'derived'] : 'derived');
+        refreshHealthData(processed ? ['dashboard', 'sleep', 'wellness', 'trends', 'derived'] : 'derived');
       })
       .catch(() => {
         refreshHealthData('derived');
@@ -333,7 +333,7 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
           (nextState.lastSuccessAt !== previousState.lastSuccessAt ||
             nextState.lastRunFinishedAt !== previousState.lastRunFinishedAt)
         ) {
-          refreshHealthData(['heart', 'dashboard', 'sleep', 'wellness', 'derived']);
+          refreshHealthData(['heart', 'dashboard', 'sleep', 'wellness', 'trends', 'derived']);
         }
       } catch {}
     },

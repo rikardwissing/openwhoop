@@ -4,10 +4,11 @@ import type {
   HeartHistorySnapshot,
   HistoryRange,
   SleepHistorySnapshot,
+  TrendSnapshot,
   WellnessSnapshot,
 } from '@/types/health';
 
-export type HealthCacheScope = 'all' | 'sleep' | 'heart' | 'dashboard' | 'wellness' | 'derived';
+export type HealthCacheScope = 'all' | 'sleep' | 'heart' | 'dashboard' | 'wellness' | 'trends' | 'derived';
 export type HealthRefreshScope = Exclude<HealthCacheScope, 'all'> | 'all';
 
 export interface HealthRepository {
@@ -17,6 +18,7 @@ export interface HealthRepository {
   getSleepHistory(range: HistoryRange): Promise<SleepHistorySnapshot>;
   getHeartHistory(range: HistoryRange): Promise<HeartHistorySnapshot>;
   getWellnessSnapshot(range: HistoryRange): Promise<WellnessSnapshot>;
+  getTrendSnapshot(range: HistoryRange): Promise<TrendSnapshot>;
   getDerivedRefreshState(): Promise<DerivedRefreshState>;
   processPendingDerivedRefresh(): Promise<boolean>;
   invalidateCaches(scope?: HealthCacheScope | readonly HealthCacheScope[]): void;

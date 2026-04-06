@@ -85,8 +85,27 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
+        name="trends"
+        options={{
+          title: 'Trends',
+          tabBarIcon: ({ color, focused }) => (
+            <TabIcon color={color} focused={focused} icon="stats-chart" />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="history"
+        options={{
+          title: 'History',
+          tabBarIcon: ({ color, focused }) => (
+            <TabIcon color={color} focused={focused} icon="time" />
+          ),
+        }}
+      />
+      <Tabs.Screen
         name="sleep"
         options={{
+          href: null,
           title: 'Sleep',
           tabBarIcon: ({ color, focused }) => (
             <TabIcon color={color} focused={focused} icon="moon" />
@@ -96,6 +115,7 @@ export default function TabLayout() {
       <Tabs.Screen
         name="heart"
         options={{
+          href: null,
           title: 'Heart',
           tabBarIcon: ({ color, focused }) => (
             <TabIcon color={color} focused={focused} icon="heart" pulseBpm={liveHeartRate} />
@@ -105,6 +125,7 @@ export default function TabLayout() {
       <Tabs.Screen
         name="wellness"
         options={{
+          href: null,
           title: 'Wellness',
           tabBarIcon: ({ color, focused }) => (
             <TabIcon color={color} focused={focused} icon="pulse" />

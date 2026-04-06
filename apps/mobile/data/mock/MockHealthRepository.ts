@@ -2,6 +2,7 @@ import type { HealthRepository } from '@/data/HealthRepository';
 import type {
   DerivedRefreshState,
   ActivitySummary,
+  DashboardDayOption,
   DashboardDayState,
   DashboardInsight,
   DashboardSnapshot,
@@ -10,8 +11,11 @@ import type {
   HistoryRange,
   MetricSeries,
   SleepHistorySnapshot,
+  SleepPlanSnapshot,
   SleepSession,
+  TrendMetricSnapshot,
   TrendPoint,
+  TrendSnapshot,
   WellnessSnapshot,
 } from '@/types/health';
 import { formatAxisTime, formatClockMinutes } from '@/utils/dateTime';
@@ -163,6 +167,15 @@ function buildMockCumulativeStrainSeries(score: number | null) {
 
 function buildDashboardDayState(selectedIndex: number): DashboardDayState {
   const selectedDate = dashboardDayDates[selectedIndex] ?? dashboardDayDates.at(-1)!;
+  const availableDays: DashboardDayOption[] = dashboardDayKeys.map((dayKey, index) => ({
+    dayKey,
+    shortLabel: scoreLabels[index] ?? scoreLabels.at(-1)!,
+    longLabel: new Intl.DateTimeFormat('en-US', {
+      weekday: 'long',
+      month: 'long',
+      day: 'numeric',
+    }).format(dashboardDayDates[index] ?? dashboardDayDates.at(-1)!),
+  }));
   return {
     dayKey: dashboardDayKeys[selectedIndex] ?? dashboardDayKeys.at(-1)!,
     shortLabel: scoreLabels[selectedIndex] ?? scoreLabels.at(-1)!,
@@ -176,6 +189,7 @@ function buildDashboardDayState(selectedIndex: number): DashboardDayState {
     olderDayLabel: selectedIndex > 0 ? scoreLabels[selectedIndex - 1] : null,
     newerDayKey: selectedIndex < dashboardDayKeys.length - 1 ? dashboardDayKeys[selectedIndex + 1] : null,
     newerDayLabel: selectedIndex < dashboardDayKeys.length - 1 ? scoreLabels[selectedIndex + 1] : null,
+    availableDays,
   };
 }
 
@@ -343,6 +357,33 @@ const activities: ActivitySummary[] = activitySeeds.map((activity) => ({
   calories: activity.calories,
 }));
 
+function buildSleepPlanSnapshot(targetWakeMinutes: number, alarmEnabled: boolean): SleepPlanSnapshot {
+  const chronologicalSessions = [...sessions].reverse();
+  const sleepDebtMinutes = calculateSleepDebtMinutes(
+    chronologicalSessions.map((session) => session.durationMinutes),
+  );
+  const sleepNeedMinutes = BASE_SLEEP_NEED_MINUTES + sleepDebtMinutes;
+  const optimalBedtimeMinutes = calculateOptimalBedtimeMinutes(targetWakeMinutes, sleepNeedMinutes);
+
+  return {
+    targetWakeMinutes,
+    targetWakeTime: formatClockMinutes(targetWakeMinutes),
+    optimalBedtimeMinutes,
+    optimalBedtime: formatClockMinutes(optimalBedtimeMinutes),
+    sleepNeedMinutes,
+    sleepDebtMinutes,
+    napCreditMinutes: 0,
+    alarmEnabled,
+  };
+}
+
+function buildTrendMetricSnapshot(metric: MetricSeries, id: TrendMetricSnapshot['id']): TrendMetricSnapshot {
+  return {
+    ...metric,
+    id,
+  };
+}
+
 const intradayMarkers: HeartIntradayMarker[] = [
   {
     id: 'sleep-latest',
@@ -448,6 +489,7 @@ export class MockHealthRepository implements HealthRepository {
     const selectedSession = sessions[Math.max(0, sessions.length - 1 - (dashboardDayKeys.length - 1 - selectedIndex))] ?? sessions[0];
     const strainScore = strainValues[selectedIndex] ?? strainValues.at(-1) ?? null;
     const selectedActivities = activities.slice(0, selectedIndex >= dashboardDayKeys.length - 2 ? 3 : selectedIndex >= dashboardDayKeys.length - 4 ? 2 : 1);
+    const tonightPlan = buildSleepPlanSnapshot(this.targetWakeMinutes, this.alarmEnabled);
 
     return {
       layoutVersion: 2,
@@ -459,6 +501,7 @@ export class MockHealthRepository implements HealthRepository {
         label: describeRecovery(recoveryTrendValues[selectedIndex] ?? recoveryTrendValues.at(-1)!),
         caption: 'Recovery',
       },
+      tonightPlan,
       summaryStats: [
         { label: 'HRV', value: `${hrvTrend[selectedIndex] ?? hrvTrend.at(-1)} ms`, accent: 'green' },
         { label: 'RHR', value: `${restingHrTrend[selectedIndex] ?? restingHrTrend.at(-1)} bpm`, accent: 'cyan' },
@@ -499,13 +542,6 @@ export class MockHealthRepository implements HealthRepository {
   async getSleepHistory(range: HistoryRange): Promise<SleepHistorySnapshot> {
     await this.wait();
 
-    const chronologicalSessions = [...sessions].reverse();
-    const sleepDebtMinutes = calculateSleepDebtMinutes(
-      chronologicalSessions.map((session) => session.durationMinutes),
-    );
-    const sleepNeedMinutes = BASE_SLEEP_NEED_MINUTES + sleepDebtMinutes;
-    const optimalBedtimeMinutes = calculateOptimalBedtimeMinutes(this.targetWakeMinutes, sleepNeedMinutes);
-
     return {
       headlineScore: 82,
       headlineLabel: 'Good sleep',
@@ -518,16 +554,7 @@ export class MockHealthRepository implements HealthRepository {
       scoreTrend: takeTail(series(scoreLabels, sleepScores), range),
       durationTrend: takeTail(series(scoreLabels, sleepDurations), range),
       sessions: sessions.slice(0, 3),
-      sleepPlan: {
-        targetWakeMinutes: this.targetWakeMinutes,
-        targetWakeTime: formatClockMinutes(this.targetWakeMinutes),
-        optimalBedtimeMinutes,
-        optimalBedtime: formatClockMinutes(optimalBedtimeMinutes),
-        sleepNeedMinutes,
-        sleepDebtMinutes,
-        napCreditMinutes: 0,
-        alarmEnabled: this.alarmEnabled,
-      },
+      sleepPlan: buildSleepPlanSnapshot(this.targetWakeMinutes, this.alarmEnabled),
     };
   }
 
@@ -660,6 +687,111 @@ export class MockHealthRepository implements HealthRepository {
         ),
       },
       activities,
+    };
+  }
+
+  async getTrendSnapshot(range: HistoryRange): Promise<TrendSnapshot> {
+    await this.wait();
+
+    const recoveryMetric = {
+      ...metricSeries({
+        title: 'Recovery',
+        latest: recoveryTrendValues.at(-1) ?? null,
+        average: average(recoveryTrendValues),
+        delta:
+          recoveryTrendValues.length < 2
+            ? null
+            : (recoveryTrendValues.at(-1) ?? 0) - (recoveryTrendValues.at(-2) ?? 0),
+        unit: '%',
+        detail: 'Transparent readiness heuristic across the selected range.',
+        accent: 'green',
+        values: recoveryTrendValues,
+        labels: scoreLabels,
+      }),
+      series: takeTail(series(scoreLabels, recoveryTrendValues), range),
+    } satisfies MetricSeries;
+    const sleepScoreMetric = {
+      ...metricSeries({
+        title: 'Sleep Score',
+        latest: sleepScores.at(-1) ?? null,
+        average: average(sleepScores),
+        delta:
+          sleepScores.length < 2
+            ? null
+            : (sleepScores.at(-1) ?? 0) - (sleepScores.at(-2) ?? 0),
+        unit: '%',
+        detail: 'Nightly sleep score across the selected range.',
+        accent: 'violet',
+        values: sleepScores,
+        labels: scoreLabels,
+      }),
+      series: takeTail(series(scoreLabels, sleepScores), range),
+    } satisfies MetricSeries;
+    const strainMetric = {
+      ...metricSeries({
+        title: 'Strain',
+        latest: strainValues.at(-1) ?? null,
+        average: average(strainValues),
+        delta:
+          strainValues.length < 2
+            ? null
+            : (strainValues.at(-1) ?? 0) - (strainValues.at(-2) ?? 0),
+        unit: '',
+        detail: 'Daily load across the selected range.',
+        accent: 'heart',
+        values: strainValues,
+        labels: scoreLabels,
+      }),
+      series: takeTail(series(scoreLabels, strainValues), range),
+      isEstimated: true,
+    } satisfies MetricSeries;
+    const restingMetric = {
+      ...metricSeries({
+        title: 'Resting HR',
+        latest: restingHrTrend.at(-1) ?? null,
+        average: average(restingHrTrend),
+        delta:
+          restingHrTrend.length < 2
+            ? null
+            : (restingHrTrend.at(-1) ?? 0) - (restingHrTrend.at(-2) ?? 0),
+        unit: 'bpm',
+        detail: 'Nightly resting heart rate across the selected range.',
+        accent: 'cyan',
+        values: restingHrTrend,
+        labels: scoreLabels,
+      }),
+      series: takeTail(series(scoreLabels, restingHrTrend), range),
+    } satisfies MetricSeries;
+    const stressMetric = {
+      ...metricSeries({
+        title: 'Stress',
+        latest: stressTrend.at(-1) ?? null,
+        average: average(stressTrend),
+        delta:
+          stressTrend.length < 2
+            ? null
+            : (stressTrend.at(-1) ?? 0) - (stressTrend.at(-2) ?? 0),
+        unit: '',
+        detail: 'Daily stress drift across the selected range.',
+        accent: 'alert',
+        values: stressTrend,
+        labels: scoreLabels,
+      }),
+      series: takeTail(series(scoreLabels, stressTrend), range),
+    } satisfies MetricSeries;
+
+    return {
+      range,
+      latestLabel: buildDashboardDayState(dashboardDayKeys.length - 1).longLabel,
+      primaryMetrics: [
+        buildTrendMetricSnapshot(recoveryMetric, 'recovery'),
+        buildTrendMetricSnapshot(sleepScoreMetric, 'sleepScore'),
+        buildTrendMetricSnapshot(strainMetric, 'strain'),
+      ],
+      secondaryMetrics: [
+        buildTrendMetricSnapshot(restingMetric, 'restingHr'),
+        buildTrendMetricSnapshot(stressMetric, 'stress'),
+      ],
     };
   }
 

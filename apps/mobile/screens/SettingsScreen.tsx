@@ -384,7 +384,7 @@ export function SettingsScreen() {
         backgroundSyncState,
       });
       await refreshPerformanceRuns();
-      refreshHealthData(['dashboard', 'sleep', 'heart', 'wellness']);
+      refreshHealthData(['dashboard', 'sleep', 'heart', 'wellness', 'trends']);
 
       const derivedFull = findDiagnosticStep(run, 'derived.full.rebuild');
       const dashboardCold = findDiagnosticStep(run, 'dashboard.read.cold');
