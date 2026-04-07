@@ -1519,32 +1519,39 @@ describe('SQLiteHealthRepository', () => {
     adapter.close();
   });
 
-  it('loads seeded snapshots and refreshes outdated derived data on startup', async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'btwearable-seed-'));
-    const source = path.resolve(process.cwd(), 'assets/databases/btwearable-seed.db');
-    const seedCopy = path.join(tempDir, 'btwearable-seed.db');
-    fs.copyFileSync(source, seedCopy);
+  it('loads bundled snapshots from btwearable.db on startup', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date(2026, 3, 7, 12, 0, 0));
 
-    const adapter = new NodeSqliteAdapter(new DatabaseSync(seedCopy));
-    await initializeDatabase(adapter as never);
-    await expect(shouldRefreshDerivedData(adapter as never)).resolves.toBe(true);
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'btwearable-db-'));
+    const source = path.resolve(process.cwd(), 'assets/databases/btwearable.db');
+    const databaseCopy = path.join(tempDir, 'btwearable.db');
+    fs.copyFileSync(source, databaseCopy);
 
-    const repository = new SQLiteHealthRepository(adapter as never);
-    const [dashboard, sleep, heart, wellness] = await Promise.all([
-      repository.getDashboardSnapshot(),
-      repository.getSleepHistory('14d'),
-      repository.getHeartHistory('14d'),
-      repository.getWellnessSnapshot('14d'),
-    ]);
+    const adapter = new NodeSqliteAdapter(new DatabaseSync(databaseCopy));
 
-    expect(dashboard.summaryStats).toHaveLength(4);
-    expect(dashboard.heartCard.series.length).toBeGreaterThan(0);
-    expect(sleep.sessions).toHaveLength(0);
-    expect(heart.intraday.length).toBeGreaterThan(0);
-    expect(wellness.activities).toHaveLength(0);
+    try {
+      await initializeDatabase(adapter as never);
+      await expect(shouldRefreshDerivedData(adapter as never)).resolves.toBe(false);
 
-    adapter.close();
-    fs.rmSync(tempDir, { recursive: true, force: true });
+      const repository = new SQLiteHealthRepository(adapter as never);
+      const [dashboard, sleep, heart, wellness] = await Promise.all([
+        repository.getDashboardSnapshot(),
+        repository.getSleepHistory('14d'),
+        repository.getHeartHistory('14d'),
+        repository.getWellnessSnapshot('14d'),
+      ]);
+
+      expect(dashboard.summaryStats).toHaveLength(4);
+      expect(dashboard.heartCard.series.length).toBeGreaterThan(0);
+      expect(sleep.sessions.length).toBeGreaterThan(0);
+      expect(heart.intraday.length).toBeGreaterThan(0);
+      expect(wellness.activities.length).toBeGreaterThan(0);
+    } finally {
+      adapter.close();
+      fs.rmSync(tempDir, { recursive: true, force: true });
+      jest.useRealTimers();
+    }
   });
 
   it('loads larger synthetic snapshots without triggering a derived rebuild', async () => {

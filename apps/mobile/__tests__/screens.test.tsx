@@ -1,15 +1,16 @@
 import type { ReactElement } from 'react';
 import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
-import { ScrollView, processColor } from 'react-native';
+import { Alert, ScrollView, processColor } from 'react-native';
 
 const mockPush = jest.fn();
+const mockReplace = jest.fn();
 let mockSegments: string[] = ['(tabs)', 'settings'];
 
 jest.mock('expo-router', () => ({
   useRouter: () => ({
     push: mockPush,
     back: jest.fn(),
-    replace: jest.fn(),
+    replace: mockReplace,
   }),
   useSegments: () => mockSegments,
 }));
@@ -42,6 +43,18 @@ jest.mock('@/services/background/backgroundSyncTask', () => ({
   triggerBackgroundSyncForTesting: jest.fn(async () => true),
 }));
 
+const mockClearAllLocalData = jest.fn(async () => {});
+const mockUseOptionalAppDatabase = jest.fn(() => null);
+const mockUseOptionalAppDatabaseControls = jest.fn(() => ({
+  loadSeededData: jest.fn(async () => {}),
+  clearAllLocalData: mockClearAllLocalData,
+}));
+
+jest.mock('@/providers/AppDatabaseProvider', () => ({
+  useOptionalAppDatabase: () => mockUseOptionalAppDatabase(),
+  useOptionalAppDatabaseControls: () => mockUseOptionalAppDatabaseControls(),
+}));
+
 import { SleepStageChart } from '@/components/charts/SleepStageChart';
 import { TrendChart } from '@/components/charts/TrendChart';
 import { WearableProgressOverlay } from '@/components/ui/WearableProgressOverlay';
@@ -60,7 +73,10 @@ import { TrendsScreen } from '@/screens/TrendsScreen';
 import { TodayScreen } from '@/screens/TodayScreen';
 import { HistoryScreen } from '@/screens/HistoryScreen';
 import { WellnessScreen } from '@/screens/WellnessScreen';
+import { disableBackgroundSync } from '@/services/background/backgroundSyncTask';
 import type { DeviceState, SyncProgress, SyncResult, WearableLiveEvent, WearableScanResult } from '@/types/device';
+
+const mockDisableBackgroundSync = jest.mocked(disableBackgroundSync);
 
 jest.mock('@/services/databaseExport', () => ({
   exportAndShareDatabaseSnapshot: jest.fn(async () => ({
@@ -77,6 +93,7 @@ function createWearableContextValue(overrides: Partial<{
   progress: SyncProgress;
   scanResults: WearableScanResult[];
   scan: () => Promise<void>;
+  loadSeededData: () => Promise<void>;
   pairDevice: (device: WearableScanResult) => Promise<SyncResult | null>;
   selectDevice: (device: WearableScanResult) => Promise<void>;
   forgetDevice: () => Promise<void>;
@@ -153,6 +170,14 @@ function normalizeSvgColor(value: unknown) {
 describe('screen rendering', () => {
   beforeEach(() => {
     mockPush.mockClear();
+    mockReplace.mockClear();
+    mockDisableBackgroundSync.mockClear();
+    mockClearAllLocalData.mockClear();
+    mockUseOptionalAppDatabase.mockReturnValue(null);
+    mockUseOptionalAppDatabaseControls.mockReturnValue({
+      loadSeededData: jest.fn(async () => {}),
+      clearAllLocalData: mockClearAllLocalData,
+    });
     mockSegments = ['(tabs)', 'settings'];
   });
 
@@ -441,6 +466,8 @@ describe('screen rendering', () => {
     expect(screen.getByText('Restart wearable')).toBeTruthy();
     expect(screen.getByText('Export for Analysis')).toBeTruthy();
     expect(screen.getByText('Export Snapshot')).toBeTruthy();
+    expect(screen.getByText('Local Data')).toBeTruthy();
+    expect(screen.getByText('Remove all data')).toBeTruthy();
     expect(screen.getByText('Battery')).toBeTruthy();
     expect(screen.getAllByText('Status').length).toBeGreaterThan(0);
     expect(screen.getByText('Charge')).toBeTruthy();
@@ -493,6 +520,57 @@ describe('screen rendering', () => {
     fireEvent.press(screen.getByText('Restart wearable'));
 
     expect(restartDevice).toHaveBeenCalledTimes(1);
+  });
+
+  it('removes all local data from settings after confirming the destructive action', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation((_title, _message, buttons) => {
+      const destructiveAction = buttons?.find((button) => button.style === 'destructive');
+      destructiveAction?.onPress?.();
+    });
+    const screen = renderWithProviders(<SettingsScreen />);
+
+    await act(async () => {
+      fireEvent.press(screen.getByText('Remove all data'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(mockDisableBackgroundSync).toHaveBeenCalledTimes(1);
+      expect(mockClearAllLocalData).toHaveBeenCalledTimes(1);
+      expect(mockReplace).toHaveBeenCalledWith('/');
+    });
+
+    alertSpy.mockRestore();
+  });
+
+  it('forgets the selected wearable before removing all local data', async () => {
+    const forgetDevice = jest.fn(async () => {});
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation((_title, _message, buttons) => {
+      const destructiveAction = buttons?.find((button) => button.style === 'destructive');
+      destructiveAction?.onPress?.();
+    });
+    const screen = renderWithProviders(<SettingsScreen />, {
+      deviceState: {
+        id: 'strap-1',
+        name: 'Neo Strap',
+      },
+      forgetDevice,
+    });
+
+    await act(async () => {
+      fireEvent.press(screen.getByText('Remove all data'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(forgetDevice).toHaveBeenCalledTimes(1);
+      expect(mockClearAllLocalData).toHaveBeenCalledTimes(1);
+      expect(mockReplace).toHaveBeenCalledWith('/');
+    });
+
+    alertSpy.mockRestore();
   });
 
   it('renders battery percent and derived status when available', () => {
@@ -597,5 +675,52 @@ describe('screen rendering', () => {
       name: 'Neo Strap',
       rssi: -44,
     });
+  });
+
+  it('lets the pairing screen continue with seeded data when no wearable is selected', async () => {
+    const loadSeededData = jest.fn(async () => {});
+    const screen = renderWithProviders(<PairWearableScreen />, {
+      loadSeededData,
+      progress: {
+        status: 'idle',
+        message: 'Select a wearable.',
+      },
+    });
+
+    await act(async () => {
+      fireEvent.press(screen.getByText('Use seeded data'));
+    });
+
+    expect(loadSeededData).toHaveBeenCalledTimes(1);
+    expect(mockReplace).not.toHaveBeenCalled();
+  });
+
+  it('does not navigate away from pairing directly while seeded-data loading is still in progress', async () => {
+    let resolveSeededDataLoad: (() => void) | null = null;
+    const loadSeededData = jest.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSeededDataLoad = resolve;
+        }),
+    );
+    const screen = renderWithProviders(<PairWearableScreen />, {
+      loadSeededData,
+      progress: {
+        status: 'idle',
+        message: 'Select a wearable.',
+      },
+    });
+
+    fireEvent.press(screen.getByText('Use seeded data'));
+
+  expect(loadSeededData).toHaveBeenCalledTimes(1);
+    expect(mockReplace).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveSeededDataLoad?.();
+      await Promise.resolve();
+    });
+
+    expect(mockReplace).not.toHaveBeenCalled();
   });
 });

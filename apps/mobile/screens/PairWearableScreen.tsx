@@ -43,10 +43,11 @@ export function PairWearableScreen() {
   const { deviceState } = useWearableSyncState();
   const { progress } = useWearableSyncProgress();
   const { scanResults } = useWearableScanResults();
-  const { scan, pairDevice } = useWearableSyncActions();
+  const { loadSeededData, scan, pairDevice } = useWearableSyncActions();
   const startedScanRef = useRef(false);
   const [selectingDeviceId, setSelectingDeviceId] = useState<string | null>(null);
   const deviceBusy = progress.status === 'scanning' || isBlockingSyncStatus(progress.status) || selectingDeviceId !== null;
+  const seededDataBusy = isBlockingSyncStatus(progress.status) || selectingDeviceId !== null;
 
   useEffect(() => {
     if (startedScanRef.current) {
@@ -106,6 +107,18 @@ export function PairWearableScreen() {
               void scan();
             }}
             disabled={deviceBusy}
+            tone="secondary"
+          />
+          <ActionButton
+            label="Use seeded data"
+            onPress={() => {
+              void (async () => {
+                try {
+                  await loadSeededData();
+                } catch {}
+              })();
+            }}
+            disabled={seededDataBusy}
             tone="secondary"
           />
         </View>

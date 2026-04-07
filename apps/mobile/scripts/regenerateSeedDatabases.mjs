@@ -728,7 +728,7 @@ function regenerateDatabase(filePath) {
 }
 
 const databaseFiles = [
-  path.join(projectRoot, 'assets', 'databases', 'btwearable-seed.db'),
+  path.join(projectRoot, 'assets', 'databases', 'btwearable.db'),
   path.join(projectRoot, 'assets', 'databases', 'db.sqlite'),
 ];
 

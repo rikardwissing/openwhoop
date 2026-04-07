@@ -14,6 +14,7 @@ import { AppState, type AppStateStatus } from 'react-native';
 
 import { openAppDatabaseAsync } from '@/db/appDatabase';
 import { useHealthRepository, useRefreshHealthData } from '@/providers/HealthDataProvider';
+import { useAppDatabaseControls } from '@/providers/AppDatabaseProvider';
 import { getBackgroundSyncState } from '@/services/background/backgroundSyncState';
 import {
   disableBackgroundSync,
@@ -77,6 +78,7 @@ export interface WearableSyncContextValue {
   progress: SyncProgress;
   scanResults: WearableScanResult[];
   scan: () => Promise<void>;
+  loadSeededData: () => Promise<void>;
   pairDevice: (device: WearableScanResult) => Promise<SyncResult | null>;
   selectDevice: (device: WearableScanResult) => Promise<void>;
   forgetDevice: () => Promise<void>;
@@ -108,6 +110,7 @@ interface WearableScanContextValue {
 
 interface WearableActionsContextValue {
   scan: () => Promise<void>;
+  loadSeededData: () => Promise<void>;
   pairDevice: (device: WearableScanResult) => Promise<SyncResult | null>;
   selectDevice: (device: WearableScanResult) => Promise<void>;
   forgetDevice: () => Promise<void>;
@@ -160,6 +163,7 @@ export const defaultWearableSyncContextValue: WearableSyncContextValue = {
   },
   scanResults: [],
   scan: async () => {},
+  loadSeededData: async () => {},
   pairDevice: async () => null,
   selectDevice: async () => {},
   forgetDevice: async () => {},
@@ -190,7 +194,12 @@ export function WearableSyncContextProvider({
       backgroundSyncState: value.backgroundSyncState,
       backgroundSyncDiagnostics: value.backgroundSyncDiagnostics,
     }),
-    [value.backgroundSyncDiagnostics, value.backgroundSyncState, value.deviceState, value.isReady],
+    [
+      value.backgroundSyncDiagnostics,
+      value.backgroundSyncState,
+      value.deviceState,
+      value.isReady,
+    ],
   );
   const progressValue = useMemo<WearableProgressContextValue>(
     () => ({ progress: value.progress }),
@@ -207,6 +216,7 @@ export function WearableSyncContextProvider({
   const actionsValue = useMemo<WearableActionsContextValue>(
     () => ({
       scan: value.scan,
+      loadSeededData: value.loadSeededData,
       pairDevice: value.pairDevice,
       selectDevice: value.selectDevice,
       forgetDevice: value.forgetDevice,
@@ -219,6 +229,7 @@ export function WearableSyncContextProvider({
     [
       value.disableAlarm,
       value.forgetDevice,
+      value.loadSeededData,
       value.pairDevice,
       value.restartDevice,
       value.scan,
@@ -248,6 +259,7 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
   const db = useSQLiteContext();
   const healthRepository = useHealthRepository();
   const refreshHealthData = useRefreshHealthData();
+  const { loadSeededData: loadBundledAppDatabase } = useAppDatabaseControls();
   const [service] = useState(() => new WearableSyncService(db));
   const [isReady, setIsReady] = useState(false);
   const [deviceState, setDeviceState] = useState<DeviceState>(emptyDeviceState);
@@ -518,6 +530,24 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
     }
   }, [service]);
 
+  const loadSeededData = useCallback(async () => {
+    setProgress({
+      status: 'refreshing',
+      message: 'Loading bundled seeded data...',
+      showOverlay: false,
+    });
+
+    try {
+      await loadBundledAppDatabase();
+    } catch (error) {
+      setProgress({
+        status: 'error',
+        message: error instanceof Error ? error.message : 'Unable to load bundled seeded data.',
+      });
+      throw error;
+    }
+  }, [loadBundledAppDatabase]);
+
   const pairDevice = useCallback(
     async (device: WearableScanResult) => {
       await service.selectDevice(device);
@@ -536,7 +566,13 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
       }
       return result;
     },
-    [refreshBackgroundDiagnostics, refreshBackgroundState, resetLiveEvents, runSyncSelected, service],
+    [
+      refreshBackgroundDiagnostics,
+      refreshBackgroundState,
+      resetLiveEvents,
+      runSyncSelected,
+      service,
+    ],
   );
 
   const selectDevice = useCallback(
@@ -746,6 +782,7 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
   const actionsValue = useMemo<WearableActionsContextValue>(
     () => ({
       scan,
+      loadSeededData,
       pairDevice,
       selectDevice,
       forgetDevice,
@@ -758,6 +795,7 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
     [
       disableAlarmAction,
       forgetDevice,
+      loadSeededData,
       pairDevice,
       restartDevice,
       runSyncSelected,

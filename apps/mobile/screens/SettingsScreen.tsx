@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Image, Pressable, StyleSheet, Switch, Text, View } from 'react-native';
+import { Alert, Image, Pressable, StyleSheet, Switch, Text, View } from 'react-native';
 import { useRouter } from 'expo-router';
 
 import {
@@ -16,7 +16,7 @@ import { brandMark } from '@/constants/assets';
 import { brand } from '@/constants/brand';
 import { colors, typography } from '@/constants/theme';
 import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
-import { useOptionalAppDatabase } from '@/providers/AppDatabaseProvider';
+import { useOptionalAppDatabase, useOptionalAppDatabaseControls } from '@/providers/AppDatabaseProvider';
 import { useHealthRepository, useRefreshHealthData } from '@/providers/HealthDataProvider';
 import {
   useWearableLiveEvents,
@@ -25,6 +25,7 @@ import {
   useWearableSyncState,
 } from '@/providers/WearableSyncProvider';
 import { exportAndShareDatabaseSnapshot } from '@/services/databaseExport';
+import { disableBackgroundSync } from '@/services/background/backgroundSyncTask';
 import {
   describeBatteryStatus,
   describeChargingState,
@@ -226,6 +227,7 @@ function summarizeDiagnosticRun(run: PerformanceDiagnosticRun) {
 export function SettingsScreen() {
   const router = useRouter();
   const db = useOptionalAppDatabase();
+  const databaseControls = useOptionalAppDatabaseControls();
   const repository = useHealthRepository();
   const refreshHealthData = useRefreshHealthData();
   const { backgroundSyncDiagnostics, backgroundSyncState, deviceState } = useWearableSyncState();
@@ -255,11 +257,23 @@ export function SettingsScreen() {
     status: 'idle',
     message: 'No performance sweep has been recorded on this phone yet.',
   });
+  const [clearDataState, setClearDataState] = useState<{
+    status: 'idle' | 'running' | 'error';
+    message: string;
+  }>({
+    status: 'idle',
+    message: 'Remove local wearable history, pairing state, diagnostics, and seeded data from this phone.',
+  });
   const deviceBusy = isBlockingSyncStatus(progress.status);
   const batteryChipAccent = batteryAccent(deviceState.batteryPercent);
   const chargingChipAccent = chargingAccent(deviceState.chargingStatus);
   const wearChipAccent = wearAccent(deviceState.bodyStatus);
   const exportDisabled = deviceBusy || exportState.status === 'running' || !db;
+  const clearDataDisabled =
+    progress.status === 'scanning' ||
+    deviceBusy ||
+    clearDataState.status === 'running' ||
+    !databaseControls;
   const performanceSweepDisabled =
     progress.status === 'scanning' || deviceBusy || performanceSweepState.status === 'running' || !db;
   const backgroundRunState = describeBackgroundRunState(
@@ -402,6 +416,56 @@ export function SettingsScreen() {
     }
   }
 
+  async function confirmClearAllData() {
+    if (!databaseControls) {
+      setClearDataState({
+        status: 'error',
+        message: 'Local data reset is unavailable in this build.',
+      });
+      return;
+    }
+
+    setClearDataState({
+      status: 'running',
+      message: 'Removing all local data from this phone...',
+    });
+
+    try {
+      if (deviceState.id) {
+        await forgetDevice();
+      } else {
+        await disableBackgroundSync();
+      }
+      await databaseControls.clearAllLocalData();
+      router.replace('/');
+    } catch (error) {
+      setClearDataState({
+        status: 'error',
+        message: error instanceof Error ? error.message : 'Unable to remove local data from this phone.',
+      });
+    }
+  }
+
+  function handleClearAllData() {
+    Alert.alert(
+      'Remove all data?',
+      'This clears local wearable history, paired-device state, diagnostics, and any loaded seeded data from this phone. This cannot be undone.',
+      [
+        {
+          text: 'Cancel',
+          style: 'cancel',
+        },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: () => {
+            void confirmClearAllData();
+          },
+        },
+      ],
+    );
+  }
+
   return (
     <ScreenShell
       headerIcon="settings"
@@ -476,6 +540,15 @@ export function SettingsScreen() {
           {deviceState.syncError ? <Text style={styles.errorText}>{deviceState.syncError}</Text> : null}
 
           <View style={styles.buttonRow}>
+            {!deviceState.id ? (
+              <ActionButton
+                label="Open pairing"
+                onPress={() => {
+                  router.replace('/');
+                }}
+                tone="secondary"
+              />
+            ) : null}
             <ActionButton
               label={deviceBusy ? 'Syncing...' : 'Sync now'}
               onPress={() => {
@@ -770,6 +843,35 @@ export function SettingsScreen() {
               exportState.status === 'error' ? styles.errorText : null,
             ]}>
             {db ? exportState.message : 'Database export is only available when the app is running with the local SQLite provider.'}
+          </Text>
+        </View>
+      </GlassCard>
+
+      <GlassCard accentColor={colors.alert}>
+        <SectionHeader title="Local Data" trailing="Destructive" />
+        <View style={styles.settingColumn}>
+          <View>
+            <Text style={styles.settingTitle}>Remove all data from this phone</Text>
+            <Text style={styles.settingSubtitle}>
+              Clear all local wearable history, pairing state, diagnostics, and seeded data. The app will return to pairing after the wipe.
+            </Text>
+          </View>
+
+          <View style={styles.buttonRow}>
+            <ActionButton
+              label={clearDataState.status === 'running' ? 'Removing...' : 'Remove all data'}
+              onPress={handleClearAllData}
+              disabled={clearDataDisabled}
+              tone="danger"
+            />
+          </View>
+
+          <Text
+            style={[
+              styles.roadmapText,
+              clearDataState.status === 'error' ? styles.errorText : null,
+            ]}>
+            {clearDataState.message}
           </Text>
         </View>
       </GlassCard>

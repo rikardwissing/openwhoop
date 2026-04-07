@@ -27,6 +27,7 @@ const mockFreshBackgroundDb = {
   closeAsync: jest.fn(async () => {}),
 };
 const mockOpenAppDatabaseAsync = jest.fn(async () => mockFreshBackgroundDb);
+const mockLoadSeededDatabase = jest.fn(async () => {});
 const mockServiceInstances: Array<ReturnType<typeof mockCreateWearableSyncService>> = [];
 
 function createEmptyDeviceState(): DeviceState {
@@ -101,6 +102,13 @@ jest.mock('expo-sqlite', () => ({
 
 jest.mock('@/db/appDatabase', () => ({
   openAppDatabaseAsync: () => mockOpenAppDatabaseAsync(),
+}));
+
+jest.mock('@/providers/AppDatabaseProvider', () => ({
+  useAppDatabaseControls: () => ({
+    loadSeededData: mockLoadSeededDatabase,
+    clearAllLocalData: jest.fn(async () => {}),
+  }),
 }));
 
 jest.mock('@/providers/HealthDataProvider', () => ({
@@ -280,6 +288,24 @@ function SyncActionHarness() {
   );
 }
 
+function SeededDataHarness() {
+  const { progress } = useWearableSyncProgress();
+  const { loadSeededData } = useWearableSyncActions();
+
+  return (
+    <View>
+      <Text testID="seeded-progress-status">{progress.status}</Text>
+      <Text testID="seeded-progress-message">{progress.message}</Text>
+      <Pressable
+        testID="enable-seeded-data"
+        onPress={() => {
+          void loadSeededData();
+        }}
+      />
+    </View>
+  );
+}
+
 function renderProviderHarness() {
   return render(
     <WearableSyncProvider>
@@ -300,6 +326,14 @@ function renderBackgroundHarness() {
   return render(
     <WearableSyncProvider>
       <BackgroundSyncHarness />
+    </WearableSyncProvider>,
+  );
+}
+
+function renderSeededDataHarness() {
+  return render(
+    <WearableSyncProvider>
+      <SeededDataHarness />
     </WearableSyncProvider>,
   );
 }
@@ -351,6 +385,7 @@ describe('WearableSyncProvider live events', () => {
     mockUseSQLiteContext.mockReturnValue({});
     mockOpenAppDatabaseAsync.mockClear();
     mockFreshBackgroundDb.closeAsync.mockClear();
+    mockLoadSeededDatabase.mockClear();
     mockGetBackgroundSyncState.mockClear();
     mockEnsureBackgroundSyncRegistered.mockClear();
     mockEnableBackgroundSyncAfterPairing.mockClear();
@@ -455,6 +490,26 @@ describe('WearableSyncProvider live events', () => {
 
     await waitFor(() => {
       expect(mockEnsureBackgroundSyncRegistered).toHaveBeenCalledWith('strap-1');
+    });
+  });
+
+  it('starts with a clear local state until seeded data is explicitly requested', async () => {
+    const screen = renderSeededDataHarness();
+
+    expect(screen.getByTestId('seeded-progress-message').props.children).toBe(
+      'Select a wearable and run a manual sync.',
+    );
+    expect(mockLoadSeededDatabase).not.toHaveBeenCalled();
+  });
+
+  it('loads bundled seeded data only when the explicit action is invoked', async () => {
+    const screen = renderSeededDataHarness();
+
+    fireEvent.press(screen.getByTestId('enable-seeded-data'));
+
+    await waitFor(() => {
+      expect(mockLoadSeededDatabase).toHaveBeenCalledTimes(1);
+      expect(screen.getByTestId('seeded-progress-status').props.children).toBe('refreshing');
     });
   });
 
