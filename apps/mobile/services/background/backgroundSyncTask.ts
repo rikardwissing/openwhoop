@@ -249,15 +249,6 @@ TaskManager.defineTask(BACKGROUND_SYNC_TASK_NAME, async () => {
     return BackgroundTask.BackgroundTaskResult.Success;
   }
 
-  await Notifications.scheduleNotificationAsync({
-    content: {
-      title: 'Hello world',
-      body: 'Hello world',
-      sound: 'default',
-    },
-    trigger: null,
-  }).catch(() => {});
-
   const db = await openAppDatabaseAsync();
   const service = new WearableSyncService(db);
   const runStartedAt = Date.now();
