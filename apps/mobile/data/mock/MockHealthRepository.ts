@@ -6,6 +6,7 @@ import type {
   DashboardDayState,
   DashboardInsight,
   DashboardSnapshot,
+  HeartCardSnapshot,
   HeartIntradayMarker,
   HeartHistorySnapshot,
   HistoryRange,
@@ -90,6 +91,19 @@ function rangeLength(range: HistoryRange): number {
       return 14;
     case '30d':
       return 14;
+  }
+}
+
+function rangeHours(range: HistoryRange): number {
+  switch (range) {
+    case '24h':
+      return 24;
+    case '7d':
+      return 7 * 24;
+    case '14d':
+      return 14 * 24;
+    case '30d':
+      return 30 * 24;
   }
 }
 
@@ -616,6 +630,25 @@ export class MockHealthRepository implements HealthRepository {
       intradayMarkers,
       weeklyResting: takeTail(series(scoreLabels, restingHrTrend), range),
       recoveryShift: -4,
+    };
+  }
+
+  async getDashboardHeartTimeline(range: HistoryRange): Promise<HeartCardSnapshot> {
+    await this.wait();
+
+    const pointCount = Math.max(2, Math.floor((rangeHours(range) * 60) / 5));
+    const endDate = todayDashboardHeartWindowEnd;
+    const startDate = new Date(endDate.getTime() - rangeHours(range) * 3600000);
+    const series = buildIntradayHeartSeries(5, startDate, pointCount);
+    const values = series.map((point) => point.value).filter((value): value is number => value !== null);
+
+    return {
+      restingHr: 48,
+      averageHr: Math.round(mean(values)),
+      maxHr: sustainedPeakBpm(values) ?? Math.max(...values),
+      series,
+      markers: intradayMarkers,
+      missingReason: series.length === 0 ? 'No local history yet. Sync the wearable from Settings to unlock this view.' : null,
     };
   }
 

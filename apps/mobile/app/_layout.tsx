@@ -6,6 +6,8 @@ import * as Notifications from 'expo-notifications';
 import { Stack, useRouter } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { useEffect } from 'react';
+import { StyleSheet } from 'react-native';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { StatusBar } from 'expo-status-bar';
 
 import { SleepPreparationReminderSync } from '@/components/navigation/SleepPreparationReminderSync';
@@ -80,21 +82,29 @@ function RootLayoutNav() {
   }, [router]);
 
   return (
-    <ThemeProvider value={navTheme}>
-      <AppDatabaseProvider>
-        <HealthDataProvider>
-          <WearableSyncProvider>
-            <StatusBar style="light" />
-            <SleepPreparationReminderSync />
-            <Stack>
-              <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-              <Stack.Screen name="live-events" options={{ headerShown: false }} />
-              <Stack.Screen name="+not-found" options={{ title: 'Not Found' }} />
-            </Stack>
-            <WearableProgressOverlay />
-          </WearableSyncProvider>
-        </HealthDataProvider>
-      </AppDatabaseProvider>
-    </ThemeProvider>
+    <GestureHandlerRootView style={styles.root}>
+      <ThemeProvider value={navTheme}>
+        <AppDatabaseProvider>
+          <HealthDataProvider>
+            <WearableSyncProvider>
+              <StatusBar style="light" />
+              <SleepPreparationReminderSync />
+              <Stack>
+                <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+                <Stack.Screen name="live-events" options={{ headerShown: false }} />
+                <Stack.Screen name="+not-found" options={{ title: 'Not Found' }} />
+              </Stack>
+              <WearableProgressOverlay />
+            </WearableSyncProvider>
+          </HealthDataProvider>
+        </AppDatabaseProvider>
+      </ThemeProvider>
+    </GestureHandlerRootView>
   );
 }
+
+const styles = StyleSheet.create({
+  root: {
+    flex: 1,
+  },
+});

@@ -14,6 +14,16 @@ jest.mock('@expo/vector-icons', () => {
 
 import { SleepStageChart } from '@/components/charts/SleepStageChart';
 import { TrendChart } from '@/components/charts/TrendChart';
+import {
+  buildHeartChartViewBox,
+  getHeartViewBoxWidth,
+  getHeartViewportContentWidth,
+  getHeartViewportPointSpacing,
+  getRetainedPointsFromNewestAfterGrowth,
+  getVisibleHeartWindowStart,
+  PannableHeartChart,
+  shouldTriggerHeartLoadMore,
+} from '@/components/dashboard/PannableHeartChart';
 import { ScreenShell } from '@/components/layout/ScreenShell';
 
 function getScrollView(screen: ReturnType<typeof render>) {
@@ -55,7 +65,81 @@ function createResponderEvent(locationX: number, isActive: boolean) {
   };
 }
 
+function createGestureState(dx: number, dy = 0) {
+  return {
+    dx,
+    dy,
+  };
+}
+
 describe('chart gesture ownership', () => {
+  it('derives stable viewport geometry for the pannable heart chart', () => {
+    expect(getHeartViewportPointSpacing(240, 13)).toBe(20);
+    expect(getHeartViewportContentWidth(240, 25, 13)).toBe(480);
+    expect(getHeartViewBoxWidth(13)).toBe(12);
+    expect(buildHeartChartViewBox(6.5, 13)).toBe('6.5 0 12 40');
+    expect(getRetainedPointsFromNewestAfterGrowth(0, 12, 12)).toBe(0);
+    expect(getRetainedPointsFromNewestAfterGrowth(5, 12, 24)).toBe(5);
+    expect(getVisibleHeartWindowStart(12, 0)).toBe(12);
+    expect(getVisibleHeartWindowStart(12, 5)).toBe(7);
+  });
+
+  it('only triggers heart-history loading when dragging deeper into the oldest loaded edge', () => {
+    expect(
+      shouldTriggerHeartLoadMore({
+        canLoadMore: true,
+        isLoadingMore: false,
+        windowStart: 0,
+        translationX: 24,
+      }),
+    ).toBe(true);
+
+    expect(
+      shouldTriggerHeartLoadMore({
+        canLoadMore: true,
+        isLoadingMore: false,
+        windowStart: 4,
+        translationX: 30,
+      }),
+    ).toBe(false);
+
+    expect(
+      shouldTriggerHeartLoadMore({
+        canLoadMore: true,
+        isLoadingMore: false,
+        windowStart: 1.4,
+        translationX: 24,
+      }),
+    ).toBe(true);
+
+    expect(
+      shouldTriggerHeartLoadMore({
+        canLoadMore: true,
+        isLoadingMore: true,
+        windowStart: 0.2,
+        translationX: 36,
+      }),
+    ).toBe(false);
+  });
+
+  it('starts the pannable heart chart on the newest visible window labels', () => {
+    const screen = render(
+      <PannableHeartChart
+        chartTestID="heart-chart"
+        points={Array.from({ length: 25 }, (_, index) => ({
+          label: `${index}`,
+          value: 60 + index,
+        }))}
+        windowPointCount={13}
+      />,
+    );
+
+    expect(screen.getByTestId('heart-chart-content')).toBeTruthy();
+    expect(screen.getByText('12')).toBeTruthy();
+    expect(screen.getByText('18')).toBeTruthy();
+    expect(screen.getByText('24')).toBeTruthy();
+  });
+
   it('renders interval markers on trend charts', () => {
     const screen = render(
       <TrendChart
@@ -185,6 +269,35 @@ describe('chart gesture ownership', () => {
     });
 
     expect(getScrollView(screen).props.scrollEnabled).toBe(true);
+  });
+
+  it('reports horizontal drags on the trend chart axis row', () => {
+    const onAxisPan = jest.fn();
+    const screen = render(
+      <TrendChart
+        accentColor="#00ffff"
+        axisTestID="trend-chart-axis"
+        onAxisPan={onAxisPan}
+        points={[
+          { label: 'Mon', value: 72 },
+          { label: 'Tue', value: 76 },
+          { label: 'Wed', value: 74 },
+        ]}
+        testID="trend-chart-overlay"
+      />,
+    );
+
+    const axis = screen.getByTestId('trend-chart-axis');
+    expect(axis.props.onStartShouldSetResponder?.()).toBe(true);
+    expect(axis.props.onStartShouldSetResponderCapture?.(createResponderEvent(20, true))).toBe(true);
+
+    act(() => {
+      axis.props.onResponderGrant?.(createResponderEvent(20, true), createGestureState(0));
+      axis.props.onResponderRelease?.(createResponderEvent(8, false), createGestureState(-48));
+    });
+
+    expect(onAxisPan).toHaveBeenNthCalledWith(1, { phase: 'start', dx: 0 });
+    expect(onAxisPan).toHaveBeenNthCalledWith(2, { phase: 'end', dx: 0 });
   });
 
   it('keeps sleep-stage scrubbing attached to the chart', () => {

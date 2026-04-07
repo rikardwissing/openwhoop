@@ -12,6 +12,7 @@ import type {
   DashboardInsight,
   DerivedRefreshState,
   DashboardSnapshot,
+  HeartCardSnapshot,
   HeartIntradayMarker,
   HeartHistorySnapshot,
   HistoryRange,
@@ -6206,6 +6207,82 @@ export class SQLiteHealthRepository implements HealthRepository {
         return snapshot;
       } catch (error) {
         logMobilePerfError('repository.getHeartHistory', error, {
+          range,
+        });
+        throw error;
+      }
+    });
+  }
+
+  async getDashboardHeartTimeline(range: HistoryRange): Promise<HeartCardSnapshot> {
+    return this.readSnapshot(`heart:dashboard:${range}`, async () => {
+      const startedAt = Date.now();
+      try {
+        await this.waitForRepositoryMutations();
+        await this.ensurePrepared();
+        await waitForAggregateMutations(this.db);
+
+        const [latestHeartDate, dailyMinimaRows, sleepCycles] = await Promise.all([
+          this.loadLatestHeartDate(),
+          this.loadDailyHeartMinima(),
+          this.loadRecentSleepCycles(Math.max(rangeDays(range), 14)),
+        ]);
+
+        if (!latestHeartDate || dailyMinimaRows.length === 0) {
+          logMobilePerf('repository.getDashboardHeartTimeline.empty', startedAt, {
+            range,
+          });
+          return {
+            restingHr: null,
+            averageHr: null,
+            maxHr: null,
+            series: [],
+            markers: [],
+            missingReason: NO_HISTORY_REASON,
+          } satisfies HeartCardSnapshot;
+        }
+
+        const windowHours = rangeDays(range) * 24;
+        const intraday = await loadIntradayHeartWindow(this.db, formatSqliteDateTime(latestHeartDate), {
+          windowHours,
+        });
+        const intradayWindowStart =
+          intraday.intradayStart ?? new Date(latestHeartDate.getTime() - windowHours * 3600000);
+        const intradayMarkers = buildHeartIntradayMarkers(
+          intradayWindowStart,
+          latestHeartDate,
+          sleepCycles,
+          await this.loadActivitiesOverlapping(intradayWindowStart, latestHeartDate),
+        );
+        const sanitizedDailyMinimaRows = dailyMinimaRows.map((row) => ({
+          day: row.day,
+          min_bpm: sanitizeRecordedBpm(row.min_bpm),
+        }));
+        const dailyMinima = sanitizedDailyMinimaRows
+          .map((row) => row.min_bpm)
+          .filter((value): value is number => value !== null);
+        const restingHr = personalizeRestingHr(sleepCycles, dailyMinima);
+
+        const snapshot = {
+          restingHr,
+          averageHr: intraday.averageBpm,
+          maxHr: intraday.sustainedPeakBpm,
+          series: createTimeBuckets(
+            intraday.bucketSamples,
+            HEART_INTRADAY_BUCKET_MINUTES,
+            intradayWindowStart,
+            latestHeartDate,
+          ),
+          markers: intradayMarkers,
+          missingReason: intraday.bucketSamples.length === 0 ? NO_HISTORY_REASON : null,
+        } satisfies HeartCardSnapshot;
+        logMobilePerf('repository.getDashboardHeartTimeline', startedAt, {
+          range,
+          points: snapshot.series.length,
+        });
+        return snapshot;
+      } catch (error) {
+        logMobilePerfError('repository.getDashboardHeartTimeline', error, {
           range,
         });
         throw error;

@@ -3,7 +3,7 @@ module.exports = {
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/$1',
   },
-  setupFilesAfterEnv: [],
+  setupFilesAfterEnv: ['./jest-setup.js'],
   testPathIgnorePatterns: ['/node_modules/'],
   watchman: false,
 };

@@ -1,20 +1,18 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useMemo } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { SleepStageChart } from '@/components/charts/SleepStageChart';
 import { TrendChart } from '@/components/charts/TrendChart';
+import { PannableHeartChart } from '@/components/dashboard/PannableHeartChart';
 import { SectionHeader } from '@/components/layout/SectionHeader';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { PulsingHeartIcon } from '@/components/ui/PulsingHeartIcon';
 import { StatChip } from '@/components/ui/StatChip';
 import { colors, typography } from '@/constants/theme';
-import { mapHeartIntradayMarkersToTrendMarkers } from '@/utils/heartChartMarkers';
 import type {
   ActivitySummary,
   DashboardInsight,
   HeartCardSnapshot,
-  HeartIntradayMarker,
   SleepCardSnapshot,
   StrainCardSnapshot,
 } from '@/types/health';
@@ -62,27 +60,32 @@ function CardAction({
 }
 
 export function HeartSnapshotCard({
+  canLoadMore = false,
   chartTestID,
+  isLoadingMore = false,
   liveHeartRateLabel,
+  onLoadMore,
   onOpen,
   openTestID,
   showLiveHeartRate = false,
   snapshot,
   trailingLabel,
+  viewportKey,
+  windowPointCount,
 }: {
+  canLoadMore?: boolean;
   chartTestID: string;
+  isLoadingMore?: boolean;
   liveHeartRateLabel?: string | null;
+  onLoadMore?: () => void;
   onOpen?: () => void;
   openTestID?: string;
   showLiveHeartRate?: boolean;
   snapshot: HeartCardSnapshot;
   trailingLabel: string;
+  viewportKey?: string;
+  windowPointCount?: number;
 }) {
-  const markers = useMemo(
-    () => mapHeartIntradayMarkersToTrendMarkers(snapshot.markers ?? ([] as HeartIntradayMarker[])),
-    [snapshot.markers],
-  );
-
   return (
     <GlassCard accentColor={colors.success}>
       <View style={styles.cardHeader}>
@@ -128,15 +131,25 @@ export function HeartSnapshotCard({
         </View>
       ) : null}
 
-      <TrendChart
+      <PannableHeartChart
         accentColor={colors.primary}
+        axisTestID={chartTestID ? `${chartTestID}-axis` : undefined}
+        canLoadMore={canLoadMore}
+        chartTestID={chartTestID}
         height={150}
-        lineStrokeWidth={0.8}
-        markers={markers}
+        isLoadingMore={isLoadingMore}
+        markers={snapshot.markers}
+        onLoadMore={onLoadMore}
         points={snapshot.series}
-        shadowStrokeWidth={1.6}
-        testID={chartTestID}
+        resetKey={viewportKey}
+        windowPointCount={windowPointCount ?? snapshot.series.length}
       />
+      {isLoadingMore ? (
+        <View style={styles.historyLoaderRow}>
+          <ActivityIndicator color={colors.primary} size="small" />
+          <Text style={styles.historyLoaderText}>Loading more heart history...</Text>
+        </View>
+      ) : null}
     </GlassCard>
   );
 }
@@ -367,6 +380,17 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: 10,
     marginBottom: 10,
+  },
+  historyLoaderRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 6,
+  },
+  historyLoaderText: {
+    color: colors.subtle,
+    fontFamily: typography.body,
+    fontSize: 11,
   },
   sleepSummary: {
     alignItems: 'flex-start',

@@ -128,22 +128,30 @@ function sanitizeMarkerId(value: string) {
 export function TrendChart({
   points,
   accentColor,
+  axisLabels,
+  onAxisLayout,
+  axisTestID,
   barColorForPoint,
   height = 148,
   lineStrokeWidth = 1,
   markers = [],
   mode = 'line',
+  onAxisPan,
   onSelectionChange,
   shadowStrokeWidth = 2.1,
   testID,
 }: {
   points: TrendPoint[];
   accentColor: string;
+  axisLabels?: [string | undefined, string | undefined, string | undefined];
+  onAxisLayout?: (width: number) => void;
+  axisTestID?: string;
   barColorForPoint?: (point: TrendPoint, index: number) => string | undefined;
   height?: number;
   lineStrokeWidth?: number;
   markers?: TrendChartMarker[];
   mode?: 'line' | 'bar';
+  onAxisPan?: (event: { phase: 'start' | 'move' | 'end'; dx: number }) => void;
   onSelectionChange?: (selection: TrendSelection | null) => void;
   shadowStrokeWidth?: number;
   testID?: string;
@@ -292,7 +300,36 @@ export function TrendChart({
   }
 
   const [start, end] = colorStops(accentColor);
-  const labels = [points[0]?.label, points[Math.floor(points.length / 2)]?.label, points.at(-1)?.label];
+  const labels = axisLabels ?? [points[0]?.label, points[Math.floor(points.length / 2)]?.label, points.at(-1)?.label];
+
+  const axisPanResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => Boolean(onAxisPan),
+        onStartShouldSetPanResponderCapture: () => Boolean(onAxisPan),
+        onMoveShouldSetPanResponder: (_event, gestureState) =>
+          Boolean(onAxisPan) && Math.abs(gestureState.dx) > Math.abs(gestureState.dy),
+        onMoveShouldSetPanResponderCapture: (_event, gestureState) =>
+          Boolean(onAxisPan) && Math.abs(gestureState.dx) > Math.abs(gestureState.dy),
+        onPanResponderGrant: () => {
+          ensureScrollLock();
+          onAxisPan?.({ phase: 'start', dx: 0 });
+        },
+        onPanResponderMove: (_, gestureState) => {
+          onAxisPan?.({ phase: 'move', dx: gestureState.dx });
+        },
+        onPanResponderRelease: (_, gestureState) => {
+          onAxisPan?.({ phase: 'end', dx: gestureState.dx });
+          releaseScrollLock();
+        },
+        onPanResponderTerminate: (_, gestureState) => {
+          onAxisPan?.({ phase: 'end', dx: gestureState.dx });
+          releaseScrollLock();
+        },
+        onPanResponderTerminationRequest: () => false,
+      }),
+    [ensureScrollLock, onAxisPan, releaseScrollLock],
+  );
 
   return (
     <View>
@@ -446,7 +483,13 @@ export function TrendChart({
           {...panResponder.panHandlers}
         />
       </View>
-      <View style={styles.axis}>
+      <View
+        onLayout={(event) => {
+          onAxisLayout?.(event.nativeEvent.layout.width);
+        }}
+        style={styles.axis}
+        testID={axisTestID}
+        {...(onAxisPan ? axisPanResponder.panHandlers : {})}>
         {labels.map((label, index) => (
           <Text key={`${label ?? 'axis'}-${index}`} style={styles.axisLabel}>
             {label ?? ''}
@@ -486,9 +529,13 @@ const styles = StyleSheet.create({
     width: 24,
   },
   axis: {
+    alignItems: 'center',
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginTop: -6,
+    marginTop: -4,
+    minHeight: 30,
+    paddingBottom: 6,
+    paddingTop: 8,
   },
   axisLabel: {
     color: colors.subtle,

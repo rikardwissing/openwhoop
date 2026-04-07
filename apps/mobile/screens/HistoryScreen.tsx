@@ -175,6 +175,7 @@ export function HistoryScreen() {
           chartTestID="history-heart-chart"
           snapshot={data.heartCard}
           trailingLabel={data.day.shortLabel}
+          viewportKey={data.day.dayKey}
         />
 
         <SleepSnapshotCard

@@ -24,6 +24,17 @@ describe('MockHealthRepository', () => {
     expect(wellness.skinTemperature.hasPartialData).toBe(true);
   });
 
+  it('expands dashboard heart timelines by requested range without changing the heart screen intraday contract', async () => {
+    const repository = new MockHealthRepository({ delayMs: 0 });
+
+    const timeline24h = await repository.getDashboardHeartTimeline('24h');
+    const timeline7d = await repository.getDashboardHeartTimeline('7d');
+
+    expect(timeline24h.series.length).toBe((24 * 60) / 5);
+    expect(timeline7d.series.length).toBe((7 * 24 * 60) / 5);
+    expect(timeline7d.series.length).toBeGreaterThan(timeline24h.series.length);
+  });
+
   it('returns the curated health trends board', async () => {
     const repository = new MockHealthRepository({ delayMs: 0 });
 

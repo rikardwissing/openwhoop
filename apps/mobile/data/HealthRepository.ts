@@ -1,6 +1,7 @@
 import type {
   DerivedRefreshState,
   DashboardSnapshot,
+  HeartCardSnapshot,
   HeartHistorySnapshot,
   HistoryRange,
   SleepHistorySnapshot,
@@ -15,6 +16,7 @@ export interface HealthRepository {
   primeDashboardSnapshot(): Promise<boolean>;
   refreshDashboardSnapshot(mode: 'full' | 'post_sync_heart_only'): Promise<boolean>;
   getDashboardSnapshot(dayKey?: string): Promise<DashboardSnapshot>;
+  getDashboardHeartTimeline(range: HistoryRange): Promise<HeartCardSnapshot>;
   getSleepHistory(range: HistoryRange): Promise<SleepHistorySnapshot>;
   getHeartHistory(range: HistoryRange): Promise<HeartHistorySnapshot>;
   getWellnessSnapshot(range: HistoryRange): Promise<WellnessSnapshot>;

@@ -278,7 +278,7 @@ describe('screen rendering', () => {
   it('uses line charts for continuous or cumulative series and bars for daily buckets', async () => {
     const todayScreen = renderWithProviders(<TodayScreen />);
     await todayScreen.findByTestId('today-heart-chart');
-    expectTrendChartMode(todayScreen, 'today-heart-chart', 'line');
+    expect(todayScreen.getByTestId('today-heart-chart-axis')).toBeTruthy();
     expectTrendChartMode(todayScreen, 'today-strain-chart', 'line');
     todayScreen.unmount();
 
