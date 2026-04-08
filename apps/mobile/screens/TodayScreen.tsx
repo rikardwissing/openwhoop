@@ -62,6 +62,15 @@ export function TodayScreen() {
         return { ...current, isRefreshing: true };
       }
 
+      if (data?.heartCard) {
+        return {
+          dayKey: heartDayKey,
+          isRefreshing: true,
+          snapshot: data.heartCard,
+          status: 'ready',
+        };
+      }
+
       return { dayKey: heartDayKey, isRefreshing: false, snapshot: null, status: 'loading' };
     });
   }, [heartDayKey, heartVersion]);
@@ -119,6 +128,16 @@ export function TodayScreen() {
     return null;
   }
 
+  const displayedHeartSnapshot =
+    heartCardState.snapshot && heartCardState.dayKey === data.day.dayKey
+      ? heartCardState.snapshot
+      : data.heartCard;
+  const isHeartCardRefreshing = displayedHeartSnapshot
+    ? heartCardState.dayKey === data.day.dayKey
+      ? heartCardState.isRefreshing
+      : true
+    : false;
+
   const openSleep = () => router.push('/sleep');
   const openWellness = () => router.push('/wellness');
 
@@ -172,13 +191,13 @@ export function TodayScreen() {
 
       <TonightPlanCard onOpenSleep={openSleep} plan={data.tonightPlan} />
 
-      {heartCardState.snapshot && heartCardState.dayKey === data.day.dayKey ? (
+      {displayedHeartSnapshot ? (
         <HeartSnapshotCard
           chartTestID="today-heart-chart"
-          isRefreshing={heartCardState.isRefreshing}
+          isRefreshing={isHeartCardRefreshing}
           liveHeartRateLabel={liveHeartRateLabel}
           showLiveHeartRate={showLiveHeartRate}
-          snapshot={heartCardState.snapshot}
+          snapshot={displayedHeartSnapshot}
           trailingLabel="Last 12h"
           viewportKey={data.day.dayKey}
           windowPointCount={data.heartCard.series.length}

@@ -15,13 +15,17 @@ jest.mock('@expo/vector-icons', () => {
 import { SleepStageChart } from '@/components/charts/SleepStageChart';
 import { TrendChart } from '@/components/charts/TrendChart';
 import {
+  buildHeartDomainAnimation,
   buildHeartAxisLabels,
+  buildHeartWindowDomains,
+  buildVisibleHeartDomain,
   buildHeartViewportDayLabel,
   buildHeartViewportLabel,
   buildHeartChartViewBox,
   getHeartViewBoxWidth,
   getHeartViewportContentWidth,
   getHeartViewportPointSpacing,
+  interpolateHeartDomain,
   getRetainedPointsFromNewestAfterGrowth,
   getVisibleHeartWindowStart,
   PannableHeartChart,
@@ -133,6 +137,40 @@ describe('chart gesture ownership', () => {
       )[0],
     ).toBe('Apr 22 · 11 PM');
     expect(buildHeartChartViewBox(6.5, 13)).toBe('6.5 0 12 40');
+    expect(
+      buildVisibleHeartDomain(
+        [
+          { label: '0', value: 205 },
+          { label: '1', value: 72 },
+          { label: '2', value: 74 },
+          { label: '3', value: 76 },
+          { label: '4', value: 78 },
+        ],
+        3,
+        2,
+      )?.max,
+    ).toBeLessThan(100);
+    expect(
+      buildHeartWindowDomains(
+        [
+          { label: '0', value: 60 },
+          { label: '1', value: 70 },
+          { label: '2', value: 80 },
+          { label: '3', value: 90 },
+        ],
+        2,
+      ),
+    ).toEqual({
+      mins: [56.5, 66, 75.5],
+      maxs: [73.5, 84, 94.5],
+    });
+    expect(interpolateHeartDomain(1.5, [10, 20, 30], [40, 50, 60])).toEqual({ min: 25, max: 55 });
+    const domainAnimation = buildHeartDomainAnimation(
+      { min: 50, max: 100 },
+      { min: 70, max: 90 },
+    );
+    expect(domainAnimation.scaleY).toBeCloseTo(2.5);
+    expect(domainAnimation.translateY).toBeCloseTo(-20);
     expect(getRetainedPointsFromNewestAfterGrowth(0, 12, 12)).toBe(0);
     expect(getRetainedPointsFromNewestAfterGrowth(5, 12, 24)).toBe(5);
     expect(getVisibleHeartWindowStart(12, 0)).toBe(12);

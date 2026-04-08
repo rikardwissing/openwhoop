@@ -1,5 +1,14 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentProps,
+  type ComponentType,
+} from 'react';
 import { PanResponder, StyleSheet, Text, View } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, {
@@ -14,8 +23,10 @@ import Animated, {
 import Svg, {
   Circle,
   Defs,
+  G,
   LinearGradient as SvgLinearGradient,
   Line,
+  Mask,
   Path,
   Rect,
   Stop,
@@ -23,6 +34,8 @@ import Svg, {
 
 import {
   TREND_VIEWBOX_BASELINE,
+  TREND_VIEWBOX_PLOT_BOTTOM,
+  TREND_VIEWBOX_TOP,
   buildTrendDomain,
   mapTrendValueToY,
 } from '@/components/charts/chartSelection';
@@ -41,8 +54,9 @@ const SNAP_DURATION_MS = 110;
 const HEART_CHART_VIEWBOX_HEIGHT = 40;
 const MARKER_BADGE_SIZE = 24;
 const MIN_MARKER_BAND_WIDTH = 0.15;
-
-const AnimatedSvg = Animated.createAnimatedComponent(Svg);
+const AnimatedSvgGroup = Animated.createAnimatedComponent(G) as ComponentType<
+  ComponentProps<typeof G> & { animatedProps?: object }
+>;
 
 function clamp(value: number, min: number, max: number) {
   'worklet';
@@ -99,9 +113,13 @@ function buildLineSegments(coordinates: Array<{ x: number; y: number | null }>) 
   return segments;
 }
 
-function buildHeartCoordinates(points: TrendPoint[], domain: ReturnType<typeof buildTrendDomain>) {
+function buildHeartCoordinates(
+  points: TrendPoint[],
+  domain: ReturnType<typeof buildTrendDomain>,
+  pointSpacing: number,
+) {
   return points.map((point, index) => ({
-    x: index,
+    x: index * pointSpacing,
     y: point.value === null || !domain ? null : mapTrendValueToY(point.value, domain),
   }));
 }
@@ -253,6 +271,108 @@ export function buildHeartAxisLabels(
   ];
 }
 
+export function buildVisibleHeartDomain(
+  points: readonly TrendPoint[],
+  windowPointCount: number,
+  windowStart?: number,
+) {
+  if (points.length === 0) {
+    return null;
+  }
+
+  const safeWindowPointCount = Math.min(Math.max(windowPointCount, 2), Math.max(points.length, 1));
+  const maxWindowStart = Math.max(0, points.length - safeWindowPointCount);
+  const safeWindowStart = clamp(windowStart ?? maxWindowStart, 0, maxWindowStart);
+  const visiblePoints = points.slice(safeWindowStart, safeWindowStart + safeWindowPointCount);
+
+  return buildTrendDomain(visiblePoints, { mode: 'line' });
+}
+
+export function buildHeartWindowDomains(
+  points: readonly TrendPoint[],
+  windowPointCount: number,
+) {
+  if (points.length === 0) {
+    return null;
+  }
+
+  const safeWindowPointCount = Math.min(Math.max(windowPointCount, 2), Math.max(points.length, 1));
+  const maxWindowStart = Math.max(0, points.length - safeWindowPointCount);
+  const fallbackDomain = buildTrendDomain(points as TrendPoint[], { mode: 'line' });
+  const mins: number[] = [];
+  const maxs: number[] = [];
+  let lastDomain = fallbackDomain;
+
+  for (let start = 0; start <= maxWindowStart; start += 1) {
+    const domain = buildVisibleHeartDomain(points, safeWindowPointCount, start) ?? lastDomain;
+
+    if (!domain) {
+      continue;
+    }
+
+    mins.push(domain.min);
+    maxs.push(domain.max);
+    lastDomain = domain;
+  }
+
+  return mins.length > 0 ? { mins, maxs } : null;
+}
+
+function mapHeartValueToYInDomain(value: number, domain: NonNullable<ReturnType<typeof buildTrendDomain>>) {
+  'worklet';
+  const span = Math.max(domain.max - domain.min, 0.0001);
+
+  return TREND_VIEWBOX_TOP + ((domain.max - value) / span) * (TREND_VIEWBOX_PLOT_BOTTOM - TREND_VIEWBOX_TOP);
+}
+export function interpolateHeartDomain(
+  windowStart: number,
+  mins: readonly number[],
+  maxs: readonly number[],
+) {
+  'worklet';
+
+  if (mins.length === 0 || maxs.length === 0) {
+    return null;
+  }
+
+  const lastIndex = Math.min(mins.length, maxs.length) - 1;
+  const clampedWindowStart = clamp(windowStart, 0, lastIndex);
+  const lowerIndex = Math.floor(clampedWindowStart);
+  const upperIndex = Math.min(lowerIndex + 1, lastIndex);
+  const progress = clampedWindowStart - lowerIndex;
+  const min = mins[lowerIndex] + (mins[upperIndex] - mins[lowerIndex]) * progress;
+  const max = maxs[lowerIndex] + (maxs[upperIndex] - maxs[lowerIndex]) * progress;
+
+  return { min, max };
+}
+
+export function buildHeartDomainAnimation(
+  previousDomain: ReturnType<typeof buildTrendDomain>,
+  nextDomain: ReturnType<typeof buildTrendDomain>,
+) {
+  'worklet';
+
+  if (!previousDomain || !nextDomain) {
+    return { scaleY: 1, translateY: 0 };
+  }
+
+  const previousSpan = Math.max(previousDomain.max - previousDomain.min, 0.0001);
+  const nextSpan = Math.max(nextDomain.max - nextDomain.min, 0.0001);
+  const scaleY = previousSpan / nextSpan;
+  const translateY =
+    TREND_VIEWBOX_TOP * (1 - scaleY) +
+    ((nextDomain.max - previousDomain.max) / nextSpan) * (TREND_VIEWBOX_PLOT_BOTTOM - TREND_VIEWBOX_TOP);
+
+  if (Math.abs(scaleY - 1) < 0.0001 && Math.abs(translateY) < 0.0001) {
+    return { scaleY: 1, translateY: 0 };
+  }
+
+  return {
+    scaleY,
+    translateY,
+  };
+}
+
 export function buildHeartChartViewBox(windowStart: number, windowPointCount: number) {
   'worklet';
   return `${windowStart} 0 ${getHeartViewBoxWidth(windowPointCount)} ${HEART_CHART_VIEWBOX_HEIGHT}`;
@@ -301,7 +421,7 @@ interface HeartMarkerVisual {
   accentColor: string;
   backgroundColor: string;
   bandWidth: number;
-  centerIndex: number;
+  centerX: number;
   iconName: React.ComponentProps<typeof Ionicons>['name'];
   id: string;
   startX: number;
@@ -310,41 +430,24 @@ interface HeartMarkerVisual {
 
 function HeartMarkerBadge({
   marker,
-  pointSpacingValue,
-  windowStartValue,
 }: {
   marker: HeartMarkerVisual;
-  pointSpacingValue: SharedValue<number>;
-  windowStartValue: SharedValue<number>;
 }) {
-  const animatedStyle = useAnimatedStyle(
-    () => ({
-      opacity: pointSpacingValue.value > 0 ? 1 : 0,
-      transform: [
-        {
-          translateX:
-            (marker.centerIndex - windowStartValue.value) * pointSpacingValue.value - MARKER_BADGE_SIZE / 2,
-        },
-      ],
-    }),
-    [marker.centerIndex, pointSpacingValue, windowStartValue],
-  );
-
   return (
-    <Animated.View
+    <View
       accessibilityLabel={marker.accessibilityLabel}
       style={[
         styles.markerBadge,
-        animatedStyle,
         {
           backgroundColor: colors.surfaceStrong,
           borderColor: marker.accentColor,
+          left: marker.centerX - MARKER_BADGE_SIZE / 2,
           top: 8,
         },
       ]}
       testID={marker.testID}>
       <Ionicons color={marker.accentColor} name={marker.iconName} size={12} />
-    </Animated.View>
+    </View>
   );
 }
 
@@ -405,14 +508,21 @@ export function PannableHeartChart({
   const loadRequested = useSharedValue(false);
 
   const pointSpacing = getHeartViewportPointSpacing(viewportWidth, safeWindowPointCount);
+  const chartPointSpacing = pointSpacing > 0 ? pointSpacing : 1;
   const viewBoxWidth = getHeartViewBoxWidth(safeWindowPointCount);
-  const visiblePoints = useMemo(
-    () => points.slice(windowStart, windowStart + safeWindowPointCount),
+  const visibleDomain = useMemo(
+    () => buildVisibleHeartDomain(points, safeWindowPointCount, windowStart),
     [points, safeWindowPointCount, windowStart],
   );
-
-  const domain = useMemo(() => buildTrendDomain(points, { mode: 'line' }), [points]);
-  const coordinates = useMemo(() => buildHeartCoordinates(points, domain), [domain, points]);
+  const baseDomain = useMemo(() => buildTrendDomain(points, { mode: 'line' }), [points]);
+  const windowDomains = useMemo(
+    () => buildHeartWindowDomains(points, safeWindowPointCount),
+    [points, safeWindowPointCount],
+  );
+  const coordinates = useMemo(
+    () => buildHeartCoordinates(points, baseDomain, chartPointSpacing),
+    [baseDomain, chartPointSpacing, points],
+  );
   const lineSegments = useMemo(() => buildLineSegments(coordinates), [coordinates]);
   const paths = useMemo(() => lineSegments.map((segment) => buildLine(segment)), [lineSegments]);
   const areas = useMemo(
@@ -427,14 +537,15 @@ export function PannableHeartChart({
         }),
     [lineSegments],
   );
-  const chartEndX = Math.max(points.length - 1, viewBoxWidth);
+  const chartContentWidth = Math.max(getHeartViewportContentWidth(viewportWidth, points.length, safeWindowPointCount), 1);
+  const chartEndX = Math.max(chartContentWidth, chartPointSpacing);
   const guideLineY =
-    domain && domain.min < 0 && domain.max > 0
-      ? mapTrendValueToY(0, domain)
+    baseDomain && baseDomain.min < 0 && baseDomain.max > 0
+      ? mapTrendValueToY(0, baseDomain)
       : 24;
   const selectionPoint = selectionIndex === null ? null : points[selectionIndex] ?? null;
-  const selectionY = selectionPoint && selectionPoint.value !== null && domain
-    ? mapTrendValueToY(selectionPoint.value, domain)
+  const selectionY = selectionPoint && selectionPoint.value !== null && visibleDomain
+    ? mapTrendValueToY(selectionPoint.value, visibleDomain)
     : null;
   const selectionX =
     selectionIndex !== null &&
@@ -445,7 +556,7 @@ export function PannableHeartChart({
         : ((selectionIndex - windowStart) / viewBoxWidth) * 100
       : null;
 
-  const fullSeriesSpan = Math.max(points.length - 1, 1);
+  const fullSeriesSpan = Math.max(chartContentWidth - chartPointSpacing, chartPointSpacing);
   const markerVisuals = useMemo(
     () =>
       mapHeartIntradayMarkersToTrendMarkers(markers).map((marker) => {
@@ -458,7 +569,7 @@ export function PannableHeartChart({
         return {
           ...marker,
           bandWidth: Math.max(endX - startX, MIN_MARKER_BAND_WIDTH),
-          centerIndex: midpoint,
+          centerX: midpoint,
           startX,
           testID: chartTestID ? `${chartTestID}-marker-${sanitizeMarkerId(marker.id)}` : undefined,
         } satisfies HeartMarkerVisual;
@@ -768,11 +879,32 @@ export function PannableHeartChart({
     ],
   );
 
-  const animatedSvgProps = useAnimatedProps(
+  const animatedChartContentStyle = useAnimatedStyle(
     () => ({
-      viewBox: buildHeartChartViewBox(animatedWindowStart.value, safeWindowPointCount),
+      transform: [{ translateX: -animatedWindowStart.value * pointSpacingValue.value }],
     }),
-    [animatedWindowStart, safeWindowPointCount],
+    [animatedWindowStart, pointSpacingValue],
+  );
+
+  const animatedChartPanProps = useAnimatedProps(
+    () => ({
+      matrix: [1, 0, 0, 1, -animatedWindowStart.value * pointSpacingValue.value, 0],
+    }),
+    [animatedWindowStart, pointSpacingValue],
+  );
+
+  const animatedChartPlotProps = useAnimatedProps(
+    () => {
+      const animatedVisibleDomain = windowDomains
+        ? interpolateHeartDomain(animatedWindowStart.value, windowDomains.mins, windowDomains.maxs)
+        : null;
+      const { scaleY, translateY } = buildHeartDomainAnimation(baseDomain, animatedVisibleDomain);
+
+      return {
+        matrix: [1, 0, 0, scaleY, 0, translateY],
+      };
+    },
+    [animatedWindowStart, baseDomain, windowDomains],
   );
 
   if (points.length === 0) {
@@ -790,13 +922,10 @@ export function PannableHeartChart({
         style={[styles.chartArea, { height }]}
         testID={chartTestID ? `${chartTestID}-viewport` : undefined}>
         <View style={styles.chartViewport}>
-          <AnimatedSvg
-            animatedProps={animatedSvgProps}
+          <Svg
             height="100%"
-            pointerEvents="none"
             preserveAspectRatio="none"
-            testID={chartTestID ? `${chartTestID}-content` : undefined}
-            viewBox={buildHeartChartViewBox(windowStart, safeWindowPointCount)}
+            viewBox={`0 0 ${Math.max(viewportWidth, 1)} ${HEART_CHART_VIEWBOX_HEIGHT}`}
             width="100%">
             <Defs>
               <SvgLinearGradient id={`${chartId}-stroke`} x1="0%" x2="100%" y1="100%" y2="0%">
@@ -804,66 +933,105 @@ export function PannableHeartChart({
                 <Stop offset="100%" stopColor={gradientEnd} />
               </SvgLinearGradient>
               <SvgLinearGradient id={`${chartId}-fill`} x1="0%" x2="0%" y1="0%" y2="100%">
-                <Stop offset="0%" stopColor={gradientEnd} stopOpacity="0.32" />
-                <Stop offset="100%" stopColor={gradientStart} stopOpacity="0.02" />
+                <Stop offset="0%" stopColor={gradientEnd} stopOpacity="0.6" />
+                <Stop offset="58%" stopColor={gradientStart} stopOpacity="0.2" />
+                <Stop offset="100%" stopColor={gradientStart} stopOpacity="0" />
               </SvgLinearGradient>
+              <SvgLinearGradient
+                gradientUnits="userSpaceOnUse"
+                id={`${chartId}-fill-mask-gradient`}
+                x1="0"
+                x2="0"
+                y1={TREND_VIEWBOX_TOP}
+                y2={TREND_VIEWBOX_BASELINE}>
+                <Stop offset="0%" stopColor="#ffffff" stopOpacity="1" />
+                <Stop offset="72%" stopColor="#ffffff" stopOpacity="1" />
+                <Stop offset="100%" stopColor="#ffffff" stopOpacity="0" />
+              </SvgLinearGradient>
+              <Mask
+                height={HEART_CHART_VIEWBOX_HEIGHT}
+                id={`${chartId}-fill-mask`}
+                maskContentUnits="userSpaceOnUse"
+                maskUnits="userSpaceOnUse"
+                width={chartContentWidth}
+                x="0"
+                y="0">
+                <Rect fill="#000000" height={HEART_CHART_VIEWBOX_HEIGHT} width={chartContentWidth} x="0" y="0" />
+                <Rect
+                  fill={`url(#${chartId}-fill-mask-gradient)`}
+                  height={TREND_VIEWBOX_BASELINE - TREND_VIEWBOX_TOP}
+                  width={chartContentWidth}
+                  x="0"
+                  y={TREND_VIEWBOX_TOP}
+                />
+              </Mask>
             </Defs>
-            {markerVisuals.map((marker) => (
-              <Rect
-                fill={marker.backgroundColor}
-                height="31"
-                key={`marker-band-${marker.id}`}
-                rx="3"
-                ry="3"
-                width={marker.bandWidth}
-                x={marker.startX}
-                y="3"
-              />
-            ))}
-            <Line
-              stroke="rgba(149, 162, 188, 0.22)"
-              strokeDasharray="0.36 0.36"
-              strokeWidth="0.7"
-              x1={0}
-              x2={chartEndX}
-              y1={guideLineY}
-              y2={guideLineY}
-            />
-            {areas.map((area, index) => (
-              <Path key={`area-${index}`} d={area} fill={`url(#${chartId}-fill)`} />
-            ))}
-            {paths.map((path, index) => (
-              <Path
-                key={`shadow-${index}`}
-                d={path}
-                fill="none"
-                stroke="rgba(86, 246, 255, 0.12)"
-                strokeWidth="1.6"
-              />
-            ))}
-            {paths.map((path, index) => (
-              <Path
-                key={`line-${index}`}
-                d={path}
-                fill="none"
-                stroke={`url(#${chartId}-stroke)`}
-                strokeLinecap="round"
-                strokeWidth="0.8"
-              />
-            ))}
-          </AnimatedSvg>
-          {markerVisuals.length > 0 ? (
-            <View pointerEvents="none" style={styles.markerLayer}>
+            <AnimatedSvgGroup animatedProps={animatedChartPanProps}>
               {markerVisuals.map((marker) => (
-                <HeartMarkerBadge
-                  key={`marker-badge-${marker.id}`}
-                  marker={marker}
-                  pointSpacingValue={pointSpacingValue}
-                  windowStartValue={animatedWindowStart}
+                <Rect
+                  fill={marker.backgroundColor}
+                  height="31"
+                  key={`marker-band-${marker.id}`}
+                  rx="3"
+                  ry="3"
+                  width={marker.bandWidth}
+                  x={marker.startX}
+                  y="3"
                 />
               ))}
-            </View>
-          ) : null}
+              <Line
+                stroke="rgba(149, 162, 188, 0.22)"
+                strokeDasharray="0.36 0.36"
+                strokeWidth="0.7"
+                x1={0}
+                x2={chartEndX}
+                y1={guideLineY}
+                y2={guideLineY}
+              />
+              <G mask={`url(#${chartId}-fill-mask)`}>
+                <AnimatedSvgGroup animatedProps={animatedChartPlotProps}>
+                  {areas.map((area, index) => (
+                    <Path key={`area-${index}`} d={area} fill={`url(#${chartId}-fill)`} />
+                  ))}
+                </AnimatedSvgGroup>
+              </G>
+              <AnimatedSvgGroup animatedProps={animatedChartPlotProps}>
+                {paths.map((path, index) => (
+                  <Path
+                    key={`shadow-${index}`}
+                    d={path}
+                    fill="none"
+                    stroke="rgba(86, 246, 255, 0.12)"
+                    strokeWidth="1.6"
+                    vectorEffect="non-scaling-stroke"
+                  />
+                ))}
+                {paths.map((path, index) => (
+                  <Path
+                    key={`line-${index}`}
+                    d={path}
+                    fill="none"
+                    stroke={`url(#${chartId}-stroke)`}
+                    strokeLinecap="round"
+                    strokeWidth="0.8"
+                    vectorEffect="non-scaling-stroke"
+                  />
+                ))}
+              </AnimatedSvgGroup>
+            </AnimatedSvgGroup>
+          </Svg>
+          <Animated.View
+            pointerEvents="none"
+            style={[styles.chartContent, animatedChartContentStyle, { width: chartContentWidth }]}
+            testID={chartTestID ? `${chartTestID}-content` : undefined}>
+            {markerVisuals.length > 0 ? (
+              <View pointerEvents="none" style={styles.markerLayer}>
+                {markerVisuals.map((marker) => (
+                  <HeartMarkerBadge key={`marker-badge-${marker.id}`} marker={marker} />
+                ))}
+              </View>
+            ) : null}
+          </Animated.View>
           <View collapsable={false} style={styles.overlay} testID={chartTestID} {...panResponder.panHandlers}>
             {selectionX !== null && selectionY !== null ? (
               <Svg height="100%" pointerEvents="none" preserveAspectRatio="none" viewBox="0 0 100 40" width="100%">
@@ -932,7 +1100,10 @@ const styles = StyleSheet.create({
     position: 'relative',
   },
   chartContent: {
-    ...StyleSheet.absoluteFillObject,
+    bottom: 0,
+    left: 0,
+    position: 'absolute',
+    top: 0,
   },
   overlay: {
     ...StyleSheet.absoluteFillObject,

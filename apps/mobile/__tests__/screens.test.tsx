@@ -217,25 +217,31 @@ describe('screen rendering', () => {
     expect(await screen.findByText('68 bpm')).toBeTruthy();
   });
 
-  it('loads the 7d heart snapshot before rendering the today heart chart', async () => {
-    const repository = new TrackingMockHealthRepository({ delayMs: 250 });
+  it('renders the dashboard heart snapshot immediately while upgrading to the 7d timeline', async () => {
+    const repository = new TrackingMockHealthRepository({ delayMs: 50 });
     const screen = renderWithRepository(repository, <TodayScreen />);
 
-    expect(await screen.findByText('Loading 7 day heart history...')).toBeTruthy();
-    expect(screen.getByTestId('today-heart-chart-loading-shell')).toBeTruthy();
-
     await screen.findByTestId('today-heart-chart-axis');
+
+    expect(screen.queryByText('Loading 7 day heart history...')).toBeNull();
+    expect(screen.queryByTestId('today-heart-chart-loading-shell')).toBeNull();
+    expect(screen.getByTestId('today-heart-chart-axis')).toBeTruthy();
+    expect(screen.getByTestId('today-heart-chart-refresh-indicator')).toBeTruthy();
 
     await waitFor(() => {
       expect(repository.dashboardHeartTimelineCalls).toEqual(['7d']);
     });
 
-    expect(screen.queryByText('Loading 7 day heart history...')).toBeNull();
-    expect(screen.queryByText('Loading more heart history...')).toBeNull();
+    await waitFor(
+      () => {
+        expect(screen.queryByTestId('today-heart-chart-refresh-indicator')).toBeNull();
+      },
+      { timeout: 2000 },
+    );
   });
 
   it('keeps the current 7d heart snapshot visible during same-day heart refreshes', async () => {
-    const repository = new TrackingMockHealthRepository({ delayMs: 250 });
+    const repository = new TrackingMockHealthRepository({ delayMs: 50 });
     let triggerHeartRefresh: (() => void) | null = null;
 
     function RefreshableTodayScreen() {
@@ -258,6 +264,17 @@ describe('screen rendering', () => {
 
     await screen.findByTestId('today-heart-chart-axis');
 
+    await waitFor(() => {
+      expect(repository.dashboardHeartTimelineCalls).toEqual(['7d']);
+    });
+
+    await waitFor(
+      () => {
+        expect(screen.queryByTestId('today-heart-chart-refresh-indicator')).toBeNull();
+      },
+      { timeout: 2000 },
+    );
+
     act(() => {
       triggerHeartRefresh?.();
     });
@@ -273,7 +290,7 @@ describe('screen rendering', () => {
     await waitFor(() => {
       expect(screen.queryByTestId('today-heart-chart-refresh-indicator')).toBeNull();
     });
-  });
+  }, 10000);
 
   it('opens settings from the shared header and shows the wearable battery badge', async () => {
     const screen = renderWithProviders(<TodayScreen />, {
