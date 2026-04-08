@@ -1,5 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import {
+  startTransition,
   useCallback,
   useEffect,
   useId,
@@ -930,14 +931,17 @@ export function PannableHeartChart({
       cancelAnimation(viewportZoomAnchorScreenX);
 
       activeWindowPointCountRef.current = resolvedWindowPointCount;
-      setActiveWindowPointCount(resolvedWindowPointCount);
-      setFocusedMarkerId(nextFocusedMarkerId);
       windowStartRef.current = clampedWindowStart;
-      setWindowStart(clampedWindowStart);
       gestureStartWindowStart.value = clampedWindowStart;
       reportedWindowStart.value = clampedWindowStart;
       isAxisDragging.value = false;
       viewportZoomAnchorIndex.value = nextAnchorIndex;
+
+      startTransition(() => {
+        setActiveWindowPointCount(resolvedWindowPointCount);
+        setFocusedMarkerId(nextFocusedMarkerId);
+        setWindowStart(clampedWindowStart);
+      });
 
       if (viewportWidth <= 0) {
         animatedWindowStart.value = clampedWindowStart;
@@ -1072,26 +1076,29 @@ export function PannableHeartChart({
     const previousPointCount = previousPointCountRef.current;
     const previousMaxWindowStart = Math.max(0, previousPointCount - safeWindowPointCount);
     const pointCountDelta = points.length - previousPointCount;
+
+    if (pointCountDelta === 0) {
+      return;
+    }
+
     let nextAnimatedWindowStart = clamp(windowStartRef.current, 0, maxWindowStart);
     let nextGestureStart = clamp(windowStartRef.current, 0, maxWindowStart);
 
-    if (pointCountDelta !== 0) {
-      const animatedPointsFromNewest = clamp(
-        previousMaxWindowStart - animatedWindowStart.value,
-        0,
-        previousMaxWindowStart,
-      );
-      const gesturePointsFromNewest = clamp(
-        previousMaxWindowStart - gestureStartWindowStart.value,
-        0,
-        previousMaxWindowStart,
-      );
+    const animatedPointsFromNewest = clamp(
+      previousMaxWindowStart - animatedWindowStart.value,
+      0,
+      previousMaxWindowStart,
+    );
+    const gesturePointsFromNewest = clamp(
+      previousMaxWindowStart - gestureStartWindowStart.value,
+      0,
+      previousMaxWindowStart,
+    );
 
-      nextAnimatedWindowStart = clamp(maxWindowStart - animatedPointsFromNewest, 0, maxWindowStart);
-      nextGestureStart = clamp(maxWindowStart - gesturePointsFromNewest, 0, maxWindowStart);
-      pendingLoadMoreRef.current = false;
-      loadRequested.value = false;
-    }
+    nextAnimatedWindowStart = clamp(maxWindowStart - animatedPointsFromNewest, 0, maxWindowStart);
+    nextGestureStart = clamp(maxWindowStart - gesturePointsFromNewest, 0, maxWindowStart);
+    pendingLoadMoreRef.current = false;
+    loadRequested.value = false;
 
     previousPointCountRef.current = points.length;
     animatedWindowStart.value = nextAnimatedWindowStart;
