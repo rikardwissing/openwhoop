@@ -19,6 +19,7 @@ import {
   buildFocusedHeartMarkerWindow,
   buildHeartDomainAnimation,
   buildHeartAxisLabels,
+  buildHeartSleepStageSelectionRanges,
   buildHeartWindowDomains,
   buildVisibleHeartDomain,
   buildHeartViewportDayLabel,
@@ -181,8 +182,8 @@ describe('chart gesture ownership', () => {
     ).toEqual({
       startIndex: 29,
       endIndex: 60,
-      windowPointCount: 40,
-      windowStart: 25,
+      windowPointCount: 32,
+      windowStart: 29,
     });
     expect(
       buildFocusedHeartMarkerWindow(
@@ -196,8 +197,8 @@ describe('chart gesture ownership', () => {
     ).toEqual({
       startIndex: 23,
       endIndex: 27,
-      windowPointCount: 6,
-      windowStart: 22,
+      windowPointCount: 5,
+      windowStart: 23,
     });
     const domainAnimation = buildHeartDomainAnimation(
       { min: 50, max: 100 },
@@ -334,9 +335,9 @@ describe('chart gesture ownership', () => {
       fireEvent.press(screen.getByTestId('heart-chart-marker-sleep-focus'));
     });
 
-    expect(screen.getByText('25')).toBeTruthy();
+    expect(screen.getByText('29')).toBeTruthy();
     expect(screen.getByText('45')).toBeTruthy();
-    expect(screen.getByText('64')).toBeTruthy();
+    expect(screen.getByText('60')).toBeTruthy();
 
     act(() => {
       screen.rerender(
@@ -368,6 +369,28 @@ describe('chart gesture ownership', () => {
   });
 
   it('restyles the heart snapshot card while a focused sleep session is active', () => {
+    const sleepMarker = {
+      id: 'sleep-focus',
+      kind: 'sleep' as const,
+      label: 'Sleep',
+      timeLabel: '1:00 AM - 4:00 AM',
+      startFraction: 0.25,
+      endFraction: 0.5,
+      details: {
+        durationMinutes: 180,
+        score: 82,
+        asleepMinutes: 165,
+        timeInBedMinutes: 180,
+        remMinutes: 42,
+        deepMinutes: 35,
+        stages: [
+          { stage: 'light' as const, minutes: 74 },
+          { stage: 'rem' as const, minutes: 42 },
+          { stage: 'deep' as const, minutes: 35 },
+          { stage: 'awake' as const, minutes: 14 },
+        ],
+      },
+    };
     const screen = render(
       <HeartSnapshotCard
         chartTestID="heart-card"
@@ -379,35 +402,18 @@ describe('chart gesture ownership', () => {
             label: `${index}`,
             value: 58 + (index % 24),
           })),
-          markers: [
-            {
-              id: 'sleep-focus',
-              kind: 'sleep',
-              label: 'Sleep',
-              timeLabel: '1:00 AM - 4:00 AM',
-              startFraction: 0.25,
-              endFraction: 0.5,
-              details: {
-                durationMinutes: 180,
-                score: 82,
-                asleepMinutes: 165,
-                timeInBedMinutes: 180,
-                remMinutes: 42,
-                deepMinutes: 35,
-                stages: [
-                  { stage: 'light', minutes: 74 },
-                  { stage: 'rem', minutes: 42 },
-                  { stage: 'deep', minutes: 35 },
-                  { stage: 'awake', minutes: 14 },
-                ],
-              },
-            },
-          ],
+          markers: [sleepMarker],
         }}
         trailingLabel="Last 12h"
         windowPointCount={60}
       />,
     );
+
+    const viewport = screen.getByTestId('heart-card-viewport');
+
+    act(() => {
+      viewport.props.onLayout?.({ nativeEvent: { layout: { width: 240, height: 150 } } });
+    });
 
     expect(screen.getByText('Heart Rate')).toBeTruthy();
     expect(screen.queryByText('Return')).toBeNull();
@@ -416,9 +422,9 @@ describe('chart gesture ownership', () => {
       fireEvent.press(screen.getByTestId('heart-card-marker-sleep-focus'));
     });
 
-    expect(screen.queryByText('Heart Rate')).toBeNull();
+    expect(screen.getByText('29')).toBeTruthy();
     expect(screen.getByTestId('heart-card-marker-sleep-focus')).toBeTruthy();
-    expect(screen.getByText('Sleep')).toBeTruthy();
+    expect(screen.getByText('60')).toBeTruthy();
     expect(screen.getByText('Return')).toBeTruthy();
     expect(screen.getByText('Score')).toBeTruthy();
     expect(screen.getByText('Asleep')).toBeTruthy();
@@ -434,6 +440,29 @@ describe('chart gesture ownership', () => {
     });
 
     expect(screen.getByTestId('heart-card-stage-highlight-rem-0')).toBeTruthy();
+
+    const overlay = screen.getByTestId('heart-card');
+    const focusedWindow = buildFocusedHeartMarkerWindow(sleepMarker, 120, 60)!;
+    const remRange = buildHeartSleepStageSelectionRanges(120, sleepMarker, 'rem')[0]!;
+    const pointSpacing = 240 / Math.max(focusedWindow.windowPointCount - 1, 1);
+    const remMidIndex = Math.round((remRange.startIndex + remRange.endIndex) / 2);
+    const remTouchX = (remMidIndex - focusedWindow.windowStart) * pointSpacing;
+    const outsideTouchX = (focusedWindow.windowStart + 2 - focusedWindow.windowStart) * pointSpacing;
+
+    act(() => {
+      overlay.props.onResponderGrant?.(createResponderEvent(outsideTouchX, true));
+    });
+
+    expect(screen.queryByTestId('heart-card-selection-bubble')).toBeNull();
+
+    act(() => {
+      overlay.props.onResponderGrant?.(createResponderEvent(remTouchX, true));
+    });
+
+    const bubble = screen.getByTestId('heart-card-selection-bubble');
+
+    expect(bubble).toBeTruthy();
+    expect(within(bubble).getByText(`${remMidIndex}`)).toBeTruthy();
 
     act(() => {
       fireEvent.press(screen.getByTestId('heart-card-stage-rem'));

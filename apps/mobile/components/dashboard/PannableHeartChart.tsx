@@ -25,6 +25,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import Svg, {
   Circle,
+  ClipPath,
   Defs,
   G,
   LinearGradient as SvgLinearGradient,
@@ -59,7 +60,6 @@ const Y_AXIS_LAG_DURATION_MS = 180;
 const HEART_CHART_VIEWBOX_HEIGHT = 40;
 const MARKER_BADGE_SIZE = 24;
 const MIN_MARKER_BAND_WIDTH = 0.15;
-const FOCUSED_WINDOW_PADDING_POINTS = 4;
 const AnimatedSvgGroup = Animated.createAnimatedComponent(G) as ComponentType<
   ComponentProps<typeof G> & { animatedProps?: object }
 >;
@@ -360,15 +360,9 @@ export function buildHeartWindowDomains(
 export function buildFocusedHeartMarkerWindow(
   marker: Pick<HeartIntradayMarker, 'startFraction' | 'endFraction'>,
   pointCount: number,
-  baseWindowPointCount: number,
+  _baseWindowPointCount: number,
 ) {
   if (pointCount <= 1) {
-    return null;
-  }
-
-  const maxWindowPointCount = Math.max(Math.min(baseWindowPointCount - 1, pointCount), 2);
-
-  if (maxWindowPointCount <= 1) {
     return null;
   }
 
@@ -378,19 +372,9 @@ export function buildFocusedHeartMarkerWindow(
   const startIndex = clamp(Math.floor(clampedStartFraction * lastIndex), 0, lastIndex);
   const endIndex = clamp(Math.ceil(clampedEndFraction * lastIndex), startIndex, lastIndex);
   const durationPointCount = Math.max(endIndex - startIndex + 1, 2);
-  const contextPaddingPointCount = clamp(
-    Math.round(durationPointCount * 0.25),
-    1,
-    FOCUSED_WINDOW_PADDING_POINTS * 2,
-  );
-  const windowPointCount = clamp(
-    durationPointCount + contextPaddingPointCount,
-    2,
-    maxWindowPointCount,
-  );
+  const windowPointCount = clamp(durationPointCount, 2, pointCount);
   const maxWindowStart = Math.max(0, pointCount - windowPointCount);
-  const centerIndex = ((clampedStartFraction + clampedEndFraction) / 2) * lastIndex;
-  const windowStart = clamp(Math.round(centerIndex - (windowPointCount - 1) / 2), 0, maxWindowStart);
+  const windowStart = clamp(startIndex, 0, maxWindowStart);
 
   return {
     endIndex,
@@ -523,12 +507,21 @@ interface HeartSleepStageHighlight {
   testID?: string;
 }
 
-function buildHeartSleepStageHighlights(
+interface HeartSleepStageSpan {
+  endRatio: number;
+  stage: SleepStage;
+  startRatio: number;
+}
+
+interface HeartSleepStageSelectionRange {
+  endIndex: number;
+  startIndex: number;
+}
+
+function buildHeartSleepStageSpans(
   marker: HeartIntradayMarker | null,
   stage: SleepStage | null | undefined,
-  fullSeriesSpan: number,
-  testIDPrefix?: string,
-): HeartSleepStageHighlight[] {
+): HeartSleepStageSpan[] {
   if (!marker || marker.kind !== 'sleep' || !stage || !marker.details?.stages || marker.details.stages.length === 0) {
     return [];
   }
@@ -538,31 +531,79 @@ function buildHeartSleepStageHighlights(
     return [];
   }
 
-  const sessionStartX = clampFraction(marker.startFraction) * fullSeriesSpan;
-  const sessionEndX = clampFraction(Math.max(marker.startFraction, marker.endFraction)) * fullSeriesSpan;
-  const sessionWidth = Math.max(sessionEndX - sessionStartX, MIN_MARKER_BAND_WIDTH);
-  const highlights: HeartSleepStageHighlight[] = [];
-  let cursorX = sessionStartX;
+  const spans: HeartSleepStageSpan[] = [];
+  let cursorRatio = 0;
 
   for (const [index, segment] of marker.details.stages.entries()) {
-    const segmentWidth =
-      index === marker.details.stages.length - 1
-        ? sessionStartX + sessionWidth - cursorX
-        : sessionWidth * (segment.minutes / totalStageMinutes);
+    const segmentRatio =
+      index === marker.details.stages.length - 1 ? 1 - cursorRatio : segment.minutes / totalStageMinutes;
+    const startRatio = cursorRatio;
+    const endRatio = clampFraction(cursorRatio + segmentRatio);
 
-    if (segment.stage === stage) {
-      highlights.push({
+    if (segment.stage === stage && endRatio > startRatio) {
+      spans.push({
+        endRatio,
         stage,
-        startX: cursorX,
-        testID: testIDPrefix ? `${testIDPrefix}-stage-highlight-${stage}-${highlights.length}` : undefined,
-        width: Math.max(segmentWidth, 1),
+        startRatio,
       });
     }
 
-    cursorX += segmentWidth;
+    cursorRatio = endRatio;
   }
 
-  return highlights;
+  return spans;
+}
+
+export function buildHeartSleepStageSelectionRanges(
+  pointCount: number,
+  marker: HeartIntradayMarker | null,
+  stage: SleepStage | null | undefined,
+): HeartSleepStageSelectionRange[] {
+  if (pointCount <= 0) {
+    return [];
+  }
+
+  const spans = buildHeartSleepStageSpans(marker, stage);
+  if (spans.length === 0) {
+    return [];
+  }
+
+  const lastIndex = pointCount - 1;
+  const sessionStartIndex = clamp(Math.floor(clampFraction(marker!.startFraction) * lastIndex), 0, lastIndex);
+  const sessionEndIndex = clamp(
+    Math.ceil(clampFraction(Math.max(marker!.startFraction, marker!.endFraction)) * lastIndex),
+    sessionStartIndex,
+    lastIndex,
+  );
+  const sessionSpan = Math.max(sessionEndIndex - sessionStartIndex, 1);
+
+  return spans.map((span) => ({
+    endIndex: clamp(sessionStartIndex + Math.ceil(span.endRatio * sessionSpan), sessionStartIndex, sessionEndIndex),
+    startIndex: clamp(sessionStartIndex + Math.floor(span.startRatio * sessionSpan), sessionStartIndex, sessionEndIndex),
+  }));
+}
+
+function buildHeartSleepStageHighlights(
+  marker: HeartIntradayMarker | null,
+  stage: SleepStage | null | undefined,
+  fullSeriesSpan: number,
+  testIDPrefix?: string,
+): HeartSleepStageHighlight[] {
+  const spans = buildHeartSleepStageSpans(marker, stage);
+  if (!marker || spans.length === 0) {
+    return [];
+  }
+
+  const sessionStartX = clampFraction(marker.startFraction) * fullSeriesSpan;
+  const sessionEndX = clampFraction(Math.max(marker.startFraction, marker.endFraction)) * fullSeriesSpan;
+  const sessionWidth = Math.max(sessionEndX - sessionStartX, MIN_MARKER_BAND_WIDTH);
+
+  return spans.map((span, index) => ({
+    stage: span.stage,
+    startX: sessionStartX + span.startRatio * sessionWidth,
+    testID: testIDPrefix ? `${testIDPrefix}-stage-highlight-${stage}-${index}` : undefined,
+    width: Math.max((span.endRatio - span.startRatio) * sessionWidth, 1),
+  }));
 }
 
 function HeartMarkerBadge({
@@ -795,6 +836,13 @@ export function PannableHeartChart({
     () => buildHeartSleepStageHighlights(focusedMarker, highlightedSleepStage, fullSeriesSpan, chartTestID),
     [chartTestID, focusedMarker, fullSeriesSpan, highlightedSleepStage],
   );
+  const activeSleepStageColor = highlightedSleepStage ? sleepStageColors[highlightedSleepStage] : null;
+  const sleepStageHighlightClipId = highlightedSleepStage ? `${chartId}-stage-highlight-clip-${highlightedSleepStage}` : null;
+  const sleepStageHighlightFillId = highlightedSleepStage ? `${chartId}-stage-highlight-fill-${highlightedSleepStage}` : null;
+  const sleepStageSelectionRanges = useMemo(
+    () => buildHeartSleepStageSelectionRanges(points.length, focusedMarker, highlightedSleepStage),
+    [focusedMarker, highlightedSleepStage, points.length],
+  );
   const isFocusedWindow = focusedMarkerId !== null || safeWindowPointCount !== baseWindowPointCount;
   const isViewingLatestWindow = windowStart >= maxWindowStart && safeWindowPointCount === baseWindowPointCount;
 
@@ -829,9 +877,20 @@ export function PannableHeartChart({
 
       const pointOffset = clamp(Math.round(touchX / pointSpacing), 0, safeWindowPointCount - 1);
       const nextIndex = clamp(windowStartRef.current + pointOffset, 0, points.length - 1);
+
+      if (
+        sleepStageSelectionRanges.length > 0 &&
+        !sleepStageSelectionRanges.some(
+          (range) => nextIndex >= range.startIndex && nextIndex <= range.endIndex,
+        )
+      ) {
+        commitSelection(null);
+        return;
+      }
+
       commitSelection(nextIndex);
     },
-    [commitSelection, pointSpacing, points.length, safeWindowPointCount],
+    [commitSelection, pointSpacing, points.length, safeWindowPointCount, sleepStageSelectionRanges],
   );
 
   const syncWindowStart = useCallback((nextWindowStart: number) => {
@@ -1309,14 +1368,14 @@ export function PannableHeartChart({
 
   const animatedMarkerFadeProps = useAnimatedProps(
     () => ({
-      opacity: 1 - focusTransitionProgress.value * 0.82,
+      opacity: 1 - focusTransitionProgress.value,
     }),
     [focusTransitionProgress],
   );
 
   const animatedMarkerLayerStyle = useAnimatedStyle(
     () => ({
-      opacity: 1 - focusTransitionProgress.value * 0.88,
+      opacity: 1 - focusTransitionProgress.value,
     }),
     [focusTransitionProgress],
   );
@@ -1428,6 +1487,26 @@ export function PannableHeartChart({
                     y={TREND_VIEWBOX_TOP}
                   />
                 </Mask>
+                {sleepStageHighlights.length > 0 && sleepStageHighlightClipId && sleepStageHighlightFillId && activeSleepStageColor ? (
+                  <G>
+                    <ClipPath id={sleepStageHighlightClipId}>
+                      {sleepStageHighlights.map((highlight, index) => (
+                        <Rect
+                          height={HEART_CHART_VIEWBOX_HEIGHT}
+                          key={`stage-highlight-clip-${highlight.stage}-${index}`}
+                          width={highlight.width}
+                          x={highlight.startX}
+                          y="0"
+                        />
+                      ))}
+                    </ClipPath>
+                    <SvgLinearGradient id={sleepStageHighlightFillId} x1="0%" x2="0%" y1="0%" y2="100%">
+                      <Stop offset="0%" stopColor={activeSleepStageColor} stopOpacity="0.72" />
+                      <Stop offset="55%" stopColor={activeSleepStageColor} stopOpacity="0.26" />
+                      <Stop offset="100%" stopColor={activeSleepStageColor} stopOpacity="0" />
+                    </SvgLinearGradient>
+                  </G>
+                ) : null}
               </Defs>
               <AnimatedSvgGroup animatedProps={animatedChartCameraProps}>
                 <AnimatedSvgGroup animatedProps={animatedMarkerFadeProps}>
@@ -1444,23 +1523,6 @@ export function PannableHeartChart({
                     />
                   ))}
                 </AnimatedSvgGroup>
-                {sleepStageHighlights.map((highlight, index) => (
-                  <Rect
-                    fill={sleepStageColors[highlight.stage]}
-                    fillOpacity="0.2"
-                    height="31"
-                    key={`stage-highlight-${highlight.stage}-${index}`}
-                    rx="4"
-                    ry="4"
-                    stroke={sleepStageColors[highlight.stage]}
-                    strokeOpacity="0.6"
-                    strokeWidth="0.7"
-                    testID={highlight.testID}
-                    width={highlight.width}
-                    x={highlight.startX}
-                    y="3"
-                  />
-                ))}
                 <AnimatedSvgGroup animatedProps={animatedChartPlotProps}>
                   <Line
                     stroke="rgba(149, 162, 188, 0.22)"
@@ -1500,6 +1562,55 @@ export function PannableHeartChart({
                       />
                     ))}
                   </G>
+                  {sleepStageHighlights.map((highlight, index) => (
+                    <Rect
+                      fill="transparent"
+                      height={HEART_CHART_VIEWBOX_HEIGHT}
+                      key={`stage-highlight-probe-${highlight.stage}-${index}`}
+                      testID={highlight.testID}
+                      width={highlight.width}
+                      x={highlight.startX}
+                      y="0"
+                    />
+                  ))}
+                  {sleepStageHighlights.length > 0 && sleepStageHighlightClipId && sleepStageHighlightFillId && activeSleepStageColor ? (
+                    <G clipPath={`url(#${sleepStageHighlightClipId})`}>
+                      <G mask={`url(#${chartId}-fill-mask)`}>
+                        {areas.map((area, areaIndex) => (
+                          <Path
+                            key={`stage-area-${areaIndex}`}
+                            d={area}
+                            fill={`url(#${sleepStageHighlightFillId})`}
+                          />
+                        ))}
+                      </G>
+                      <G>
+                        {paths.map((path, pathIndex) => (
+                          <Path
+                            key={`stage-shadow-${pathIndex}`}
+                            d={path}
+                            fill="none"
+                            stroke={activeSleepStageColor}
+                            strokeOpacity="0.22"
+                            strokeWidth="2.4"
+                            vectorEffect="non-scaling-stroke"
+                          />
+                        ))}
+                        {paths.map((path, pathIndex) => (
+                          <Path
+                            key={`stage-line-${pathIndex}`}
+                            d={path}
+                            fill="none"
+                            stroke={activeSleepStageColor}
+                            strokeLinecap="round"
+                            strokeOpacity="0.96"
+                            strokeWidth="1.3"
+                            vectorEffect="non-scaling-stroke"
+                          />
+                        ))}
+                      </G>
+                    </G>
+                  ) : null}
                 </AnimatedSvgGroup>
               </AnimatedSvgGroup>
             </Svg>
@@ -1529,7 +1640,7 @@ export function PannableHeartChart({
               </Svg>
             ) : null}
           </View>
-          <View pointerEvents="box-none" style={styles.markerViewport}>
+          <View pointerEvents={isFocusedWindow ? 'none' : 'box-none'} style={styles.markerViewport}>
             <Animated.View pointerEvents="box-none" style={[styles.chartCameraLayer, animatedViewportCameraStyle]}>
               <Animated.View pointerEvents="box-none" style={[styles.chartZoomLayer, animatedViewportZoomStyle]}>
                 <Animated.View
