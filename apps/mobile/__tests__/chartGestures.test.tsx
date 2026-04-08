@@ -1,6 +1,6 @@
-import { act, fireEvent, render, within } from '@testing-library/react-native';
+import { act, fireEvent, render, waitFor, within } from '@testing-library/react-native';
 import { ScrollView, StyleSheet } from 'react-native';
-import Svg from 'react-native-svg';
+import Svg, { Stop } from 'react-native-svg';
 
 jest.mock('@expo/vector-icons', () => {
   const React = require('react');
@@ -36,6 +36,7 @@ import {
   shouldTriggerHeartLoadMore,
 } from '@/components/dashboard/PannableHeartChart';
 import { ScreenShell } from '@/components/layout/ScreenShell';
+import { colors } from '@/constants/theme';
 import { formatAxisTime } from '@/utils/dateTime';
 
 function getScrollView(screen: ReturnType<typeof render>) {
@@ -298,7 +299,7 @@ describe('chart gesture ownership', () => {
     expect(screen.getByText('24')).toBeTruthy();
   });
 
-  it('zooms into a sleep marker window and can return to the latest window', () => {
+  it('zooms into a sleep marker window and can return to the latest window', async () => {
     const screen = render(
       <PannableHeartChart
         chartTestID="heart-chart"
@@ -363,12 +364,14 @@ describe('chart gesture ownership', () => {
       );
     });
 
-    expect(screen.getByText('60')).toBeTruthy();
-    expect(screen.getByText('90')).toBeTruthy();
-    expect(screen.getByText('119')).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.getByText('60')).toBeTruthy();
+      expect(screen.getByText('90')).toBeTruthy();
+      expect(screen.getByText('119')).toBeTruthy();
+    });
   });
 
-  it('restyles the heart snapshot card while a focused sleep session is active', () => {
+  it('restyles the heart snapshot card while a focused sleep session is active', async () => {
     const sleepMarker = {
       id: 'sleep-focus',
       kind: 'sleep' as const,
@@ -417,6 +420,7 @@ describe('chart gesture ownership', () => {
 
     expect(screen.getByText('Heart Rate')).toBeTruthy();
     expect(screen.queryByText('Return')).toBeNull();
+    expect(screen.UNSAFE_getAllByType(Stop).some((stop) => stop.props.stopColor === colors.indigo)).toBe(false);
 
     act(() => {
       fireEvent.press(screen.getByTestId('heart-card-marker-sleep-focus'));
@@ -425,14 +429,17 @@ describe('chart gesture ownership', () => {
     expect(screen.getByText('29')).toBeTruthy();
     expect(screen.getByTestId('heart-card-marker-sleep-focus')).toBeTruthy();
     expect(screen.getByText('60')).toBeTruthy();
-    expect(screen.getByText('Return')).toBeTruthy();
+    await waitFor(() =>
+      expect(screen.UNSAFE_getAllByType(Stop).some((stop) => stop.props.stopColor === colors.indigo)).toBe(true),
+    );
+    await waitFor(() => expect(screen.getByText('Return')).toBeTruthy());
     expect(screen.getByText('Score')).toBeTruthy();
     expect(screen.getByText('Asleep')).toBeTruthy();
     expect(screen.getByText('Efficiency')).toBeTruthy();
     expect(screen.getByText('2:45')).toBeTruthy();
     expect(screen.queryByText('In bed')).toBeNull();
-    expect(screen.getByText('Sleep stages')).toBeTruthy();
-    expect(screen.getByText('Awake')).toBeTruthy();
+    await waitFor(() => expect(screen.getByText('Awake')).toBeTruthy());
+    await waitFor(() => expect(screen.getByTestId('heart-card-stage-rem')).toBeTruthy());
     expect(screen.queryByTestId('heart-card-stage-highlight-rem-0')).toBeNull();
 
     act(() => {
@@ -474,9 +481,9 @@ describe('chart gesture ownership', () => {
       fireEvent.press(screen.getByTestId('heart-card-return-button'));
     });
 
+    await waitFor(() => expect(screen.queryByText('Return')).toBeNull(), { timeout: 2500 });
     expect(screen.getByText('Heart Rate')).toBeTruthy();
     expect(screen.getByTestId('heart-card-marker-sleep-focus')).toBeTruthy();
-    expect(screen.queryByText('Return')).toBeNull();
   });
 
   it('renders interval markers on trend charts', () => {

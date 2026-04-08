@@ -1,15 +1,20 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { startTransition, useCallback, useEffect, useRef, useState } from 'react';
 import { Ionicons } from '@expo/vector-icons';
 import {
   ActivityIndicator,
-  LayoutAnimation,
-  Platform,
   Pressable,
   StyleSheet,
   Text,
-  UIManager,
   View,
 } from 'react-native';
+import Animated, {
+  Easing,
+  cancelAnimation,
+  useAnimatedStyle,
+  useSharedValue,
+  withDelay,
+  withTiming,
+} from 'react-native-reanimated';
 
 import { SleepStageChart } from '@/components/charts/SleepStageChart';
 import { TrendChart } from '@/components/charts/TrendChart';
@@ -30,10 +35,6 @@ import type {
 } from '@/types/health';
 import { formatCompactDuration, formatMetricValue, formatShortDuration } from '@/utils/formatters';
 import { getHeartIntradayMarkerPresentation } from '@/utils/heartChartMarkers';
-
-if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
-  UIManager.setLayoutAnimationEnabledExperimental(true);
-}
 
 interface HeartMetricColumn {
   label: string;
@@ -60,6 +61,13 @@ interface FocusedHeartCardContent {
 }
 
 const HEART_CARD_CHART_HEIGHT = 150;
+const HEART_CARD_CHROME_OUT_DURATION_MS = 140;
+const HEART_CARD_CHROME_IN_DURATION_MS = 180;
+const HEART_CARD_CHROME_STAGE_DELAY_MS = 60;
+const SLEEP_STAGE_PANEL_ANIMATION_DURATION_MS = 220;
+const SLEEP_STAGE_PANEL_MAX_HEIGHT = 120;
+const SLEEP_STAGE_PANEL_STAGE_DELAY_MS = HEART_CARD_CHROME_STAGE_DELAY_MS * 3;
+const SLEEP_STAGE_CHIP_STAGE_DELAY_MS = SLEEP_STAGE_PANEL_STAGE_DELAY_MS + 20;
 
 function accentColorForInsight(accent: DashboardInsight['accent']) {
   switch (accent) {
@@ -280,17 +288,35 @@ export function HeartSnapshotCard({
   const resolvedWindowPointCount = windowPointCount ?? snapshot.series.length;
   const [isViewingLatestWindow, setIsViewingLatestWindow] = useState(true);
   const [latestJumpVersion, setLatestJumpVersion] = useState(0);
+  const [focusedMarkerTarget, setFocusedMarkerTarget] = useState<HeartIntradayMarker | null>(null);
   const [focusedMarker, setFocusedMarker] = useState<HeartIntradayMarker | null>(null);
   const [selectedSleepStage, setSelectedSleepStage] = useState<SleepStage | null>(null);
-  const previousFocusedMarkerIdRef = useRef<string | null>(null);
+  const [isSleepStagePanelMounted, setIsSleepStagePanelMounted] = useState(false);
+  const [renderedSleepStageChips, setRenderedSleepStageChips] = useState<HeartMetricChip[]>([]);
+  const isFocusTransitioningRef = useRef(false);
+  const pendingFocusedMarkerRef = useRef<HeartIntradayMarker | null>(null);
+  const sleepStagePanelUnmountTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const showsLatestWindowButton = trailingLabel === 'Last 12h';
+  const focusedCardTargetContent = buildFocusedHeartCardContent(snapshot, focusedMarkerTarget);
   const focusedCardContent = buildFocusedHeartCardContent(snapshot, focusedMarker);
-  const cardAccentColor = focusedCardContent?.accentColor ?? colors.success;
-  const chartAccentColor = focusedCardContent?.chartAccentColor ?? colors.primary;
+  const cardAccentColor = focusedCardTargetContent?.accentColor ?? colors.success;
+  const chartAccentColor = focusedCardTargetContent?.chartAccentColor ?? colors.primary;
   const isSleepFocused = focusedMarker?.kind === 'sleep';
+  const sleepStageChips = focusedCardContent?.stageChips ?? [];
+  const sleepStageChipSignature = sleepStageChips
+    .map((chip) => `${chip.label}:${chip.value}:${chip.accentColor}`)
+    .join('|');
+  const sleepStagePanelVisible = isSleepFocused && sleepStageChips.length > 0;
+  const cardHeaderTransitionProgress = useSharedValue(1);
+  const cardMetricsTransitionProgress = useSharedValue(1);
+  const cardChipsTransitionProgress = useSharedValue(1);
+  const sleepStagePanelMaxHeight = useSharedValue(0);
+  const sleepStagePanelOpacity = useSharedValue(0);
+  const sleepStagePanelMarginTop = useSharedValue(0);
+  const sleepStageChipTransitionProgress = useSharedValue(0);
   const chartHeight = HEART_CARD_CHART_HEIGHT;
   const cardTitle = focusedCardContent?.title ?? 'Heart Rate';
-  const cardSubtitle = focusedCardContent?.subtitle ?? 'Recent heart trend';
+  const cardSubtitle = focusedCardContent?.subtitle ?? 'Explore your heart rate';
   const metricColumns: HeartMetricColumn[] = focusedCardContent?.metrics ?? [
     {
       label: 'Resting HR',
@@ -310,24 +336,99 @@ export function HeartSnapshotCard({
     },
   ];
 
-  const handleFocusedMarkerChange = useCallback((nextMarker: HeartIntradayMarker | null) => {
-    const nextMarkerId = nextMarker?.id ?? null;
+  const animateCardChromeStages = useCallback(
+    (target: 0 | 1) => {
+      const duration =
+        target === 0 ? HEART_CARD_CHROME_OUT_DURATION_MS : HEART_CARD_CHROME_IN_DURATION_MS;
 
-    if (previousFocusedMarkerIdRef.current !== nextMarkerId) {
-      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-      previousFocusedMarkerIdRef.current = nextMarkerId;
+      cancelAnimation(cardHeaderTransitionProgress);
+      cancelAnimation(cardMetricsTransitionProgress);
+      cancelAnimation(cardChipsTransitionProgress);
+
+      cardHeaderTransitionProgress.value = withDelay(
+        0,
+        withTiming(target, {
+          duration,
+          easing: Easing.out(Easing.cubic),
+        }),
+      );
+      cardMetricsTransitionProgress.value = withDelay(
+        HEART_CARD_CHROME_STAGE_DELAY_MS,
+        withTiming(target, {
+          duration,
+          easing: Easing.out(Easing.cubic),
+        }),
+      );
+      cardChipsTransitionProgress.value = withDelay(
+        HEART_CARD_CHROME_STAGE_DELAY_MS * 2,
+        withTiming(target, {
+          duration,
+          easing: Easing.out(Easing.cubic),
+        }),
+      );
+    },
+    [cardChipsTransitionProgress, cardHeaderTransitionProgress, cardMetricsTransitionProgress],
+  );
+
+  const handleFocusedMarkerChange = useCallback((nextMarker: HeartIntradayMarker | null) => {
+    pendingFocusedMarkerRef.current = nextMarker;
+    setFocusedMarkerTarget((current) => (current?.id === nextMarker?.id ? current : nextMarker));
+
+    if (isFocusTransitioningRef.current) {
+      return;
     }
 
-    setFocusedMarker(nextMarker);
+    startTransition(() => {
+      setFocusedMarker(nextMarker);
+    });
   }, []);
+
+  const handleFocusTransitionStateChange = useCallback((isTransitioning: boolean) => {
+    isFocusTransitioningRef.current = isTransitioning;
+
+    if (isTransitioning) {
+      animateCardChromeStages(0);
+      return;
+    }
+
+    startTransition(() => {
+      setFocusedMarker(pendingFocusedMarkerRef.current);
+    });
+  }, [animateCardChromeStages]);
 
   useEffect(() => {
     setIsViewingLatestWindow(true);
     setLatestJumpVersion(0);
-    previousFocusedMarkerIdRef.current = null;
+    isFocusTransitioningRef.current = false;
+    pendingFocusedMarkerRef.current = null;
+    cardHeaderTransitionProgress.value = 1;
+    cardMetricsTransitionProgress.value = 1;
+    cardChipsTransitionProgress.value = 1;
+    sleepStageChipTransitionProgress.value = 0;
+    if (sleepStagePanelUnmountTimeoutRef.current !== null) {
+      clearTimeout(sleepStagePanelUnmountTimeoutRef.current);
+      sleepStagePanelUnmountTimeoutRef.current = null;
+    }
+    setIsSleepStagePanelMounted(false);
+    setRenderedSleepStageChips([]);
+    setFocusedMarkerTarget(null);
     setFocusedMarker(null);
     setSelectedSleepStage(null);
-  }, [viewportKey]);
+  }, [
+    cardChipsTransitionProgress,
+    cardHeaderTransitionProgress,
+    cardMetricsTransitionProgress,
+    sleepStageChipTransitionProgress,
+    viewportKey,
+  ]);
+
+  useEffect(() => {
+    if (isFocusTransitioningRef.current) {
+      return;
+    }
+
+    animateCardChromeStages(1);
+  }, [animateCardChromeStages, focusedMarker?.id]);
 
   useEffect(() => {
     setSelectedSleepStage(null);
@@ -337,158 +438,303 @@ export function HeartSnapshotCard({
     setSelectedSleepStage((current) => (current === stage ? null : stage));
   }, []);
 
+  useEffect(() => {
+    if (sleepStagePanelVisible) {
+      if (sleepStagePanelUnmountTimeoutRef.current !== null) {
+        clearTimeout(sleepStagePanelUnmountTimeoutRef.current);
+        sleepStagePanelUnmountTimeoutRef.current = null;
+      }
+
+      setRenderedSleepStageChips(sleepStageChips);
+      setIsSleepStagePanelMounted(true);
+      return;
+    }
+
+    if (!isSleepStagePanelMounted) {
+      return;
+    }
+
+    if (sleepStagePanelUnmountTimeoutRef.current !== null) {
+      clearTimeout(sleepStagePanelUnmountTimeoutRef.current);
+    }
+
+    sleepStagePanelUnmountTimeoutRef.current = setTimeout(() => {
+      sleepStagePanelUnmountTimeoutRef.current = null;
+      setIsSleepStagePanelMounted(false);
+      setRenderedSleepStageChips([]);
+    }, SLEEP_STAGE_PANEL_ANIMATION_DURATION_MS);
+  }, [isSleepStagePanelMounted, sleepStageChipSignature, sleepStagePanelVisible]);
+
+  useEffect(() => {
+    const nextMaxHeight = sleepStagePanelVisible ? SLEEP_STAGE_PANEL_MAX_HEIGHT : 0;
+    const nextOpacity = sleepStagePanelVisible ? 1 : 0;
+    const nextMarginTop = sleepStagePanelVisible ? 12 : 0;
+    const panelDelay = sleepStagePanelVisible ? SLEEP_STAGE_PANEL_STAGE_DELAY_MS : 0;
+    const chipDelay = sleepStagePanelVisible ? SLEEP_STAGE_CHIP_STAGE_DELAY_MS : 0;
+
+    cancelAnimation(sleepStagePanelMaxHeight);
+    cancelAnimation(sleepStagePanelOpacity);
+    cancelAnimation(sleepStagePanelMarginTop);
+    cancelAnimation(sleepStageChipTransitionProgress);
+
+    sleepStagePanelMaxHeight.value = withDelay(
+      panelDelay,
+      withTiming(nextMaxHeight, {
+        duration: SLEEP_STAGE_PANEL_ANIMATION_DURATION_MS,
+        easing: Easing.out(Easing.cubic),
+      }),
+    );
+    sleepStagePanelOpacity.value = withDelay(
+      panelDelay,
+      withTiming(nextOpacity, {
+        duration: SLEEP_STAGE_PANEL_ANIMATION_DURATION_MS,
+        easing: Easing.out(Easing.cubic),
+      }),
+    );
+    sleepStagePanelMarginTop.value = withDelay(
+      panelDelay,
+      withTiming(nextMarginTop, {
+        duration: SLEEP_STAGE_PANEL_ANIMATION_DURATION_MS,
+        easing: Easing.out(Easing.cubic),
+      }),
+    );
+    sleepStageChipTransitionProgress.value = withDelay(
+      chipDelay,
+      withTiming(sleepStagePanelVisible ? 1 : 0, {
+        duration:
+          sleepStagePanelVisible ? HEART_CARD_CHROME_IN_DURATION_MS : HEART_CARD_CHROME_OUT_DURATION_MS,
+        easing: Easing.out(Easing.cubic),
+      }),
+    );
+  }, [
+    sleepStageChipTransitionProgress,
+    sleepStagePanelMaxHeight,
+    sleepStagePanelMarginTop,
+    sleepStagePanelOpacity,
+    sleepStagePanelVisible,
+  ]);
+
+  useEffect(
+    () => () => {
+      if (sleepStagePanelUnmountTimeoutRef.current !== null) {
+        clearTimeout(sleepStagePanelUnmountTimeoutRef.current);
+      }
+    },
+    [],
+  );
+
+  const animatedSleepStagePanelStyle = useAnimatedStyle(
+    () => ({
+      maxHeight: sleepStagePanelMaxHeight.value,
+      marginTop: sleepStagePanelMarginTop.value,
+      opacity: sleepStagePanelOpacity.value,
+    }),
+    [sleepStagePanelMarginTop, sleepStagePanelMaxHeight, sleepStagePanelOpacity],
+  );
+
+  const animatedSleepStageChipStageStyle = useAnimatedStyle(
+    () => ({
+      opacity: sleepStageChipTransitionProgress.value,
+      transform: [
+        { translateY: (1 - sleepStageChipTransitionProgress.value) * -6 },
+        { scale: 0.99 + sleepStageChipTransitionProgress.value * 0.01 },
+      ],
+    }),
+    [sleepStageChipTransitionProgress],
+  );
+
+  const animatedCardHeaderStageStyle = useAnimatedStyle(
+    () => ({
+      opacity: cardHeaderTransitionProgress.value,
+      transform: [
+        { translateY: (1 - cardHeaderTransitionProgress.value) * -12 },
+        { scale: 0.99 + cardHeaderTransitionProgress.value * 0.01 },
+      ],
+    }),
+    [cardHeaderTransitionProgress],
+  );
+
+  const animatedCardMetricsStageStyle = useAnimatedStyle(
+    () => ({
+      opacity: cardMetricsTransitionProgress.value,
+      transform: [
+        { translateY: (1 - cardMetricsTransitionProgress.value) * -8 },
+        { scale: 0.988 + cardMetricsTransitionProgress.value * 0.012 },
+      ],
+    }),
+    [cardMetricsTransitionProgress],
+  );
+
+  const animatedCardChipsStageStyle = useAnimatedStyle(
+    () => ({
+      opacity: cardChipsTransitionProgress.value,
+      transform: [
+        { translateY: (1 - cardChipsTransitionProgress.value) * -6 },
+        { scale: 0.99 + cardChipsTransitionProgress.value * 0.01 },
+      ],
+    }),
+    [cardChipsTransitionProgress],
+  );
+
   return (
     <GlassCard accentColor={cardAccentColor}>
-      <View style={styles.cardHeader}>
-        <View style={styles.cardHeaderLeft}>
-          {focusedCardContent ? (
-            <View
-              style={[
-                styles.cardIconWrap,
-                {
-                  backgroundColor: `${cardAccentColor}18`,
-                  borderColor: `${cardAccentColor}33`,
-                },
-              ]}>
-              <Ionicons color={cardAccentColor} name={focusedCardContent.iconName} size={16} />
-            </View>
-          ) : (
-            <View
-              style={[
-                styles.cardIconWrap,
-                {
-                  backgroundColor: `${colors.success}18`,
-                  borderColor: `${colors.success}33`,
-                },
-              ]}>
-              <PulsingHeartIcon
-                bpm={showLiveHeartRate ? Number(liveHeartRateLabel?.replace(' bpm', '') ?? 0) : null}
-                color={colors.success}
-                name="heart-circle-outline"
-                size={16}
-              />
-            </View>
-          )}
-          <View style={styles.cardHeaderTextStack}>
-            <Text style={styles.cardTitle} testID={chartTestID ? `${chartTestID}-title` : undefined}>
-              {cardTitle}
-            </Text>
-            <Text style={styles.cardSubtitle}>{cardSubtitle}</Text>
-          </View>
-        </View>
-        {focusedCardContent ? (
-          <View style={styles.actionWrap}>
-            <View style={styles.actionButtonRow}>
-              <Pressable
-                accessibilityRole="button"
-                onPress={() => {
-                  setLatestJumpVersion((current) => current + 1);
-                }}
-                style={({ pressed }) => [
-                  styles.focusedActionButton,
+      <Animated.View style={animatedCardHeaderStageStyle}>
+        <View style={styles.cardHeader}>
+          <View style={styles.cardHeaderLeft}>
+            {focusedCardContent ? (
+              <View
+                style={[
+                  styles.cardIconWrap,
                   {
-                    backgroundColor: `${cardAccentColor}14`,
+                    backgroundColor: `${cardAccentColor}18`,
                     borderColor: `${cardAccentColor}33`,
                   },
-                  pressed ? styles.actionPressed : null,
-                ]}
-                testID={chartTestID ? `${chartTestID}-return-button` : undefined}>
-                <Ionicons color={cardAccentColor} name="arrow-back-outline" size={12} />
-                <Text style={[styles.focusedActionText, { color: cardAccentColor }]}>Return</Text>
-              </Pressable>
-              {onOpen ? (
-                <Pressable
-                  accessibilityRole="button"
-                  onPress={onOpen}
-                  style={({ pressed }) => [styles.actionButton, pressed ? styles.actionPressed : null]}
-                  testID={openTestID}>
-                  <Text style={styles.actionText}>Open</Text>
-                  <Ionicons color={colors.primaryBright} name="chevron-forward" size={14} />
-                </Pressable>
-              ) : null}
+                ]}>
+                <Ionicons color={cardAccentColor} name={focusedCardContent.iconName} size={16} />
+              </View>
+            ) : (
+              <View
+                style={[
+                  styles.cardIconWrap,
+                  {
+                    backgroundColor: `${colors.success}18`,
+                    borderColor: `${colors.success}33`,
+                  },
+                ]}>
+                <PulsingHeartIcon
+                  bpm={showLiveHeartRate ? Number(liveHeartRateLabel?.replace(' bpm', '') ?? 0) : null}
+                  color={colors.success}
+                  name="heart-circle-outline"
+                  size={16}
+                />
+              </View>
+            )}
+            <View style={styles.cardHeaderTextStack}>
+              <Text style={styles.cardTitle} testID={chartTestID ? `${chartTestID}-title` : undefined}>
+                {cardTitle}
+              </Text>
+              <Text style={styles.cardSubtitle}>{cardSubtitle}</Text>
             </View>
           </View>
-        ) : showsLatestWindowButton ? (
-          <View style={styles.actionWrap}>
-            <View style={styles.actionButtonRow}>
-              <Pressable
-                accessibilityRole="button"
-                accessibilityState={{ disabled: isViewingLatestWindow }}
-                disabled={isViewingLatestWindow}
-                onPress={() => {
-                  setLatestJumpVersion((current) => current + 1);
-                }}
-                style={({ pressed }) => [
-                  styles.latestButton,
-                  isViewingLatestWindow ? styles.latestButtonIdle : styles.latestButtonActive,
-                  pressed && !isViewingLatestWindow ? styles.actionPressed : null,
-                ]}
-                testID={chartTestID ? `${chartTestID}-latest-button` : undefined}>
-                <View style={styles.latestButtonIconSlot}>
-                  {isRefreshing ? (
-                    <View testID={chartTestID ? `${chartTestID}-refresh-indicator` : undefined}>
-                      <ActivityIndicator
+          {focusedCardContent ? (
+            <View style={styles.actionWrap}>
+              <View style={styles.actionButtonRow}>
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={() => {
+                    setLatestJumpVersion((current) => current + 1);
+                  }}
+                  style={({ pressed }) => [
+                    styles.focusedActionButton,
+                    {
+                      backgroundColor: `${cardAccentColor}14`,
+                      borderColor: `${cardAccentColor}33`,
+                    },
+                    pressed ? styles.actionPressed : null,
+                  ]}
+                  testID={chartTestID ? `${chartTestID}-return-button` : undefined}>
+                  <Ionicons color={cardAccentColor} name="arrow-back-outline" size={12} />
+                  <Text style={[styles.focusedActionText, { color: cardAccentColor }]}>Return</Text>
+                </Pressable>
+                {onOpen ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    onPress={onOpen}
+                    style={({ pressed }) => [styles.actionButton, pressed ? styles.actionPressed : null]}
+                    testID={openTestID}>
+                    <Text style={styles.actionText}>Open</Text>
+                    <Ionicons color={colors.primaryBright} name="chevron-forward" size={14} />
+                  </Pressable>
+                ) : null}
+              </View>
+            </View>
+          ) : showsLatestWindowButton ? (
+            <View style={styles.actionWrap}>
+              <View style={styles.actionButtonRow}>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityState={{ disabled: isViewingLatestWindow }}
+                  disabled={isViewingLatestWindow}
+                  onPress={() => {
+                    setIsViewingLatestWindow(true);
+                    setLatestJumpVersion((current) => current + 1);
+                  }}
+                  style={({ pressed }) => [
+                    styles.latestButton,
+                    isViewingLatestWindow ? styles.latestButtonIdle : styles.latestButtonActive,
+                    pressed && !isViewingLatestWindow ? styles.actionPressed : null,
+                  ]}
+                  testID={chartTestID ? `${chartTestID}-latest-button` : undefined}>
+                  <View style={styles.latestButtonIconSlot}>
+                    {isRefreshing ? (
+                      <View testID={chartTestID ? `${chartTestID}-refresh-indicator` : undefined}>
+                        <ActivityIndicator
+                          color={isViewingLatestWindow ? colors.subtle : colors.primaryBright}
+                          size="small"
+                          style={styles.latestButtonSpinner}
+                        />
+                      </View>
+                    ) : (
+                      <Ionicons
                         color={isViewingLatestWindow ? colors.subtle : colors.primaryBright}
-                        size="small"
-                        style={styles.latestButtonSpinner}
+                        name="refresh-outline"
+                        size={12}
                       />
-                    </View>
-                  ) : (
-                    <Ionicons
-                      color={isViewingLatestWindow ? colors.subtle : colors.primaryBright}
-                      name="refresh-outline"
-                      size={12}
-                    />
-                  )}
-                </View>
-                <Text
-                  style={[
-                    styles.latestButtonText,
-                    isViewingLatestWindow ? styles.latestButtonTextIdle : null,
-                  ]}>
-                  Last 12h
-                </Text>
-              </Pressable>
-              {onOpen ? (
-                <Pressable
-                  accessibilityRole="button"
-                  onPress={onOpen}
-                  style={({ pressed }) => [styles.actionButton, pressed ? styles.actionPressed : null]}
-                  testID={openTestID}>
-                  <Text style={styles.actionText}>Open</Text>
-                  <Ionicons color={colors.primaryBright} name="chevron-forward" size={14} />
+                    )}
+                  </View>
+                  <Text
+                    style={[
+                      styles.latestButtonText,
+                      isViewingLatestWindow ? styles.latestButtonTextIdle : null,
+                    ]}>
+                    Last 12h
+                  </Text>
                 </Pressable>
-              ) : null}
+                {onOpen ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    onPress={onOpen}
+                    style={({ pressed }) => [styles.actionButton, pressed ? styles.actionPressed : null]}
+                    testID={openTestID}>
+                    <Text style={styles.actionText}>Open</Text>
+                    <Ionicons color={colors.primaryBright} name="chevron-forward" size={14} />
+                  </Pressable>
+                ) : null}
+              </View>
             </View>
-          </View>
-        ) : onOpen ? <CardAction label={trailingLabel} onPress={onOpen} testID={openTestID} /> : <Text style={styles.actionMeta}>{trailingLabel}</Text>}
-      </View>
+          ) : onOpen ? <CardAction label={trailingLabel} onPress={onOpen} testID={openTestID} /> : <Text style={styles.actionMeta}>{trailingLabel}</Text>}
+        </View>
+      </Animated.View>
 
-      <View style={styles.metricRow}>
-        {metricColumns.map((metric) => (
-          <View key={metric.label} style={styles.metricColumn}>
-            <Text style={styles.metricLabel}>{metric.label}</Text>
-            <Text style={[styles.metricValue, metric.valueColor ? { color: metric.valueColor } : null]}>
-              {metric.value}
-              {metric.unit ? <Text style={styles.metricUnit}> {metric.unit}</Text> : null}
-            </Text>
-          </View>
-        ))}
-      </View>
-
-      {focusedCardContent?.chips.length ? (
-        <View style={styles.cardChipRow}>
-          {focusedCardContent.chips.map((chip) => (
-            <StatChip accent={chip.accentColor} key={`${chip.label}-${chip.value}`} label={chip.label} value={chip.value} />
+      <Animated.View style={animatedCardMetricsStageStyle}>
+        <View style={styles.metricRow}>
+          {metricColumns.map((metric) => (
+            <View key={metric.label} style={styles.metricColumn}>
+              <Text style={styles.metricLabel}>{metric.label}</Text>
+              <Text style={[styles.metricValue, metric.valueColor ? { color: metric.valueColor } : null]}>
+                {metric.value}
+                {metric.unit ? <Text style={styles.metricUnit}> {metric.unit}</Text> : null}
+              </Text>
+            </View>
           ))}
         </View>
-      ) : null}
+      </Animated.View>
 
-      {!focusedCardContent && showLiveHeartRate && liveHeartRateLabel ? (
-        <View style={styles.cardChipRow}>
-          <StatChip accent={colors.heart} label="Live" value={liveHeartRateLabel} />
-        </View>
-      ) : null}
+      <Animated.View style={animatedCardChipsStageStyle}>
+        {focusedCardContent?.chips.length ? (
+          <View style={styles.cardChipRow}>
+            {focusedCardContent.chips.map((chip) => (
+              <StatChip accent={chip.accentColor} key={`${chip.label}-${chip.value}`} label={chip.label} value={chip.value} />
+            ))}
+          </View>
+        ) : null}
+
+        {!focusedCardContent && showLiveHeartRate && liveHeartRateLabel ? (
+          <View style={styles.cardChipRow}>
+            <StatChip accent={colors.heart} label="Live" value={liveHeartRateLabel} />
+          </View>
+        ) : null}
+      </Animated.View>
 
       <PannableHeartChart
         accentColor={chartAccentColor}
@@ -502,50 +748,56 @@ export function HeartSnapshotCard({
         markers={snapshot.markers}
         jumpToLatestSignal={latestJumpVersion}
         onFocusedMarkerChange={handleFocusedMarkerChange}
+        onFocusTransitionStateChange={handleFocusTransitionStateChange}
         onLoadMore={onLoadMore}
         onViewingLatestWindowChange={setIsViewingLatestWindow}
         points={snapshot.series}
         resetKey={viewportKey}
         windowPointCount={resolvedWindowPointCount}
       />
-      {isSleepFocused && focusedCardContent?.stageChips.length ? (
+      <Animated.View
+        pointerEvents={sleepStagePanelVisible ? 'auto' : 'none'}
+        style={[styles.sleepStagePanelWrap, animatedSleepStagePanelStyle]}>
         <View style={styles.sleepStagePanel}>
-          <Text style={styles.sleepStagePanelLabel}>Sleep stages</Text>
-          <View style={styles.sleepStageChipRow}>
-            {focusedCardContent.stageChips.map((chip) => {
-              const stage = chip.label.toLowerCase() === 'rem' ? 'rem' : chip.label.toLowerCase() as SleepStage;
-              const isSelected = selectedSleepStage === stage;
+          {isSleepStagePanelMounted ? (
+            <Animated.View style={animatedSleepStageChipStageStyle}>
+              <View style={styles.sleepStageChipRow}>
+                {renderedSleepStageChips.map((chip) => {
+                  const stage = chip.label.toLowerCase() === 'rem' ? 'rem' : chip.label.toLowerCase() as SleepStage;
+                  const isSelected = selectedSleepStage === stage;
 
-              return (
-                <Pressable
-                  accessibilityRole="button"
-                  key={`${chip.label}-${chip.value}`}
-                  onPress={() => handleSleepStagePress(stage)}
-                  style={({ pressed }) => [
-                    styles.sleepStageChipPressable,
-                    pressed ? styles.sleepStageChipPressed : null,
-                  ]}
-                  testID={chartTestID ? `${chartTestID}-stage-${stage}` : undefined}>
-                  <StatChip
-                    accent={chip.accentColor}
-                    label={chip.label}
-                    style={[
-                      styles.sleepStageChip,
-                      isSelected
-                        ? {
-                            backgroundColor: `${chip.accentColor}18`,
-                            borderColor: `${chip.accentColor}55`,
-                          }
-                        : null,
-                    ]}
-                    value={chip.value}
-                  />
-                </Pressable>
-              );
-            })}
-          </View>
+                  return (
+                    <Pressable
+                      accessibilityRole="button"
+                      key={`${chip.label}-${chip.value}`}
+                      onPress={() => handleSleepStagePress(stage)}
+                      style={({ pressed }) => [
+                        styles.sleepStageChipPressable,
+                        pressed ? styles.sleepStageChipPressed : null,
+                      ]}
+                      testID={chartTestID ? `${chartTestID}-stage-${stage}` : undefined}>
+                      <StatChip
+                        accent={chip.accentColor}
+                        label={chip.label}
+                        style={[
+                          styles.sleepStageChip,
+                          isSelected
+                            ? {
+                                backgroundColor: `${chip.accentColor}18`,
+                                borderColor: `${chip.accentColor}55`,
+                              }
+                            : null,
+                        ]}
+                        value={chip.value}
+                      />
+                    </Pressable>
+                  );
+                })}
+              </View>
+            </Animated.View>
+          ) : null}
         </View>
-      ) : null}
+      </Animated.View>
       {isLoadingMore ? (
         <View style={styles.historyLoaderRow}>
           <ActivityIndicator color={colors.primary} size="small" />
@@ -935,8 +1187,11 @@ const styles = StyleSheet.create({
     gap: 10,
     marginBottom: 10,
   },
+  sleepStagePanelWrap: {
+    overflow: 'hidden',
+  },
   sleepStagePanel: {
-    marginTop: 12,
+    paddingTop: 0,
   },
   sleepStagePanelLabel: {
     color: colors.muted,
