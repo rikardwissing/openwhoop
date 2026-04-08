@@ -201,6 +201,16 @@ export interface ActivitySummary extends EstimatedValueMeta {
 
 export type HeartIntradayMarkerKind = 'sleep' | 'nap' | 'activity';
 
+export interface HeartIntradayMarkerDetails {
+  durationMinutes: number | null;
+  score?: number | null;
+  asleepMinutes?: number | null;
+  timeInBedMinutes?: number | null;
+  remMinutes?: number | null;
+  deepMinutes?: number | null;
+  stages?: SleepStageSegment[];
+}
+
 export interface HeartIntradayMarker {
   id: string;
   kind: HeartIntradayMarkerKind;
@@ -208,6 +218,7 @@ export interface HeartIntradayMarker {
   timeLabel: string;
   startFraction: number;
   endFraction: number;
+  details?: HeartIntradayMarkerDetails;
 }
 
 export interface WellnessSnapshot extends EstimatedValueMeta {

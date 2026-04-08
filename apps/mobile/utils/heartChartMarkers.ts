@@ -16,7 +16,12 @@ function iconNameForHeartMarker(marker: HeartIntradayMarker): TrendChartMarker['
     return 'walk';
   }
 
-  if (normalizedLabel.includes('mobility') || normalizedLabel.includes('strength') || normalizedLabel.includes('lift')) {
+  if (
+    normalizedLabel.includes('mobility') ||
+    normalizedLabel.includes('strength') ||
+    normalizedLabel.includes('lift') ||
+    normalizedLabel.includes('workout')
+  ) {
     return 'barbell';
   }
 
@@ -44,15 +49,31 @@ function paletteForHeartMarker(marker: HeartIntradayMarker) {
   }
 }
 
+export interface HeartIntradayMarkerPresentation {
+  iconName: TrendChartMarker['iconName'];
+  accentColor: string;
+  backgroundColor: string;
+}
+
+export function getHeartIntradayMarkerPresentation(marker: HeartIntradayMarker): HeartIntradayMarkerPresentation {
+  const palette = paletteForHeartMarker(marker);
+
+  return {
+    iconName: iconNameForHeartMarker(marker),
+    accentColor: palette.accentColor,
+    backgroundColor: palette.backgroundColor,
+  };
+}
+
 export function mapHeartIntradayMarkersToTrendMarkers(markers: readonly HeartIntradayMarker[]): TrendChartMarker[] {
   return markers.map((marker) => {
-    const palette = paletteForHeartMarker(marker);
+    const presentation = getHeartIntradayMarkerPresentation(marker);
 
     return {
       id: marker.id,
-      iconName: iconNameForHeartMarker(marker),
-      accentColor: palette.accentColor,
-      backgroundColor: palette.backgroundColor,
+      iconName: presentation.iconName,
+      accentColor: presentation.accentColor,
+      backgroundColor: presentation.backgroundColor,
       startFraction: marker.startFraction,
       endFraction: marker.endFraction,
       accessibilityLabel: `${marker.label} ${marker.timeLabel}`,

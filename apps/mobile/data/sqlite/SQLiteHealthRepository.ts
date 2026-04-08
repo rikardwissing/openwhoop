@@ -13,6 +13,7 @@ import type {
   DerivedRefreshState,
   DashboardSnapshot,
   HeartCardSnapshot,
+  HeartIntradayMarkerDetails,
   HeartIntradayMarker,
   HeartHistorySnapshot,
   HistoryRange,
@@ -1943,6 +1944,50 @@ async function loadActivitiesOverlappingRange(db: SQLiteDatabase, start: Date, e
   );
 }
 
+async function loadHeartMarkerSleepDetails(
+  db: SQLiteDatabase,
+  sleepCycles: readonly SleepCycleRecord[],
+): Promise<Map<string, HeartIntradayMarkerDetails>> {
+  const sleepIds = [...new Set(sleepCycles.map((sleep) => sleep.sleepId))];
+  if (sleepIds.length === 0) {
+    return new Map();
+  }
+
+  const placeholders = sleepIds.map(() => '?').join(', ');
+  const stageRecords = await querySleepStages(
+    db,
+    `
+      SELECT id, sleep_id, start, end, stage, is_estimated
+      FROM sleep_stage_segments
+      WHERE sleep_id IN (${placeholders})
+      ORDER BY sleep_id ASC, start ASC
+    `,
+    sleepIds,
+  );
+  const recordsBySleepId = new Map<string, SleepStageRecord[]>();
+
+  for (const record of stageRecords) {
+    const current = recordsBySleepId.get(record.sleepId);
+    if (current) {
+      current.push(record);
+    } else {
+      recordsBySleepId.set(record.sleepId, [record]);
+    }
+  }
+
+  return new Map(
+    sleepCycles.map((sleep) => {
+      const summary = summarizeSleepStages(
+        recordsBySleepId.get(sleep.sleepId) ?? [],
+        sleep.start,
+        sleep.inBedEnd ?? sleep.end,
+      );
+
+      return [sleep.sleepId, buildHeartIntradaySleepDetails(sleep, summary)] as const;
+    }),
+  );
+}
+
 function groupByDay<T extends { date: Date }>(rows: T[]): Array<[string, T[]]> {
   const grouped = new Map<string, T[]>();
   for (const row of rows) {
@@ -2513,11 +2558,30 @@ function buildHeartIntradayMarkerRange(windowStart: Date, windowEnd: Date, start
   };
 }
 
+function buildHeartIntradaySleepDetails(
+  sleep: SleepCycleRecord,
+  stageSummary?: SleepStageSummary | null,
+): HeartIntradayMarkerDetails {
+  const timeInBedMinutes =
+    stageSummary?.timeInBedMinutes ?? Math.max(1, Math.round(exactMinutesBetween(sleep.start, sleep.inBedEnd ?? sleep.end)));
+
+  return {
+    durationMinutes: timeInBedMinutes,
+    score: sleep.score,
+    asleepMinutes: sleep.asleepMinutes ?? stageSummary?.timeAsleepMinutes ?? null,
+    timeInBedMinutes,
+    remMinutes: stageSummary?.remMinutes ?? null,
+    deepMinutes: stageSummary?.deepMinutes ?? null,
+    stages: stageSummary?.stages ?? [],
+  };
+}
+
 function buildHeartIntradayMarkers(
   windowStart: Date,
   windowEnd: Date,
   sleepCycles: readonly SleepCycleRecord[],
   activities: readonly ActivityRecord[],
+  sleepDetailsBySleepId: ReadonlyMap<string, HeartIntradayMarkerDetails> = new Map(),
 ): HeartIntradayMarker[] {
   const sleepMarkers = sleepCycles.flatMap((sleep) => {
     const range = buildHeartIntradayMarkerRange(windowStart, windowEnd, sleep.start, sleep.end);
@@ -2532,6 +2596,7 @@ function buildHeartIntradayMarkers(
       timeLabel: `${formatClock(range.start)} - ${formatClock(range.end)}`,
       startFraction: range.startFraction,
       endFraction: range.endFraction,
+      details: sleepDetailsBySleepId.get(sleep.sleepId),
     } satisfies HeartIntradayMarker];
   });
 
@@ -2548,6 +2613,9 @@ function buildHeartIntradayMarkers(
       timeLabel: `${formatClock(range.start)} - ${formatClock(range.end)}`,
       startFraction: range.startFraction,
       endFraction: range.endFraction,
+      details: {
+        durationMinutes: Math.max(1, Math.round(exactMinutesBetween(activity.start, activity.end))),
+      },
     } satisfies HeartIntradayMarker];
   });
 
@@ -4795,6 +4863,7 @@ async function loadLatestDashboardHeartCard(
     heartWindow.intradayStart,
     heartWindow.latestHeartDate,
   );
+  const heartMarkerSleepDetails = await loadHeartMarkerSleepDetails(db, sleepCycles);
 
   return {
     heartWindow,
@@ -4812,6 +4881,7 @@ async function loadLatestDashboardHeartCard(
       heartWindow.latestHeartDate,
       sleepCycles,
       heartMarkerActivities,
+      heartMarkerSleepDetails,
     ),
   };
 }
@@ -5810,6 +5880,17 @@ export class SQLiteHealthRepository implements HealthRepository {
       selectedDayEnd,
       selectedSleep ? [selectedSleep] : [],
       heartMarkerActivities,
+      selectedSleep
+        ? new Map([
+            [
+              selectedSleep.sleepId,
+              buildHeartIntradaySleepDetails(
+                selectedSleep,
+                summarizeSleepStages(stageRecords, selectedSleep.start, selectedSleep.inBedEnd ?? selectedSleep.end),
+              ),
+            ],
+          ])
+        : undefined,
     );
     const sleepCard = buildDashboardSleepCard(selectedSleep, stageRecords);
     const dayStatsByDay = new Map(heartDayStats.map((stat) => [stat.day, stat]));
@@ -6168,11 +6249,13 @@ export class SQLiteHealthRepository implements HealthRepository {
         const intradayStart = new Date(latestHeartDate.getTime() - 24 * 3600000);
         const intraday = await loadIntradayHeartWindow(this.db, formatSqliteDateTime(latestHeartDate));
         const intradayWindowStart = intraday.intradayStart ?? intradayStart;
+        const heartMarkerSleepDetails = await loadHeartMarkerSleepDetails(this.db, sleepCycles);
         const intradayMarkers = buildHeartIntradayMarkers(
           intradayWindowStart,
           latestHeartDate,
           sleepCycles,
           await this.loadActivitiesOverlapping(intradayWindowStart, latestHeartDate),
+          heartMarkerSleepDetails,
         );
         const sanitizedDailyMinimaRows = dailyMinimaRows.map((row) => ({
           day: row.day,
@@ -6248,11 +6331,13 @@ export class SQLiteHealthRepository implements HealthRepository {
         });
         const intradayWindowStart =
           intraday.intradayStart ?? new Date(latestHeartDate.getTime() - windowHours * 3600000);
+        const heartMarkerSleepDetails = await loadHeartMarkerSleepDetails(this.db, sleepCycles);
         const intradayMarkers = buildHeartIntradayMarkers(
           intradayWindowStart,
           latestHeartDate,
           sleepCycles,
           await this.loadActivitiesOverlapping(intradayWindowStart, latestHeartDate),
+          heartMarkerSleepDetails,
         );
         const sanitizedDailyMinimaRows = dailyMinimaRows.map((row) => ({
           day: row.day,

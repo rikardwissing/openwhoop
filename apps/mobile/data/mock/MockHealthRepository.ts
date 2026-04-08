@@ -424,6 +424,24 @@ function buildTrendMetricSnapshot(metric: MetricSeries, id: TrendMetricSnapshot[
   };
 }
 
+function buildMockSleepMarkerDetails(session: SleepSession): HeartIntradayMarker['details'] {
+  return {
+    durationMinutes: session.durationMinutes,
+    score: session.score,
+    asleepMinutes: session.durationMinutes,
+    timeInBedMinutes: session.timeInBedMinutes,
+    remMinutes: session.remMinutes,
+    deepMinutes: session.deepMinutes,
+    stages: session.stages,
+  };
+}
+
+function buildMockActivityMarkerDetails(durationMinutes: number): HeartIntradayMarker['details'] {
+  return {
+    durationMinutes,
+  };
+}
+
 const intradayMarkers: HeartIntradayMarker[] = [
   {
     id: 'sleep-latest',
@@ -432,6 +450,7 @@ const intradayMarkers: HeartIntradayMarker[] = [
     timeLabel: '12:00 AM - 7:45 AM',
     startFraction: 0,
     endFraction: fractionOfDay(7 * 60 + 45),
+    details: buildMockSleepMarkerDetails(sessions[0] ?? sessions.at(-1)!),
   },
   ...activitySeeds.map((activity) => ({
     id: activity.id,
@@ -440,6 +459,7 @@ const intradayMarkers: HeartIntradayMarker[] = [
     timeLabel: `${formatClockMinutes(activity.startMinutes)} - ${formatClockMinutes(activity.startMinutes + activity.durationMinutes)}`,
     startFraction: fractionOfDay(activity.startMinutes),
     endFraction: fractionOfDay(activity.startMinutes + activity.durationMinutes),
+    details: buildMockActivityMarkerDetails(activity.durationMinutes),
   })),
 ];
 
@@ -459,6 +479,7 @@ const todayIntradayMarkers: HeartIntradayMarker[] = [
       todayDashboardHeartWindowStart,
       todayDashboardHeartWindowEnd,
     ),
+    details: buildMockSleepMarkerDetails(sessions[0] ?? sessions.at(-1)!),
   },
 ];
 
