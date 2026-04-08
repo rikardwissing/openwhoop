@@ -26,11 +26,15 @@ import {
   buildTrendDomain,
   mapTrendValueToY,
 } from '@/components/charts/chartSelection';
+import { ChartSelectionBubble } from '@/components/charts/ChartSelectionBubble';
 import { useAcquireScreenScrollLock } from '@/components/layout/ScreenScrollContext';
 import { colors, typography } from '@/constants/theme';
 import type { HeartIntradayMarker, TrendPoint } from '@/types/health';
+import { addMinutes, formatShortDate } from '@/utils/dateTime';
+import { formatMetricNumber } from '@/utils/formatters';
 import { mapHeartIntradayMarkersToTrendMarkers } from '@/utils/heartChartMarkers';
 
+const HEART_POINT_INTERVAL_MINUTES = 5;
 const LOAD_MORE_EDGE_THRESHOLD_POINTS = 2;
 const LOAD_MORE_TRIGGER_DRAG_PX = 18;
 const SNAP_DURATION_MS = 110;
@@ -102,6 +106,14 @@ function buildHeartCoordinates(points: TrendPoint[], domain: ReturnType<typeof b
   }));
 }
 
+function formatHeartSelectionValue(value: number | null) {
+  if (value === null) {
+    return 'No data';
+  }
+
+  return formatMetricNumber(value, 'BPM');
+}
+
 export function getHeartViewportPointSpacing(viewportWidth: number, windowPointCount: number) {
   if (viewportWidth <= 0) {
     return 0;
@@ -129,6 +141,116 @@ export function getHeartViewportContentWidth(
 export function getHeartViewBoxWidth(windowPointCount: number) {
   'worklet';
   return Math.max(windowPointCount - 1, 1);
+}
+
+function parseHeartAxisLabelMinutes(label: string) {
+  const trimmed = label.trim();
+  const match = /^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)$/i.exec(trimmed);
+
+  if (!match) {
+    return null;
+  }
+
+  const rawHours = Number(match[1]);
+  const minutes = Number(match[2] ?? '0');
+  const meridiem = match[3]?.toUpperCase();
+
+  if (!Number.isFinite(rawHours) || !Number.isFinite(minutes)) {
+    return null;
+  }
+
+  const normalizedHours = rawHours % 12 + (meridiem === 'PM' ? 12 : 0);
+  return normalizedHours * 60 + minutes;
+}
+
+export function buildHeartViewportDayLabel(
+  points: readonly TrendPoint[],
+  windowPointCount: number,
+  anchorDayKey?: string,
+  windowStart?: number,
+) {
+  if (!anchorDayKey || points.length === 0) {
+    return null;
+  }
+
+  const latestLabel = points.at(-1)?.label;
+  if (!latestLabel) {
+    return null;
+  }
+
+  const latestPointMinutes = parseHeartAxisLabelMinutes(latestLabel);
+  if (latestPointMinutes === null) {
+    return null;
+  }
+
+  const safeWindowPointCount = Math.min(Math.max(windowPointCount, 2), Math.max(points.length, 1));
+  const maxWindowStart = Math.max(0, points.length - safeWindowPointCount);
+  const safeWindowStart = clamp(windowStart ?? maxWindowStart, 0, maxWindowStart);
+  const midpointIndex = safeWindowStart + Math.floor((safeWindowPointCount - 1) / 2);
+  const pointsFromNewest = Math.max(0, points.length - 1 - midpointIndex);
+  const anchorDate = new Date(`${anchorDayKey}T00:00:00`);
+  const latestPointDate = addMinutes(anchorDate, latestPointMinutes);
+  const viewportMidpointDate = addMinutes(latestPointDate, -pointsFromNewest * HEART_POINT_INTERVAL_MINUTES);
+
+  return formatShortDate(viewportMidpointDate);
+}
+
+export function buildHeartViewportLabel(
+  points: readonly TrendPoint[],
+  windowPointCount: number,
+  windowStart?: number,
+  fallbackLabel = '',
+) {
+  if (points.length === 0) {
+    return fallbackLabel;
+  }
+
+  const safeWindowPointCount = Math.min(Math.max(windowPointCount, 2), Math.max(points.length, 1));
+  const maxWindowStart = Math.max(0, points.length - safeWindowPointCount);
+  const safeWindowStart = clamp(windowStart ?? maxWindowStart, 0, maxWindowStart);
+  const visiblePoints = points.slice(safeWindowStart, safeWindowStart + safeWindowPointCount);
+  const startLabel = visiblePoints[0]?.label;
+  const endLabel = visiblePoints.at(-1)?.label;
+
+  if (!startLabel && !endLabel) {
+    return fallbackLabel;
+  }
+
+  if (!endLabel || startLabel === endLabel) {
+    return startLabel ?? endLabel ?? fallbackLabel;
+  }
+
+  return `${startLabel} - ${endLabel}`;
+}
+
+export function buildHeartAxisLabels(
+  points: readonly TrendPoint[],
+  windowPointCount: number,
+  anchorDayKey?: string,
+  windowStart?: number,
+): [string | undefined, string | undefined, string | undefined] {
+  if (points.length === 0) {
+    return [undefined, undefined, undefined];
+  }
+
+  const safeWindowPointCount = Math.min(Math.max(windowPointCount, 2), Math.max(points.length, 1));
+  const maxWindowStart = Math.max(0, points.length - safeWindowPointCount);
+  const safeWindowStart = clamp(windowStart ?? maxWindowStart, 0, maxWindowStart);
+  const visiblePoints = points.slice(safeWindowStart, safeWindowStart + safeWindowPointCount);
+  const firstLabel = visiblePoints[0]?.label;
+  const viewportDayLabel = buildHeartViewportDayLabel(points, safeWindowPointCount, anchorDayKey, safeWindowStart);
+  const leadingLabel =
+    safeWindowStart < maxWindowStart && viewportDayLabel
+      ? firstLabel
+        ? `${viewportDayLabel} · ${firstLabel}`
+        : viewportDayLabel
+      : firstLabel;
+
+  return [
+    leadingLabel,
+    visiblePoints[Math.floor(visiblePoints.length / 2)]?.label,
+    visiblePoints.at(-1)?.label,
+  ];
 }
 
 export function buildHeartChartViewBox(windowStart: number, windowPointCount: number) {
@@ -228,25 +350,31 @@ function HeartMarkerBadge({
 
 export function PannableHeartChart({
   accentColor = colors.primary,
+  anchorDayKey,
   axisTestID,
   canLoadMore = false,
   chartTestID,
   height = 150,
   isLoadingMore = false,
+  jumpToLatestSignal,
   markers = [],
   onLoadMore,
+  onViewingLatestWindowChange,
   points,
   resetKey,
   windowPointCount,
 }: {
   accentColor?: string;
+  anchorDayKey?: string;
   axisTestID?: string;
   canLoadMore?: boolean;
   chartTestID?: string;
   height?: number;
   isLoadingMore?: boolean;
+  jumpToLatestSignal?: number;
   markers?: readonly HeartIntradayMarker[];
   onLoadMore?: () => void;
+  onViewingLatestWindowChange?: (isViewingLatestWindow: boolean) => void;
   points: TrendPoint[];
   resetKey?: string;
   windowPointCount: number;
@@ -263,6 +391,8 @@ export function PannableHeartChart({
   const releaseScrollLockRef = useRef<(() => void) | null>(null);
   const previousPointCountRef = useRef(points.length);
   const pendingLoadMoreRef = useRef(false);
+  const previousJumpToLatestSignalRef = useRef<number | undefined>(jumpToLatestSignal);
+  const skipLatestWindowChangeRef = useRef(true);
   const chartId = useId().replace(/[:]/g, '');
   const acquireScreenScrollLock = useAcquireScreenScrollLock();
 
@@ -336,17 +466,11 @@ export function PannableHeartChart({
     [chartTestID, fullSeriesSpan, markers],
   );
 
-  const axisLabels = useMemo<[string | undefined, string | undefined, string | undefined]>(() => {
-    if (visiblePoints.length === 0) {
-      return [undefined, undefined, undefined];
-    }
-
-    return [
-      visiblePoints[0]?.label,
-      visiblePoints[Math.floor(visiblePoints.length / 2)]?.label,
-      visiblePoints.at(-1)?.label,
-    ];
-  }, [visiblePoints]);
+  const axisLabels = useMemo(
+    () => buildHeartAxisLabels(points, safeWindowPointCount, anchorDayKey, windowStart),
+    [anchorDayKey, points, safeWindowPointCount, windowStart],
+  );
+  const isViewingLatestWindow = windowStart >= maxWindowStart;
 
   const ensureScrollLock = useCallback(() => {
     if (releaseScrollLockRef.current || !acquireScreenScrollLock) {
@@ -399,6 +523,34 @@ export function PannableHeartChart({
     releaseScrollLock();
   }, [releaseScrollLock]);
 
+  const handleJumpToLatest = useCallback(() => {
+    const nextWindowStart = maxWindowStartRef.current;
+
+    pendingLoadMoreRef.current = false;
+    loadRequested.value = false;
+    commitSelection(null);
+    releaseScrollLock();
+    cancelAnimation(animatedWindowStart);
+    gestureStartWindowStart.value = nextWindowStart;
+    animatedWindowStart.value = withTiming(nextWindowStart, { duration: SNAP_DURATION_MS }, (finished) => {
+      if (!finished) {
+        return;
+      }
+
+      reportedWindowStart.value = nextWindowStart;
+      runOnJS(syncWindowStart)(nextWindowStart);
+    });
+  }, [
+    animatedWindowStart,
+    cancelAnimation,
+    commitSelection,
+    gestureStartWindowStart,
+    loadRequested,
+    releaseScrollLock,
+    reportedWindowStart,
+    syncWindowStart,
+  ]);
+
   const handleLoadMore = useCallback(() => {
     pendingLoadMoreRef.current = true;
     onLoadMore?.();
@@ -411,17 +563,25 @@ export function PannableHeartChart({
 
   useEffect(() => {
     const previousPointCount = previousPointCountRef.current;
-    const prependedPointCount = points.length - previousPointCount;
+    const previousMaxWindowStart = Math.max(0, previousPointCount - safeWindowPointCount);
+    const pointCountDelta = points.length - previousPointCount;
     let nextAnimatedWindowStart = clamp(animatedWindowStart.value, 0, maxWindowStart);
     let nextGestureStart = clamp(gestureStartWindowStart.value, 0, maxWindowStart);
 
-    if (pendingLoadMoreRef.current && prependedPointCount > 0) {
-      nextAnimatedWindowStart = getRetainedHeartWindowStartAfterGrowth(
-        nextAnimatedWindowStart,
-        prependedPointCount,
-        maxWindowStart,
+    if (pointCountDelta !== 0) {
+      const animatedPointsFromNewest = clamp(
+        previousMaxWindowStart - animatedWindowStart.value,
+        0,
+        previousMaxWindowStart,
       );
-      nextGestureStart = getRetainedHeartWindowStartAfterGrowth(nextGestureStart, prependedPointCount, maxWindowStart);
+      const gesturePointsFromNewest = clamp(
+        previousMaxWindowStart - gestureStartWindowStart.value,
+        0,
+        previousMaxWindowStart,
+      );
+
+      nextAnimatedWindowStart = clamp(maxWindowStart - animatedPointsFromNewest, 0, maxWindowStart);
+      nextGestureStart = clamp(maxWindowStart - gesturePointsFromNewest, 0, maxWindowStart);
       pendingLoadMoreRef.current = false;
       loadRequested.value = false;
     }
@@ -440,6 +600,7 @@ export function PannableHeartChart({
     maxWindowStart,
     points.length,
     reportedWindowStart,
+    safeWindowPointCount,
     syncWindowStart,
   ]);
 
@@ -474,6 +635,33 @@ export function PannableHeartChart({
       releaseScrollLock();
     }
   }, [commitSelection, points.length, releaseScrollLock]);
+
+  useEffect(() => {
+    if (jumpToLatestSignal === undefined) {
+      return;
+    }
+
+    if (previousJumpToLatestSignalRef.current === jumpToLatestSignal) {
+      return;
+    }
+
+    previousJumpToLatestSignalRef.current = jumpToLatestSignal;
+
+    handleJumpToLatest();
+  }, [handleJumpToLatest, jumpToLatestSignal]);
+
+  useEffect(() => {
+    skipLatestWindowChangeRef.current = true;
+  }, [points, resetKey, safeWindowPointCount]);
+
+  useEffect(() => {
+    if (skipLatestWindowChangeRef.current) {
+      skipLatestWindowChangeRef.current = false;
+      return;
+    }
+
+    onViewingLatestWindowChange?.(isViewingLatestWindow);
+  }, [isViewingLatestWindow, onViewingLatestWindowChange]);
 
   useEffect(() => releaseScrollLock, [releaseScrollLock]);
 
@@ -701,6 +889,23 @@ export function PannableHeartChart({
               </Svg>
             ) : null}
           </View>
+          {selectionPoint ? (
+            <View
+              pointerEvents="none"
+              style={[
+                styles.selectionBubbleWrap,
+                selectionX !== null && selectionX > 50 ? styles.selectionBubbleWrapLeft : styles.selectionBubbleWrapRight,
+                { top: markerVisuals.length > 0 ? 36 : 6 },
+              ]}>
+              <ChartSelectionBubble
+                accentColor={accentColor}
+                label={selectionPoint.label}
+                size="compact"
+                testID={chartTestID ? `${chartTestID}-selection-bubble` : undefined}
+                value={formatHeartSelectionValue(selectionPoint.value)}
+              />
+            </View>
+          ) : null}
         </View>
       </View>
       <GestureDetector gesture={axisPanGesture}>
@@ -731,6 +936,18 @@ const styles = StyleSheet.create({
   },
   overlay: {
     ...StyleSheet.absoluteFillObject,
+  },
+  selectionBubbleWrap: {
+    left: 10,
+    position: 'absolute',
+    right: 10,
+    zIndex: 3,
+  },
+  selectionBubbleWrapLeft: {
+    alignItems: 'flex-start',
+  },
+  selectionBubbleWrapRight: {
+    alignItems: 'flex-end',
   },
   markerLayer: {
     ...StyleSheet.absoluteFillObject,

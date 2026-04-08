@@ -17,7 +17,7 @@ import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
 import { useHealthRepository } from '@/providers/HealthDataProvider';
 import { useWearableSyncActions, useWearableSyncState } from '@/providers/WearableSyncProvider';
 import { syncSleepPreparationReminder } from '@/services/notifications/sleepPreparationReminder';
-import type { SleepStage, SleepStageSelection, TrendSelection } from '@/types/health';
+import type { SleepStage, SleepStageSelection } from '@/types/health';
 import {
   formatClockRangeFromStartLabel,
   formatCompactDuration,
@@ -25,7 +25,6 @@ import {
   describeSleepScore,
   formatMetricValue,
   formatNullablePercent,
-  formatSleepStageLabel,
 } from '@/utils/formatters';
 import { formatClockMinutes } from '@/utils/dateTime';
 import { getMetricToneColor, getSleepMetricTone } from '@/utils/metricTone';
@@ -44,8 +43,6 @@ export function SleepScreen() {
   const { onRefresh, refreshing } = useWearableRefreshControl();
   const state = useSleepHistory('14d');
   const derivedRefresh = useDerivedRefreshState();
-  const [scoreSelection, setScoreSelection] = useState<TrendSelection | null>(null);
-  const [durationSelection, setDurationSelection] = useState<TrendSelection | null>(null);
   const [stageSelection, setStageSelection] = useState<SleepStageSelection | null>(null);
   const [targetWakeMinutes, setTargetWakeMinutes] = useState<number | null>(null);
   const [alarmEnabled, setAlarmEnabled] = useState<boolean | null>(null);
@@ -533,20 +530,10 @@ export function SleepScreen() {
         <SectionHeader title="Sleep Score Trend" trailing="14 day rhythm" />
         <ChartReadout
           accentColor={colors.violet}
-          detail={
-            scoreSelection
-              ? scoreSelection.point.value === null
-                ? 'No sleep score recorded for this day'
-                : 'Selected nightly score'
-              : `Latest night ${data.sessions[0]?.dateLabel ?? '--'}`
-          }
-          label={scoreSelection?.point.label ?? 'Latest sleep score'}
+          detail={`Latest night ${data.sessions[0]?.dateLabel ?? '--'}`}
+          label="Latest sleep score"
           style={styles.readout}
-          value={
-            scoreSelection
-              ? formatMetricValue(scoreSelection.point.value, 0)
-              : formatMetricValue(data.headlineScore, 0)
-          }
+          value={formatMetricValue(data.headlineScore, 0)}
         />
         <TrendChart
           accentColor={colors.violet}
@@ -554,8 +541,8 @@ export function SleepScreen() {
             point.value === null ? undefined : getMetricToneColor(getSleepMetricTone(point.value))
           }
           mode="bar"
-          onSelectionChange={setScoreSelection}
           points={data.scoreTrend}
+          selectionValueFormatter={(selection) => formatNullablePercent(selection.point.value)}
           testID="sleep-score-trend-chart"
         />
       </GlassCard>
@@ -564,34 +551,22 @@ export function SleepScreen() {
         <SectionHeader title="Duration Trend" trailing="Hours slept" />
         <ChartReadout
           accentColor={colors.aqua}
-          detail={
-            durationSelection
-              ? durationSelection.point.value === null
-                ? 'No overnight duration recorded for this day'
-                : 'Selected time asleep'
-              : `Bedtime ${displayedBedtime} · Wake ${displayedWakeTime}`
-          }
-          label={durationSelection?.point.label ?? `${selectedSession?.dateLabel ?? 'Latest'} duration`}
+          detail={`Bedtime ${displayedBedtime} · Wake ${displayedWakeTime}`}
+          label={`${selectedSession?.dateLabel ?? 'Latest'} duration`}
           style={styles.readout}
-          value={
-            durationSelection
-              ? formatDuration(durationSelection.point.value)
-              : formatDuration(displayedDurationMinutes)
-          }
+          value={formatDuration(displayedDurationMinutes)}
         />
         <TrendChart
           accentColor={colors.aqua}
           mode="bar"
-          onSelectionChange={setDurationSelection}
           points={data.durationTrend}
+          selectionValueFormatter={(selection) => formatDuration(selection.point.value)}
           testID="sleep-duration-trend-chart"
         />
-        {!durationSelection ? (
-          <Text style={styles.footnote}>
-            {selectedSession ? `${selectedSession.dateLabel} duration` : 'Latest duration'}:{' '}
-            {formatDuration(displayedDurationMinutes)}
-          </Text>
-        ) : null}
+        <Text style={styles.footnote}>
+          {selectedSession ? `${selectedSession.dateLabel} duration` : 'Latest duration'}:{' '}
+          {formatDuration(displayedDurationMinutes)}
+        </Text>
       </GlassCard>
 
       <GlassCard accentColor={colors.indigo}>
@@ -664,22 +639,7 @@ export function SleepScreen() {
               startLabel={selectedSession.bedtime}
               testID="sleep-last-night-stage-chart"
             />
-            {stageSelection ? (
-              <ChartReadout
-                accentColor={colors.indigo}
-                detail={`${stageSelection.segment.minutes}m · ${formatClockRangeFromStartLabel(
-                  selectedSession.bedtime,
-                  stageSelection.startMinute,
-                  stageSelection.endMinute,
-                )}`}
-                label={formatSleepStageLabel(stageSelection.segment.stage)}
-                size="compact"
-                style={styles.stageReadout}
-                value={`${stageSelection.segment.minutes}m`}
-              />
-            ) : (
-              <Text style={styles.stageHint}>Swipe across the bar to inspect each stage slice.</Text>
-            )}
+            <Text style={styles.stageHint}>Swipe across the bar to inspect each stage slice.</Text>
             {selectedStageBreakdown.length > 0 ? (
               <View style={styles.stageBreakdownGrid}>
                 {selectedStageBreakdown.map(({ stage, label, minutes }) => (

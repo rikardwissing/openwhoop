@@ -1,4 +1,4 @@
-import type { ReactElement } from 'react';
+import { useEffect, type ReactElement } from 'react';
 import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
 import { Alert, ScrollView, processColor } from 'react-native';
 
@@ -60,7 +60,7 @@ import { TrendChart } from '@/components/charts/TrendChart';
 import { WearableProgressOverlay } from '@/components/ui/WearableProgressOverlay';
 import { colors } from '@/constants/theme';
 import { MockHealthRepository } from '@/data/mock/MockHealthRepository';
-import { HealthDataProvider } from '@/providers/HealthDataProvider';
+import { HealthDataProvider, useRefreshHealthData } from '@/providers/HealthDataProvider';
 import {
   WearableSyncContextProvider,
   defaultWearableSyncContextValue,
@@ -74,6 +74,7 @@ import { TodayScreen } from '@/screens/TodayScreen';
 import { HistoryScreen } from '@/screens/HistoryScreen';
 import { WellnessScreen } from '@/screens/WellnessScreen';
 import { disableBackgroundSync } from '@/services/background/backgroundSyncTask';
+import type { HistoryRange } from '@/types/health';
 import type { DeviceState, SyncProgress, SyncResult, WearableLiveEvent, WearableScanResult } from '@/types/device';
 
 const mockDisableBackgroundSync = jest.mocked(disableBackgroundSync);
@@ -125,6 +126,15 @@ function renderWithRepository(repository: MockHealthRepository, children: ReactE
       </WearableSyncContextProvider>
     </HealthDataProvider>,
   );
+}
+
+class TrackingMockHealthRepository extends MockHealthRepository {
+  readonly dashboardHeartTimelineCalls: HistoryRange[] = [];
+
+  async getDashboardHeartTimeline(range: HistoryRange) {
+    this.dashboardHeartTimelineCalls.push(range);
+    return super.getDashboardHeartTimeline(range);
+  }
 }
 
 function getChartInstance(screen: ReturnType<typeof renderWithProviders>, component: any, testID: string) {
@@ -188,6 +198,7 @@ describe('screen rendering', () => {
     expect(await screen.findByText('Tonight')).toBeTruthy();
     expect(await screen.findByText('Heart Rate')).toBeTruthy();
     expect(await screen.findByText('Last 12h')).toBeTruthy();
+    expect(await screen.findByTestId('today-heart-chart-latest-button')).toBeTruthy();
     expect(await screen.findByTestId('today-strain-chart')).toBeTruthy();
     expect(await screen.findByTestId('today-heart-chart-marker-sleep-latest')).toBeTruthy();
   });
@@ -204,6 +215,64 @@ describe('screen rendering', () => {
 
     expect(await screen.findByText('Live')).toBeTruthy();
     expect(await screen.findByText('68 bpm')).toBeTruthy();
+  });
+
+  it('loads the 7d heart snapshot before rendering the today heart chart', async () => {
+    const repository = new TrackingMockHealthRepository({ delayMs: 250 });
+    const screen = renderWithRepository(repository, <TodayScreen />);
+
+    expect(await screen.findByText('Loading 7 day heart history...')).toBeTruthy();
+    expect(screen.getByTestId('today-heart-chart-loading-shell')).toBeTruthy();
+
+    await screen.findByTestId('today-heart-chart-axis');
+
+    await waitFor(() => {
+      expect(repository.dashboardHeartTimelineCalls).toEqual(['7d']);
+    });
+
+    expect(screen.queryByText('Loading 7 day heart history...')).toBeNull();
+    expect(screen.queryByText('Loading more heart history...')).toBeNull();
+  });
+
+  it('keeps the current 7d heart snapshot visible during same-day heart refreshes', async () => {
+    const repository = new TrackingMockHealthRepository({ delayMs: 250 });
+    let triggerHeartRefresh: (() => void) | null = null;
+
+    function RefreshableTodayScreen() {
+      const refreshHealthData = useRefreshHealthData();
+
+      useEffect(() => {
+        triggerHeartRefresh = () => {
+          refreshHealthData('heart');
+        };
+
+        return () => {
+          triggerHeartRefresh = null;
+        };
+      }, [refreshHealthData]);
+
+      return <TodayScreen />;
+    }
+
+    const screen = renderWithRepository(repository, <RefreshableTodayScreen />);
+
+    await screen.findByTestId('today-heart-chart-axis');
+
+    act(() => {
+      triggerHeartRefresh?.();
+    });
+
+    expect(screen.queryByText('Loading 7 day heart history...')).toBeNull();
+    expect(screen.getByTestId('today-heart-chart-axis')).toBeTruthy();
+    expect(screen.getByTestId('today-heart-chart-refresh-indicator')).toBeTruthy();
+
+    await waitFor(() => {
+      expect(repository.dashboardHeartTimelineCalls).toEqual(['7d', '7d']);
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('today-heart-chart-refresh-indicator')).toBeNull();
+    });
   });
 
   it('opens settings from the shared header and shows the wearable battery badge', async () => {
@@ -261,7 +330,7 @@ describe('screen rendering', () => {
     expect(mockPush).toHaveBeenCalledWith('/wellness');
   });
 
-  it('shows the selected trends value while scrubbing a trend card', async () => {
+  it('does not mirror the selected trends value outside the chart', async () => {
     const screen = renderWithProviders(<TrendsScreen />);
 
     await screen.findByTestId('trends-hrv-chart');
@@ -271,8 +340,7 @@ describe('screen rendering', () => {
       point: { label: 'Apr 10', value: 71 },
     });
 
-    expect(screen.getByText('71 ms')).toBeTruthy();
-    expect(screen.getByText('Selected overnight HRV')).toBeTruthy();
+    expect(screen.queryByText('Selected overnight HRV')).toBeNull();
   });
 
   it('uses line charts for continuous or cumulative series and bars for daily buckets', async () => {
@@ -426,11 +494,12 @@ describe('screen rendering', () => {
     });
   });
 
-  it('swaps sleep-stage readout while scrubbing and restores on release', async () => {
+  it('keeps the sleep-stage summary static while scrubbing in the chart', async () => {
     const screen = renderWithProviders(<SleepScreen />);
     await screen.findByTestId('sleep-last-night-stage-chart');
 
     expect(await screen.findByText('Efficiency 91%')).toBeTruthy();
+    expect(screen.getByText('Swipe across the bar to inspect each stage slice.')).toBeTruthy();
 
     applyChartSelection(screen, SleepStageChart, 'sleep-last-night-stage-chart', {
       endMinute: 32,
@@ -439,8 +508,8 @@ describe('screen rendering', () => {
       startMinute: 0,
     });
 
-    expect(screen.getByText('Light sleep')).toBeTruthy();
-    expect(screen.getByText('32m')).toBeTruthy();
+    expect(screen.queryByText('Light sleep')).toBeNull();
+    expect(screen.getByText('Swipe across the bar to inspect each stage slice.')).toBeTruthy();
 
     applyChartSelection(screen, SleepStageChart, 'sleep-last-night-stage-chart', null);
 

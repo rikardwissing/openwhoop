@@ -1,4 +1,4 @@
-import { act, render } from '@testing-library/react-native';
+import { act, render, within } from '@testing-library/react-native';
 import { ScrollView, StyleSheet } from 'react-native';
 import Svg from 'react-native-svg';
 
@@ -15,6 +15,9 @@ jest.mock('@expo/vector-icons', () => {
 import { SleepStageChart } from '@/components/charts/SleepStageChart';
 import { TrendChart } from '@/components/charts/TrendChart';
 import {
+  buildHeartAxisLabels,
+  buildHeartViewportDayLabel,
+  buildHeartViewportLabel,
   buildHeartChartViewBox,
   getHeartViewBoxWidth,
   getHeartViewportContentWidth,
@@ -25,6 +28,7 @@ import {
   shouldTriggerHeartLoadMore,
 } from '@/components/dashboard/PannableHeartChart';
 import { ScreenShell } from '@/components/layout/ScreenShell';
+import { formatAxisTime } from '@/utils/dateTime';
 
 function getScrollView(screen: ReturnType<typeof render>) {
   return screen.UNSAFE_getByType(ScrollView);
@@ -77,6 +81,57 @@ describe('chart gesture ownership', () => {
     expect(getHeartViewportPointSpacing(240, 13)).toBe(20);
     expect(getHeartViewportContentWidth(240, 25, 13)).toBe(480);
     expect(getHeartViewBoxWidth(13)).toBe(12);
+    expect(
+      buildHeartViewportLabel(
+        Array.from({ length: 25 }, (_, index) => ({
+          label: `${index}`,
+          value: 60 + index,
+        })),
+        13,
+      ),
+    ).toBe('12 - 24');
+    expect(
+      buildHeartViewportLabel(
+        Array.from({ length: 25 }, (_, index) => ({
+          label: `${index}`,
+          value: 60 + index,
+        })),
+        13,
+        6,
+      ),
+    ).toBe('6 - 18');
+    expect(
+      buildHeartViewportDayLabel(
+        Array.from({ length: 25 }, (_, index) => ({
+          label: formatAxisTime(new Date(2026, 3, 22, 23, index * 5)),
+          value: 60 + index,
+        })),
+        13,
+        '2026-04-23',
+      ),
+    ).toBe('Apr 23');
+    expect(
+      buildHeartViewportDayLabel(
+        Array.from({ length: 25 }, (_, index) => ({
+          label: formatAxisTime(new Date(2026, 3, 22, 23, index * 5)),
+          value: 60 + index,
+        })),
+        13,
+        '2026-04-23',
+        0,
+      ),
+    ).toBe('Apr 22');
+    expect(
+      buildHeartAxisLabels(
+        Array.from({ length: 25 }, (_, index) => ({
+          label: formatAxisTime(new Date(2026, 3, 22, 23, index * 5)),
+          value: 60 + index,
+        })),
+        13,
+        '2026-04-23',
+        0,
+      )[0],
+    ).toBe('Apr 22 · 11 PM');
     expect(buildHeartChartViewBox(6.5, 13)).toBe('6.5 0 12 40');
     expect(getRetainedPointsFromNewestAfterGrowth(0, 12, 12)).toBe(0);
     expect(getRetainedPointsFromNewestAfterGrowth(5, 12, 24)).toBe(5);
@@ -135,6 +190,36 @@ describe('chart gesture ownership', () => {
     );
 
     expect(screen.getByTestId('heart-chart-content')).toBeTruthy();
+    expect(screen.getByText('12')).toBeTruthy();
+    expect(screen.getByText('18')).toBeTruthy();
+    expect(screen.getByText('24')).toBeTruthy();
+  });
+
+  it('keeps the newest visible heart window when background history expands', () => {
+    const screen = render(
+      <PannableHeartChart
+        chartTestID="heart-chart"
+        points={Array.from({ length: 13 }, (_, index) => ({
+          label: `${index}`,
+          value: 60 + index,
+        }))}
+        windowPointCount={13}
+      />,
+    );
+
+    act(() => {
+      screen.rerender(
+        <PannableHeartChart
+          chartTestID="heart-chart"
+          points={Array.from({ length: 25 }, (_, index) => ({
+            label: `${index}`,
+            value: 60 + index,
+          }))}
+          windowPointCount={13}
+        />,
+      );
+    });
+
     expect(screen.getByText('12')).toBeTruthy();
     expect(screen.getByText('18')).toBeTruthy();
     expect(screen.getByText('24')).toBeTruthy();
@@ -271,6 +356,40 @@ describe('chart gesture ownership', () => {
     expect(getScrollView(screen).props.scrollEnabled).toBe(true);
   });
 
+  it('shows a visible scrub readout while inspecting trend values', () => {
+    const screen = render(
+      <TrendChart
+        accentColor="#00ffff"
+        points={[
+          { label: 'Mon', value: 72 },
+          { label: 'Tue', value: 76 },
+          { label: 'Wed', value: 74 },
+        ]}
+        selectionValueFormatter={(selection) =>
+          selection.point.value === null ? 'No data' : `${selection.point.value} bpm`
+        }
+        testID="trend-chart"
+      />,
+    );
+
+    const viewport = screen.getByTestId('trend-chart-viewport');
+    const overlay = screen.getByTestId('trend-chart');
+
+    act(() => {
+      viewport.props.onLayout?.({ nativeEvent: { layout: { width: 120, height: 148 } } });
+    });
+
+    act(() => {
+      overlay.props.onResponderGrant?.(createResponderEvent(60, true));
+    });
+
+    const bubble = screen.getByTestId('trend-chart-selection-bubble');
+
+    expect(bubble).toBeTruthy();
+    expect(within(bubble).getByText('Tue')).toBeTruthy();
+    expect(within(bubble).getByText('76 bpm')).toBeTruthy();
+  });
+
   it('reports horizontal drags on the trend chart axis row', () => {
     const onAxisPan = jest.fn();
     const screen = render(
@@ -376,5 +495,68 @@ describe('chart gesture ownership', () => {
     });
 
     expect(getScrollView(screen).props.scrollEnabled).toBe(true);
+  });
+
+  it('shows a visible scrub readout while inspecting sleep stages', () => {
+    const screen = render(
+      <SleepStageChart
+        endLabel="7:30 AM"
+        middleLabel="3:00 AM"
+        segments={[
+          { stage: 'light', minutes: 120 },
+          { stage: 'deep', minutes: 80 },
+          { stage: 'rem', minutes: 95 },
+        ]}
+        startLabel="11:15 PM"
+        testID="sleep-stage-chart"
+      />,
+    );
+
+    const viewport = screen.getByTestId('sleep-stage-chart-viewport');
+    const overlay = screen.getByTestId('sleep-stage-chart');
+
+    act(() => {
+      viewport.props.onLayout?.({ nativeEvent: { layout: { width: 120, height: 40 } } });
+    });
+
+    act(() => {
+      overlay.props.onResponderGrant?.(createResponderEvent(60, true));
+    });
+
+    const bubble = screen.getByTestId('sleep-stage-chart-selection-bubble');
+
+    expect(bubble).toBeTruthy();
+    expect(within(bubble).getByText('Deep sleep')).toBeTruthy();
+    expect(within(bubble).getByText('1h 20m')).toBeTruthy();
+  });
+
+  it('shows a visible scrub readout while inspecting heart history', () => {
+    const screen = render(
+      <PannableHeartChart
+        chartTestID="heart-chart"
+        points={Array.from({ length: 25 }, (_, index) => ({
+          label: `${index}`,
+          value: 60 + index,
+        }))}
+        windowPointCount={13}
+      />,
+    );
+
+    const viewport = screen.getByTestId('heart-chart-viewport');
+    const overlay = screen.getByTestId('heart-chart');
+
+    act(() => {
+      viewport.props.onLayout?.({ nativeEvent: { layout: { width: 120, height: 150 } } });
+    });
+
+    act(() => {
+      overlay.props.onResponderGrant?.(createResponderEvent(60, true));
+    });
+
+    const bubble = screen.getByTestId('heart-chart-selection-bubble');
+
+    expect(bubble).toBeTruthy();
+    expect(within(bubble).getByText('18')).toBeTruthy();
+    expect(within(bubble).getByText('78 BPM')).toBeTruthy();
   });
 });

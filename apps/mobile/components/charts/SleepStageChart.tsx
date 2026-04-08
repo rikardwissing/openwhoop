@@ -6,9 +6,15 @@ import {
   buildSleepStageFrames,
   selectSleepStageAtX,
 } from '@/components/charts/chartSelection';
+import { ChartSelectionBubble } from '@/components/charts/ChartSelectionBubble';
 import { useAcquireScreenScrollLock } from '@/components/layout/ScreenScrollContext';
 import { colors, sleepStageColors, typography } from '@/constants/theme';
 import type { SleepStage, SleepStageSegment, SleepStageSelection } from '@/types/health';
+import {
+  formatClockRangeFromStartLabel,
+  formatShortDuration,
+  formatSleepStageLabel,
+} from '@/utils/formatters';
 
 const stageOrder: SleepStage[] = ['deep', 'light', 'rem', 'awake'];
 
@@ -178,6 +184,7 @@ export function SleepStageChart({
           onLayout={(event) => {
             setChartWidth(event.nativeEvent.layout.width);
           }}
+          testID={testID ? `${testID}-viewport` : undefined}
           style={[styles.chartArea, { height: metrics.chartHeight }]}>
           <Svg
             height="100%"
@@ -247,6 +254,30 @@ export function SleepStageChart({
             testID={testID}
             {...panResponder.panHandlers}
           />
+          {selection ? (
+            <View
+              pointerEvents="none"
+              style={[
+                styles.selectionBubbleWrap,
+                selectedFrame && selectedFrame.startX + selectedFrame.width / 2 > 50
+                  ? styles.selectionBubbleWrapLeft
+                  : styles.selectionBubbleWrapRight,
+                size === 'expanded' ? styles.selectionBubbleExpanded : null,
+              ]}>
+              <ChartSelectionBubble
+                accentColor={accentColor}
+                detail={
+                  size === 'expanded'
+                    ? formatClockRangeFromStartLabel(startLabel, selection.startMinute, selection.endMinute)
+                    : undefined
+                }
+                label={formatSleepStageLabel(selection.segment.stage)}
+                size="compact"
+                testID={testID ? `${testID}-selection-bubble` : undefined}
+                value={formatShortDuration(selection.segment.minutes)}
+              />
+            </View>
+          ) : null}
         </View>
         <View
           style={[
@@ -313,6 +344,23 @@ const styles = StyleSheet.create({
   },
   overlay: {
     ...StyleSheet.absoluteFillObject,
+  },
+  selectionBubbleWrap: {
+    left: 10,
+    position: 'absolute',
+    right: 10,
+    top: 4,
+    zIndex: 3,
+  },
+  selectionBubbleWrapLeft: {
+    alignItems: 'flex-start',
+  },
+  selectionBubbleWrapRight: {
+    alignItems: 'flex-end',
+  },
+  selectionBubbleExpanded: {
+    left: 12,
+    top: 6,
   },
   axis: {
     flexDirection: 'row',

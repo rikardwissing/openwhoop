@@ -64,12 +64,13 @@ export function ScreenShell({
     <View style={styles.root}>
       <LinearGradient
         colors={[colors.backgroundTop, colors.background, colors.backgroundBottom]}
+        pointerEvents="none"
         start={{ x: 0.2, y: 0 }}
         end={{ x: 0.9, y: 1 }}
         style={StyleSheet.absoluteFill}
       />
-      <View style={[styles.glow, styles.glowTop]} />
-      <View style={[styles.glow, styles.glowBottom]} />
+      <View pointerEvents="none" style={[styles.glow, styles.glowTop]} />
+      <View pointerEvents="none" style={[styles.glow, styles.glowBottom]} />
       <ScreenScrollContext.Provider value={screenScrollContextValue}>
         <SafeAreaView edges={['left', 'right']} style={styles.safeArea}>
           <ScrollView
@@ -95,6 +96,7 @@ export function ScreenShell({
               <LinearGradient
                 colors={['rgba(3, 8, 14, 0.995)', 'rgba(3, 8, 14, 0.94)', 'rgba(3, 8, 14, 0.76)', 'rgba(3, 8, 14, 0.38)', 'rgba(3, 8, 14, 0.1)', 'rgba(3, 8, 14, 0)']}
                 locations={[0, 0.12, 0.28, 0.5, 0.76, 1]}
+                pointerEvents="none"
                 start={{ x: 0.5, y: 0 }}
                 end={{ x: 0.5, y: 1 }}
                 style={[styles.headerGradient, { height: headerFadeHeight }]}

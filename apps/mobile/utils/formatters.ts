@@ -20,6 +20,25 @@ export function formatCompactDuration(minutes: number | null): string {
   return `${hours}:${remainingMinutes}`;
 }
 
+export function formatShortDuration(minutes: number | null): string {
+  if (minutes === null) {
+    return '--';
+  }
+
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+
+  if (hours === 0) {
+    return `${remainingMinutes}m`;
+  }
+
+  if (remainingMinutes === 0) {
+    return `${hours}h`;
+  }
+
+  return `${hours}h ${remainingMinutes}m`;
+}
+
 export function formatSignedValue(value: number | null, digits = 1): string {
   if (value === null) {
     return '--';

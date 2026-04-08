@@ -1,11 +1,12 @@
 import { useRouter } from 'expo-router';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
 import { DashboardHeroMetricCard } from '@/components/dashboard/DashboardHeroMetricCard';
 import {
   ActivitySnapshotCard,
   HeartSnapshotCard,
+  HeartSnapshotStatusCard,
   InsightsCard,
   SleepSnapshotCard,
 } from '@/components/dashboard/DashboardSnapshotCards';
@@ -17,11 +18,11 @@ import { useDashboardSnapshot, useDerivedRefreshState } from '@/hooks/useHealthD
 import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
 import { useHealthDataVersion, useHealthRepository } from '@/providers/HealthDataProvider';
 import { useWearableSyncState } from '@/providers/WearableSyncProvider';
-import type { HeartCardSnapshot, HistoryRange } from '@/types/health';
+import type { HeartCardSnapshot } from '@/types/health';
 import { hasFreshLiveHeartRate } from '@/types/device';
 import { getRecoveryMetricTone, getSleepMetricTone, getStrainMetricTone } from '@/utils/metricTone';
 
-const heartRangeOrder: HistoryRange[] = ['24h', '7d', '14d', '30d'];
+const HEART_PREFETCH_RANGE = '7d';
 
 export function TodayScreen() {
   const router = useRouter();
@@ -32,75 +33,71 @@ export function TodayScreen() {
   const { deviceState } = useWearableSyncState();
   const { onRefresh, refreshing } = useWearableRefreshControl();
   const data = state.data;
-  const [loadedHeartRange, setLoadedHeartRange] = useState<HistoryRange | null>(null);
-  const [loadedHeartSnapshot, setLoadedHeartSnapshot] = useState<HeartCardSnapshot | null>(null);
-  const [isLoadingMoreHeartHistory, setIsLoadingMoreHeartHistory] = useState(false);
+  const [heartCardState, setHeartCardState] = useState<{
+    dayKey: string | null;
+    isRefreshing: boolean;
+    snapshot: HeartCardSnapshot | null;
+    status: 'idle' | 'loading' | 'ready' | 'error';
+  }>({
+    dayKey: null,
+    isRefreshing: false,
+    snapshot: null,
+    status: 'idle',
+  });
 
   const showLiveHeartRate = data?.day.isToday ? hasFreshLiveHeartRate(deviceState) : false;
   const liveHeartRateLabel =
     showLiveHeartRate && deviceState.liveHeartRate !== null ? `${deviceState.liveHeartRate} bpm` : null;
-  const currentRangeIndex = loadedHeartRange ? heartRangeOrder.indexOf(loadedHeartRange) : -1;
-  const canLoadMoreHeartHistory = currentRangeIndex < heartRangeOrder.length - 1;
-  const displayedHeartSnapshot = useMemo(
-    () =>
-      !data
-        ? null
-        : {
-            ...data.heartCard,
-            restingHr: loadedHeartSnapshot?.restingHr ?? data.heartCard.restingHr,
-            averageHr: loadedHeartSnapshot?.averageHr ?? data.heartCard.averageHr,
-            maxHr: loadedHeartSnapshot?.maxHr ?? data.heartCard.maxHr,
-            series: loadedHeartSnapshot?.series ?? data.heartCard.series,
-            markers: loadedHeartSnapshot?.markers ?? data.heartCard.markers,
-          },
-    [data, loadedHeartSnapshot],
-  );
+
+  const heartDayKey = data?.day.dayKey ?? null;
 
   useEffect(() => {
-    setLoadedHeartRange(null);
-    setLoadedHeartSnapshot(null);
-    setIsLoadingMoreHeartHistory(false);
-  }, [data?.day.dayKey]);
+    if (!heartDayKey) {
+      setHeartCardState({ dayKey: null, isRefreshing: false, snapshot: null, status: 'idle' });
+      return;
+    }
+
+    setHeartCardState((current) => {
+      if (current.snapshot && current.dayKey === heartDayKey) {
+        return { ...current, isRefreshing: true };
+      }
+
+      return { dayKey: heartDayKey, isRefreshing: false, snapshot: null, status: 'loading' };
+    });
+  }, [heartDayKey, heartVersion]);
 
   useEffect(() => {
     let cancelled = false;
 
-    if (!loadedHeartRange) {
+    if (!heartDayKey) {
       return () => {
         cancelled = true;
       };
     }
 
     void repository
-      .getDashboardHeartTimeline(loadedHeartRange)
+      .getDashboardHeartTimeline(HEART_PREFETCH_RANGE)
       .then((snapshot) => {
         if (!cancelled) {
-          setLoadedHeartSnapshot(snapshot);
+          setHeartCardState({ dayKey: heartDayKey, isRefreshing: false, snapshot, status: 'ready' });
         }
       })
-      .catch(() => {})
-      .finally(() => {
+      .catch(() => {
         if (!cancelled) {
-          setIsLoadingMoreHeartHistory(false);
+          setHeartCardState((current) => {
+            if (current.snapshot && current.dayKey === heartDayKey) {
+              return { ...current, isRefreshing: false };
+            }
+
+            return { dayKey: heartDayKey, isRefreshing: false, snapshot: null, status: 'error' };
+          });
         }
       });
 
     return () => {
       cancelled = true;
     };
-  }, [heartVersion, loadedHeartRange, repository]);
-
-  const handleLoadMoreHeartHistory = useCallback(() => {
-    if (!canLoadMoreHeartHistory) {
-      return;
-    }
-
-    const nextRange = heartRangeOrder[currentRangeIndex + 1];
-    if (nextRange) {
-      setIsLoadingMoreHeartHistory(true);
-      setLoadedHeartRange(nextRange);
-    }
-  }, [canLoadMoreHeartHistory, currentRangeIndex]);
+  }, [heartDayKey, heartVersion, repository]);
 
   if (!data && state.status === 'loading') {
     return (
@@ -175,18 +172,35 @@ export function TodayScreen() {
 
       <TonightPlanCard onOpenSleep={openSleep} plan={data.tonightPlan} />
 
-      <HeartSnapshotCard
-        canLoadMore={canLoadMoreHeartHistory}
-        chartTestID="today-heart-chart"
-        isLoadingMore={isLoadingMoreHeartHistory}
-        liveHeartRateLabel={liveHeartRateLabel}
-        onLoadMore={handleLoadMoreHeartHistory}
-        showLiveHeartRate={showLiveHeartRate}
-        snapshot={displayedHeartSnapshot ?? data.heartCard}
-        trailingLabel="Last 12h"
-        viewportKey={data.day.dayKey}
-        windowPointCount={data.heartCard.series.length}
-      />
+      {heartCardState.snapshot && heartCardState.dayKey === data.day.dayKey ? (
+        <HeartSnapshotCard
+          chartTestID="today-heart-chart"
+          isRefreshing={heartCardState.isRefreshing}
+          liveHeartRateLabel={liveHeartRateLabel}
+          showLiveHeartRate={showLiveHeartRate}
+          snapshot={heartCardState.snapshot}
+          trailingLabel="Last 12h"
+          viewportKey={data.day.dayKey}
+          windowPointCount={data.heartCard.series.length}
+        />
+      ) : heartCardState.status === 'error' ? (
+        <HeartSnapshotStatusCard
+          chartTestID="today-heart-chart"
+          isLoading={false}
+          liveHeartRateLabel={liveHeartRateLabel}
+          message="Unable to load 7 day heart history right now."
+          showLiveHeartRate={showLiveHeartRate}
+          trailingLabel="Last 12h"
+        />
+      ) : (
+        <HeartSnapshotStatusCard
+          chartTestID="today-heart-chart"
+          liveHeartRateLabel={liveHeartRateLabel}
+          message="Loading 7 day heart history..."
+          showLiveHeartRate={showLiveHeartRate}
+          trailingLabel="Last 12h"
+        />
+      )}
 
       <SleepSnapshotCard
         chartTestID="today-sleep-stage-chart"

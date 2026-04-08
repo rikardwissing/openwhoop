@@ -19,9 +19,11 @@ import {
   mapTrendValueToY,
   selectTrendPointAtX,
 } from '@/components/charts/chartSelection';
+import { ChartSelectionBubble } from '@/components/charts/ChartSelectionBubble';
 import { useAcquireScreenScrollLock } from '@/components/layout/ScreenScrollContext';
 import { colors, typography } from '@/constants/theme';
 import type { TrendPoint, TrendSelection } from '@/types/health';
+import { formatMetricValue } from '@/utils/formatters';
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -125,6 +127,14 @@ function sanitizeMarkerId(value: string) {
   return value.replace(/[^a-zA-Z0-9_-]+/g, '-');
 }
 
+function formatTrendSelectionValue(value: number | null) {
+  if (value === null) {
+    return 'No data';
+  }
+
+  return formatMetricValue(value, Number.isInteger(value) ? 0 : 1);
+}
+
 export function TrendChart({
   points,
   accentColor,
@@ -138,6 +148,7 @@ export function TrendChart({
   mode = 'line',
   onAxisPan,
   onSelectionChange,
+  selectionValueFormatter,
   shadowStrokeWidth = 2.1,
   testID,
 }: {
@@ -153,6 +164,7 @@ export function TrendChart({
   mode?: 'line' | 'bar';
   onAxisPan?: (event: { phase: 'start' | 'move' | 'end'; dx: number }) => void;
   onSelectionChange?: (selection: TrendSelection | null) => void;
+  selectionValueFormatter?: (selection: TrendSelection) => string;
   shadowStrokeWidth?: number;
   testID?: string;
 }) {
@@ -337,6 +349,7 @@ export function TrendChart({
         onLayout={(event) => {
           setChartWidth(event.nativeEvent.layout.width);
         }}
+        testID={testID ? `${testID}-viewport` : undefined}
         style={[styles.chartArea, { height }]}>
         <Svg height="100%" viewBox="0 0 100 40" width="100%">
           <Defs>
@@ -482,6 +495,23 @@ export function TrendChart({
           testID={testID}
           {...panResponder.panHandlers}
         />
+        {selection ? (
+          <View
+            pointerEvents="none"
+            style={[
+              styles.selectionBubbleWrap,
+              activeX !== null && activeX > 50 ? styles.selectionBubbleWrapLeft : styles.selectionBubbleWrapRight,
+              { top: markerVisuals.length > 0 ? 36 : 6 },
+            ]}>
+            <ChartSelectionBubble
+              accentColor={accentColor}
+              label={selection.point.label}
+              size="compact"
+              testID={testID ? `${testID}-selection-bubble` : undefined}
+              value={selectionValueFormatter?.(selection) ?? formatTrendSelectionValue(selection.point.value)}
+            />
+          </View>
+        ) : null}
       </View>
       <View
         onLayout={(event) => {
@@ -527,6 +557,18 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.22,
     shadowRadius: 4,
     width: 24,
+  },
+  selectionBubbleWrap: {
+    left: 10,
+    position: 'absolute',
+    right: 10,
+    zIndex: 3,
+  },
+  selectionBubbleWrapLeft: {
+    alignItems: 'flex-start',
+  },
+  selectionBubbleWrapRight: {
+    alignItems: 'flex-end',
   },
   axis: {
     alignItems: 'center',

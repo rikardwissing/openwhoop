@@ -1,9 +1,10 @@
+import { useEffect, useState } from 'react';
 import { Ionicons } from '@expo/vector-icons';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { SleepStageChart } from '@/components/charts/SleepStageChart';
 import { TrendChart } from '@/components/charts/TrendChart';
-import { PannableHeartChart } from '@/components/dashboard/PannableHeartChart';
+import { PannableHeartChart } from './PannableHeartChart';
 import { SectionHeader } from '@/components/layout/SectionHeader';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { PulsingHeartIcon } from '@/components/ui/PulsingHeartIcon';
@@ -63,6 +64,7 @@ export function HeartSnapshotCard({
   canLoadMore = false,
   chartTestID,
   isLoadingMore = false,
+  isRefreshing = false,
   liveHeartRateLabel,
   onLoadMore,
   onOpen,
@@ -76,6 +78,7 @@ export function HeartSnapshotCard({
   canLoadMore?: boolean;
   chartTestID: string;
   isLoadingMore?: boolean;
+  isRefreshing?: boolean;
   liveHeartRateLabel?: string | null;
   onLoadMore?: () => void;
   onOpen?: () => void;
@@ -86,6 +89,16 @@ export function HeartSnapshotCard({
   viewportKey?: string;
   windowPointCount?: number;
 }) {
+  const resolvedWindowPointCount = windowPointCount ?? snapshot.series.length;
+  const [isViewingLatestWindow, setIsViewingLatestWindow] = useState(true);
+  const [latestJumpVersion, setLatestJumpVersion] = useState(0);
+  const showsLatestWindowButton = trailingLabel === 'Last 12h';
+
+  useEffect(() => {
+    setIsViewingLatestWindow(true);
+    setLatestJumpVersion(0);
+  }, [viewportKey]);
+
   return (
     <GlassCard accentColor={colors.success}>
       <View style={styles.cardHeader}>
@@ -98,7 +111,61 @@ export function HeartSnapshotCard({
           />
           <Text style={styles.cardTitle}>Heart Rate</Text>
         </View>
-        {onOpen ? <CardAction label={trailingLabel} onPress={onOpen} testID={openTestID} /> : <Text style={styles.actionMeta}>{trailingLabel}</Text>}
+        {showsLatestWindowButton ? (
+          <View style={styles.actionWrap}>
+            <View style={styles.actionButtonRow}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityState={{ disabled: isViewingLatestWindow }}
+                disabled={isViewingLatestWindow}
+                onPress={() => {
+                  setLatestJumpVersion((current) => current + 1);
+                }}
+                style={({ pressed }) => [
+                  styles.latestButton,
+                  isViewingLatestWindow ? styles.latestButtonIdle : styles.latestButtonActive,
+                  pressed && !isViewingLatestWindow ? styles.actionPressed : null,
+                ]}
+                testID={chartTestID ? `${chartTestID}-latest-button` : undefined}>
+                <View
+                  style={styles.latestButtonIconSlot}>
+                  {isRefreshing ? (
+                    <View testID={chartTestID ? `${chartTestID}-refresh-indicator` : undefined}>
+                      <ActivityIndicator
+                        color={isViewingLatestWindow ? colors.subtle : colors.primaryBright}
+                        size="small"
+                        style={styles.latestButtonSpinner}
+                      />
+                    </View>
+                  ) : (
+                    <Ionicons
+                      color={isViewingLatestWindow ? colors.subtle : colors.primaryBright}
+                      name="refresh-outline"
+                      size={12}
+                    />
+                  )}
+                </View>
+                <Text
+                  style={[
+                    styles.latestButtonText,
+                    isViewingLatestWindow ? styles.latestButtonTextIdle : null,
+                  ]}>
+                  Last 12h
+                </Text>
+              </Pressable>
+              {onOpen ? (
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={onOpen}
+                  style={({ pressed }) => [styles.actionButton, pressed ? styles.actionPressed : null]}
+                  testID={openTestID}>
+                  <Text style={styles.actionText}>Open</Text>
+                  <Ionicons color={colors.primaryBright} name="chevron-forward" size={14} />
+                </Pressable>
+              ) : null}
+            </View>
+          </View>
+        ) : onOpen ? <CardAction label={trailingLabel} onPress={onOpen} testID={openTestID} /> : <Text style={styles.actionMeta}>{trailingLabel}</Text>}
       </View>
 
       <View style={styles.metricRow}>
@@ -133,16 +200,19 @@ export function HeartSnapshotCard({
 
       <PannableHeartChart
         accentColor={colors.primary}
+        anchorDayKey={viewportKey}
         axisTestID={chartTestID ? `${chartTestID}-axis` : undefined}
         canLoadMore={canLoadMore}
         chartTestID={chartTestID}
         height={150}
         isLoadingMore={isLoadingMore}
         markers={snapshot.markers}
+        jumpToLatestSignal={latestJumpVersion}
         onLoadMore={onLoadMore}
+        onViewingLatestWindowChange={setIsViewingLatestWindow}
         points={snapshot.series}
         resetKey={viewportKey}
-        windowPointCount={windowPointCount ?? snapshot.series.length}
+        windowPointCount={resolvedWindowPointCount}
       />
       {isLoadingMore ? (
         <View style={styles.historyLoaderRow}>
@@ -150,6 +220,88 @@ export function HeartSnapshotCard({
           <Text style={styles.historyLoaderText}>Loading more heart history...</Text>
         </View>
       ) : null}
+    </GlassCard>
+  );
+}
+
+export function HeartSnapshotStatusCard({
+  chartTestID,
+  isLoading = true,
+  liveHeartRateLabel,
+  message,
+  showLiveHeartRate = false,
+  trailingLabel,
+}: {
+  chartTestID?: string;
+  isLoading?: boolean;
+  liveHeartRateLabel?: string | null;
+  message: string;
+  showLiveHeartRate?: boolean;
+  trailingLabel: string;
+}) {
+  const showsLatestWindowButton = trailingLabel === 'Last 12h';
+
+  return (
+    <GlassCard accentColor={colors.success}>
+      <View style={styles.cardHeader}>
+        <View style={styles.cardHeaderLeft}>
+          <PulsingHeartIcon bpm={null} color={colors.success} name="heart-circle-outline" size={22} />
+          <Text style={styles.cardTitle}>Heart Rate</Text>
+        </View>
+        {showsLatestWindowButton ? (
+          <View style={styles.actionWrap}>
+            <View style={styles.actionButtonRow}>
+              <View style={[styles.latestButton, styles.latestButtonIdle]}>
+                <Ionicons color={colors.subtle} name="refresh-outline" size={12} />
+                <Text style={[styles.latestButtonText, styles.latestButtonTextIdle]}>Last 12h</Text>
+              </View>
+            </View>
+          </View>
+        ) : (
+          <Text numberOfLines={1} style={styles.actionMeta}>
+            {trailingLabel}
+          </Text>
+        )}
+      </View>
+
+      <View style={styles.metricRow}>
+        <View style={styles.metricColumn}>
+          <Text style={styles.metricLabel}>Resting HR</Text>
+          <Text style={styles.metricValue}>
+            --
+            <Text style={styles.metricUnit}> BPM</Text>
+          </Text>
+        </View>
+        <View style={styles.metricColumn}>
+          <Text style={styles.metricLabel}>Average</Text>
+          <Text style={styles.metricValue}>
+            --
+            <Text style={styles.metricUnit}> BPM</Text>
+          </Text>
+        </View>
+        <View style={styles.metricColumn}>
+          <Text style={styles.metricLabel}>Max</Text>
+          <Text style={styles.metricValue}>
+            --
+            <Text style={styles.metricUnit}> BPM</Text>
+          </Text>
+        </View>
+      </View>
+
+      {showLiveHeartRate && liveHeartRateLabel ? (
+        <View style={styles.cardChipRow}>
+          <StatChip accent={colors.heart} label="Live" value={liveHeartRateLabel} />
+        </View>
+      ) : null}
+
+      <View
+        style={styles.heartStatusChartShell}
+        testID={chartTestID ? `${chartTestID}-loading-shell` : undefined}>
+        <View style={styles.heartStatusRow}>
+          {isLoading ? <ActivityIndicator color={colors.primary} size="small" /> : null}
+          <Text style={styles.heartStatusText}>{message}</Text>
+        </View>
+      </View>
     </GlassCard>
   );
 }
@@ -238,7 +390,15 @@ export function ActivitySnapshotCard({
       </View>
       <Text style={styles.activityLabel}>{strainCard.label}</Text>
 
-      <TrendChart accentColor={colors.cyan} height={112} points={strainCard.series} testID={chartTestID} />
+      <TrendChart
+        accentColor={colors.cyan}
+        height={112}
+        points={strainCard.series}
+        selectionValueFormatter={(selection) =>
+          selection.point.value === null ? 'No data' : `${selection.point.value.toFixed(1)} strain`
+        }
+        testID={chartTestID}
+      />
 
       {activities.length === 0 ? (
         <Text style={styles.emptyText}>No recorded activity sessions for this day.</Text>
@@ -308,12 +468,19 @@ const styles = StyleSheet.create({
   actionWrap: {
     alignItems: 'flex-end',
     gap: 8,
-    maxWidth: '46%',
+    maxWidth: '62%',
   },
   actionMeta: {
     color: colors.muted,
     fontFamily: typography.body,
     fontSize: 12,
+  },
+  actionButtonRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+    justifyContent: 'flex-end',
   },
   actionButton: {
     alignItems: 'center',
@@ -327,6 +494,31 @@ const styles = StyleSheet.create({
   },
   actionPressed: {
     opacity: 0.82,
+  },
+  latestButton: {
+    alignItems: 'center',
+    borderRadius: 999,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+  },
+  latestButtonIdle: {
+    backgroundColor: 'rgba(112, 132, 144, 0.08)',
+    borderColor: 'rgba(112, 132, 144, 0.16)',
+  },
+  latestButtonActive: {
+    backgroundColor: 'rgba(236, 255, 114, 0.08)',
+    borderColor: 'rgba(236, 255, 114, 0.18)',
+  },
+  latestButtonText: {
+    color: colors.primaryBright,
+    fontFamily: typography.bodySemiBold,
+    fontSize: 11,
+  },
+  latestButtonTextIdle: {
+    color: colors.subtle,
   },
   cardHeader: {
     alignItems: 'flex-start',
@@ -391,6 +583,39 @@ const styles = StyleSheet.create({
     color: colors.subtle,
     fontFamily: typography.body,
     fontSize: 11,
+  },
+  heartStatusChartShell: {
+    alignItems: 'center',
+    backgroundColor: colors.surfaceMuted,
+    borderColor: colors.border,
+    borderRadius: 18,
+    borderWidth: 1,
+    justifyContent: 'center',
+    minHeight: 150,
+    paddingHorizontal: 16,
+    paddingVertical: 18,
+  },
+  latestButtonIconSlot: {
+    alignItems: 'center',
+    height: 12,
+    justifyContent: 'center',
+    width: 12,
+  },
+  latestButtonSpinner: {
+    transform: [{ scale: 0.7 }],
+  },
+  heartStatusRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 12,
+    maxWidth: '88%',
+  },
+  heartStatusText: {
+    color: colors.muted,
+    flex: 1,
+    fontFamily: typography.body,
+    fontSize: 14,
+    lineHeight: 20,
   },
   sleepSummary: {
     alignItems: 'flex-start',

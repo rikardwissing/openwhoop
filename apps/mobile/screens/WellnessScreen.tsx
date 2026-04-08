@@ -1,7 +1,5 @@
-import { useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
-import { ChartReadout } from '@/components/charts/ChartReadout';
 import { TrendChart } from '@/components/charts/TrendChart';
 import { ScreenShell } from '@/components/layout/ScreenShell';
 import { SectionHeader } from '@/components/layout/SectionHeader';
@@ -11,8 +9,8 @@ import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
 import { colors, typography } from '@/constants/theme';
 import { useDerivedRefreshState, useWellnessSnapshot } from '@/hooks/useHealthData';
 import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
-import type { MetricSeries, TrendSelection } from '@/types/health';
-import { formatMetricValue, formatSignedValue } from '@/utils/formatters';
+import type { MetricSeries } from '@/types/health';
+import { formatMetricNumber, formatMetricValue, formatNullablePercent, formatSignedValue } from '@/utils/formatters';
 import { getMetricToneColor, getRecoveryMetricTone } from '@/utils/metricTone';
 
 function accentColorFor(series: MetricSeries) {
@@ -42,41 +40,42 @@ function barColorForMetric(metric: MetricSeries, value: number | null) {
   return undefined;
 }
 
+function formatSelectionValue(metric: MetricSeries, value: number | null, digits: number) {
+  if (value === null) {
+    return 'No data';
+  }
+
+  if (metric.unit === '%') {
+    return formatNullablePercent(value);
+  }
+
+  return metric.unit ? formatMetricNumber(value, metric.unit, digits) : formatMetricValue(value, digits);
+}
+
 function WellnessMetricCard({ metric }: { metric: MetricSeries }) {
   const accentColor = accentColorFor(metric);
-  const [selection, setSelection] = useState<TrendSelection | null>(null);
   const digits = metric.unit === '°C' ? 1 : 0;
 
   return (
     <GlassCard accentColor={accentColor} style={styles.metricCard}>
       <View style={styles.metricCardIntro}>
         <SectionHeader title={metric.title} titleNumberOfLines={1} trailing={metric.unit ? `${metric.unit} trend` : 'Trend'} />
-        {selection ? (
-          <ChartReadout
-            accentColor={accentColor}
-            detail={selection.point.value === null ? 'No data recorded for this day' : 'Selected daily average'}
-            label={selection.point.label}
-            style={styles.readout}
-            value={`${formatMetricValue(selection.point.value, digits)}${metric.unit ? ` ${metric.unit}` : ''}`}
-          />
-        ) : (
-          <View style={styles.metricTopRow}>
-            <View style={styles.metricNumberWrap}>
-              <Text adjustsFontSizeToFit minimumFontScale={0.82} numberOfLines={1} style={styles.metricNumber}>
-                {formatMetricValue(metric.latest, digits)}
-                {metric.unit ? <Text style={styles.metricUnit}> {metric.unit}</Text> : null}
-              </Text>
-            </View>
-            {metric.delta !== null ? (
-              <StatChip
-                accent={accentColor}
-                label="Delta"
-                style={styles.metricStatChip}
-                value={`${formatSignedValue(metric.delta, digits)}${metric.unit}`}
-              />
-            ) : null}
+        <View style={styles.metricTopRow}>
+          <View style={styles.metricNumberWrap}>
+            <Text adjustsFontSizeToFit minimumFontScale={0.82} numberOfLines={1} style={styles.metricNumber}>
+              {formatMetricValue(metric.latest, digits)}
+              {metric.unit ? <Text style={styles.metricUnit}> {metric.unit}</Text> : null}
+            </Text>
           </View>
-        )}
+          {metric.delta !== null ? (
+            <StatChip
+              accent={accentColor}
+              label="Delta"
+              style={styles.metricStatChip}
+              value={`${formatSignedValue(metric.delta, digits)}${metric.unit}`}
+            />
+          ) : null}
+        </View>
         <Text numberOfLines={2} style={styles.metricDetail}>
           {metric.detail}
         </Text>
@@ -91,8 +90,8 @@ function WellnessMetricCard({ metric }: { metric: MetricSeries }) {
         barColorForPoint={(point) => barColorForMetric(metric, point.value)}
         height={126}
         mode="bar"
-        onSelectionChange={setSelection}
         points={metric.series}
+        selectionValueFormatter={(selection) => formatSelectionValue(metric, selection.point.value, digits)}
         testID={`wellness-${metric.title.toLowerCase().replace(/\s+/g, '-')}-chart`}
       />
     </GlassCard>
