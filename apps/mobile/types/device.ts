@@ -12,6 +12,7 @@ export type SyncSource = 'foreground' | 'background';
 export type BackgroundSyncResult = 'success' | 'skipped' | 'error';
 export type NotificationPermissionState = 'unknown' | 'granted' | 'provisional' | 'denied';
 export type BackgroundTaskApiStatus = 'unknown' | 'available' | 'restricted';
+export type SyncImportBottleneck = 'ble' | 'db' | 'mixed' | 'unknown';
 
 export interface WearableScanResult {
   id: string;
@@ -59,6 +60,33 @@ export interface SyncResult {
   completedAt: string;
 }
 
+export interface SyncImportPerformanceSummary {
+  source: SyncSource;
+  status: BackgroundSyncResult;
+  capturedAt: string;
+  totalMs: number;
+  connectMs: number | null;
+  historyRequestToCompleteMs: number | null;
+  historyReceiveMs: number | null;
+  dbFlushMsTotal: number;
+  dbFlushMsAvg: number | null;
+  dbFlushMsMax: number;
+  ackWaitMsTotal: number;
+  ackWaitMsAvg: number | null;
+  ackWaitMsMax: number;
+  importedRows: number;
+  persistedRows: number;
+  flushCount: number;
+  flushRowsTotal: number;
+  historyEndCount: number;
+  ackSentCount: number;
+  maxPendingRows: number;
+  rowsPerSecReceive: number | null;
+  rowsPerSecPersist: number | null;
+  suspectedBottleneck: SyncImportBottleneck;
+  error: string | null;
+}
+
 export interface BackgroundSyncState {
   pairedDeviceId: string | null;
   lastRunStartedAt: string | null;
@@ -70,6 +98,7 @@ export interface BackgroundSyncState {
   lastImportedReadings: number | null;
   notificationPermission: NotificationPermissionState;
   notificationBaselineAt: string | null;
+  lastSyncImportSummary: SyncImportPerformanceSummary | null;
 }
 
 export interface BackgroundSyncDiagnostics {

@@ -20,6 +20,7 @@ const mockGetBackgroundSyncState = jest.fn<Promise<{
   lastImportedReadings: null;
   notificationPermission: 'unknown';
   notificationBaselineAt: null;
+  lastSyncImportSummary: null;
 }>, [unknown]>(async () => ({
   pairedDeviceId: null,
   lastRunStartedAt: null,
@@ -31,6 +32,7 @@ const mockGetBackgroundSyncState = jest.fn<Promise<{
   lastImportedReadings: null,
   notificationPermission: 'unknown',
   notificationBaselineAt: null,
+  lastSyncImportSummary: null,
 }));
 const mockUpdateNotificationPermissionState = jest.fn<Promise<void>, [unknown, unknown]>(async () => {});
 const mockSetNotificationHandler = jest.fn<void, [object]>();

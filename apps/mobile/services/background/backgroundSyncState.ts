@@ -1,7 +1,14 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 
 import { formatSqliteDateTime, parseSqliteDateTime } from '@/utils/dateTime';
-import type { BackgroundSyncResult, BackgroundSyncState, NotificationPermissionState, SyncSource } from '@/types/device';
+import type {
+  BackgroundSyncResult,
+  BackgroundSyncState,
+  NotificationPermissionState,
+  SyncImportBottleneck,
+  SyncImportPerformanceSummary,
+  SyncSource,
+} from '@/types/device';
 
 const BACKGROUND_SYNC_ROW_ID = 1;
 const LOCK_STALE_MS = 15 * 60 * 1000;
@@ -19,6 +26,7 @@ interface BackgroundSyncStateRow {
   notification_baseline_at: string | null;
   lock_owner: string | null;
   lock_started_at: string | null;
+  last_sync_import_summary_json: string | null;
 }
 
 type DatabaseLike = Pick<SQLiteDatabase, 'getFirstAsync' | 'runAsync' | 'execAsync'> & {
@@ -36,7 +44,69 @@ const EMPTY_BACKGROUND_SYNC_STATE: BackgroundSyncState = {
   lastImportedReadings: null,
   notificationPermission: 'unknown',
   notificationBaselineAt: null,
+  lastSyncImportSummary: null,
 };
+
+function parseNullableNumber(value: unknown) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function parseRequiredNumber(value: unknown) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+function parseSyncImportBottleneck(value: unknown): SyncImportBottleneck {
+  return value === 'ble' || value === 'db' || value === 'mixed' ? value : 'unknown';
+}
+
+function parseSyncImportSummary(value: string | null): SyncImportPerformanceSummary | null {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(value) as Partial<SyncImportPerformanceSummary>;
+    const source = parsed.source === 'foreground' || parsed.source === 'background' ? parsed.source : null;
+    const status =
+      parsed.status === 'success' || parsed.status === 'skipped' || parsed.status === 'error'
+        ? parsed.status
+        : null;
+    const capturedAt = typeof parsed.capturedAt === 'string' ? parsed.capturedAt : null;
+
+    if (!source || !status || !capturedAt) {
+      return null;
+    }
+
+    return {
+      source,
+      status,
+      capturedAt,
+      totalMs: parseRequiredNumber(parsed.totalMs),
+      connectMs: parseNullableNumber(parsed.connectMs),
+      historyRequestToCompleteMs: parseNullableNumber(parsed.historyRequestToCompleteMs),
+      historyReceiveMs: parseNullableNumber(parsed.historyReceiveMs),
+      dbFlushMsTotal: parseRequiredNumber(parsed.dbFlushMsTotal),
+      dbFlushMsAvg: parseNullableNumber(parsed.dbFlushMsAvg),
+      dbFlushMsMax: parseRequiredNumber(parsed.dbFlushMsMax),
+      ackWaitMsTotal: parseRequiredNumber(parsed.ackWaitMsTotal),
+      ackWaitMsAvg: parseNullableNumber(parsed.ackWaitMsAvg),
+      ackWaitMsMax: parseRequiredNumber(parsed.ackWaitMsMax),
+      importedRows: parseRequiredNumber(parsed.importedRows),
+      persistedRows: parseRequiredNumber(parsed.persistedRows),
+      flushCount: parseRequiredNumber(parsed.flushCount),
+      flushRowsTotal: parseRequiredNumber(parsed.flushRowsTotal),
+      historyEndCount: parseRequiredNumber(parsed.historyEndCount),
+      ackSentCount: parseRequiredNumber(parsed.ackSentCount),
+      maxPendingRows: parseRequiredNumber(parsed.maxPendingRows),
+      rowsPerSecReceive: parseNullableNumber(parsed.rowsPerSecReceive),
+      rowsPerSecPersist: parseNullableNumber(parsed.rowsPerSecPersist),
+      suspectedBottleneck: parseSyncImportBottleneck(parsed.suspectedBottleneck),
+      error: typeof parsed.error === 'string' ? parsed.error : null,
+    };
+  } catch {
+    return null;
+  }
+}
 
 async function withExclusiveTransaction(db: DatabaseLike, task: (tx: SQLiteDatabase) => Promise<void>) {
   if (typeof db.withExclusiveTransactionAsync === 'function') {
@@ -61,7 +131,8 @@ async function loadBackgroundSyncStateRow(db: Pick<SQLiteDatabase, 'getFirstAsyn
         notification_permission,
         notification_baseline_at,
         lock_owner,
-        lock_started_at
+        lock_started_at,
+        last_sync_import_summary_json
       FROM background_sync_state
       WHERE id = 1
       LIMIT 1
@@ -87,6 +158,7 @@ async function persistBackgroundSyncStateRow(
     notification_baseline_at: current?.notification_baseline_at ?? null,
     lock_owner: current?.lock_owner ?? null,
     lock_started_at: current?.lock_started_at ?? null,
+    last_sync_import_summary_json: current?.last_sync_import_summary_json ?? null,
     ...patch,
   };
 
@@ -105,9 +177,10 @@ async function persistBackgroundSyncStateRow(
         notification_permission,
         notification_baseline_at,
         lock_owner,
-        lock_started_at
+        lock_started_at,
+        last_sync_import_summary_json
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         paired_device_id = excluded.paired_device_id,
         last_run_started_at = excluded.last_run_started_at,
@@ -120,7 +193,8 @@ async function persistBackgroundSyncStateRow(
         notification_permission = excluded.notification_permission,
         notification_baseline_at = excluded.notification_baseline_at,
         lock_owner = excluded.lock_owner,
-        lock_started_at = excluded.lock_started_at
+        lock_started_at = excluded.lock_started_at,
+        last_sync_import_summary_json = excluded.last_sync_import_summary_json
     `,
     BACKGROUND_SYNC_ROW_ID,
     next.paired_device_id,
@@ -135,6 +209,7 @@ async function persistBackgroundSyncStateRow(
     next.notification_baseline_at,
     next.lock_owner,
     next.lock_started_at,
+    next.last_sync_import_summary_json,
   );
 }
 
@@ -156,6 +231,7 @@ export async function getBackgroundSyncState(db: Pick<SQLiteDatabase, 'getFirstA
     lastImportedReadings: row.last_imported_readings,
     notificationPermission: row.notification_permission ?? 'unknown',
     notificationBaselineAt: row.notification_baseline_at,
+    lastSyncImportSummary: parseSyncImportSummary(row.last_sync_import_summary_json),
   };
 }
 
@@ -229,6 +305,15 @@ export async function recordBackgroundRunResult(
   }
 
   await persistBackgroundSyncStateRow(db, patch);
+}
+
+export async function recordSyncImportSummary(
+  db: Pick<SQLiteDatabase, 'getFirstAsync' | 'runAsync'>,
+  summary: SyncImportPerformanceSummary,
+) {
+  await persistBackgroundSyncStateRow(db, {
+    last_sync_import_summary_json: JSON.stringify(summary),
+  });
 }
 
 export async function acquireBackgroundSyncLock(

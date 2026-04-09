@@ -32,6 +32,7 @@ import {
   describeWearState,
   isBlockingSyncStatus,
   type BackgroundTaskApiStatus,
+  type SyncImportPerformanceSummary,
 } from '@/types/device';
 
 function batteryAccent(batteryPercent: number | null) {
@@ -173,6 +174,79 @@ function describeBackgroundApiStatus(status: BackgroundTaskApiStatus) {
   }
 }
 
+function describeSyncSource(source: SyncImportPerformanceSummary['source']) {
+  return source === 'foreground' ? 'Foreground' : 'Background';
+}
+
+function describeSyncImportBottleneck(bottleneck: SyncImportPerformanceSummary['suspectedBottleneck']) {
+  switch (bottleneck) {
+    case 'ble':
+      return 'BLE';
+    case 'db':
+      return 'DB';
+    case 'mixed':
+      return 'Mixed';
+    default:
+      return 'Unknown';
+  }
+}
+
+function syncImportStatusAccent(status: SyncImportPerformanceSummary['status']) {
+  switch (status) {
+    case 'success':
+      return colors.success;
+    case 'error':
+      return colors.alert;
+    default:
+      return colors.borderStrong;
+  }
+}
+
+function syncImportBottleneckAccent(bottleneck: SyncImportPerformanceSummary['suspectedBottleneck']) {
+  switch (bottleneck) {
+    case 'ble':
+      return colors.cyan;
+    case 'db':
+      return colors.violet;
+    case 'mixed':
+      return colors.primary;
+    default:
+      return colors.borderStrong;
+  }
+}
+
+function formatCompactDurationMs(value: number | null | undefined) {
+  if (value === null || value === undefined) {
+    return '--';
+  }
+
+  if (value >= 60_000) {
+    return `${(value / 60_000).toFixed(1)} min`;
+  }
+
+  if (value >= 1_000) {
+    return `${(value / 1_000).toFixed(1)} s`;
+  }
+
+  return `${Math.round(value)} ms`;
+}
+
+function formatInteger(value: number | null | undefined) {
+  if (value === null || value === undefined) {
+    return '--';
+  }
+
+  return value.toLocaleString();
+}
+
+function formatRowsPerSecond(value: number | null | undefined) {
+  if (value === null || value === undefined) {
+    return '--';
+  }
+
+  return `${value.toLocaleString()}/s`;
+}
+
 function describePerformanceRunStatus(status: PerformanceDiagnosticRun['status']) {
   switch (status) {
     case 'success':
@@ -281,6 +355,7 @@ export function SettingsScreen() {
     backgroundSyncState.lastRunFinishedAt,
     backgroundSyncState.lastResult,
   );
+  const latestSyncImportSummary = backgroundSyncState.lastSyncImportSummary;
   const latestPerformanceRun = performanceRuns[0] ?? null;
 
   useEffect(() => {
@@ -796,6 +871,75 @@ export function SettingsScreen() {
           <Text style={styles.roadmapText}>
             Keep the official wearable app closed while Unstrap owns the strap. Two apps syncing the same device can race each other and create gaps.
           </Text>
+          <View>
+            <Text style={styles.settingTitle}>Latest Sync Profile</Text>
+            <Text style={styles.settingSubtitle}>
+              Stores the last import timing snapshot recorded on this phone from either a manual or background sync.
+            </Text>
+          </View>
+          {latestSyncImportSummary ? (
+            <>
+              <View style={styles.chipWrap}>
+                <StatChip
+                  accent={colors.borderStrong}
+                  label="Source"
+                  value={describeSyncSource(latestSyncImportSummary.source)}
+                />
+                <StatChip
+                  accent={syncImportStatusAccent(latestSyncImportSummary.status)}
+                  label="Outcome"
+                  value={describeBackgroundResult(latestSyncImportSummary.status)}
+                />
+                <StatChip
+                  accent={syncImportBottleneckAccent(latestSyncImportSummary.suspectedBottleneck)}
+                  label="Bottleneck"
+                  value={describeSyncImportBottleneck(latestSyncImportSummary.suspectedBottleneck)}
+                />
+                <StatChip
+                  accent={colors.borderStrong}
+                  label="Total"
+                  value={formatCompactDurationMs(latestSyncImportSummary.totalMs)}
+                />
+                <StatChip
+                  accent={colors.borderStrong}
+                  label="Receive"
+                  value={formatCompactDurationMs(latestSyncImportSummary.historyReceiveMs)}
+                />
+                <StatChip
+                  accent={colors.borderStrong}
+                  label="DB flush"
+                  value={formatCompactDurationMs(latestSyncImportSummary.dbFlushMsTotal)}
+                />
+                <StatChip
+                  accent={colors.borderStrong}
+                  label="ACK wait"
+                  value={formatCompactDurationMs(latestSyncImportSummary.ackWaitMsTotal)}
+                />
+                <StatChip
+                  accent={colors.borderStrong}
+                  label="Received"
+                  value={formatInteger(latestSyncImportSummary.importedRows)}
+                />
+                <StatChip
+                  accent={colors.borderStrong}
+                  label="Persisted"
+                  value={formatInteger(latestSyncImportSummary.persistedRows)}
+                />
+              </View>
+
+              <Text style={styles.roadmapText}>
+                {`Recorded ${latestSyncImportSummary.capturedAt}. Connect ${formatCompactDurationMs(latestSyncImportSummary.connectMs)}. Persisted ${formatInteger(latestSyncImportSummary.persistedRows)} eligible rows across ${formatInteger(latestSyncImportSummary.flushCount)} flushes with a max pending buffer of ${formatInteger(latestSyncImportSummary.maxPendingRows)} rows.`}
+              </Text>
+              <Text style={styles.roadmapText}>
+                {`Receive throughput ${formatRowsPerSecond(latestSyncImportSummary.rowsPerSecReceive)}. DB throughput ${formatRowsPerSecond(latestSyncImportSummary.rowsPerSecPersist)}.`}
+              </Text>
+              {latestSyncImportSummary.error ? (
+                <Text style={styles.errorText}>{latestSyncImportSummary.error}</Text>
+              ) : null}
+            </>
+          ) : (
+            <Text style={styles.roadmapText}>No sync profile has been recorded on this phone yet.</Text>
+          )}
           {__DEV__ ? (
             <>
               <View style={styles.buttonRow}>

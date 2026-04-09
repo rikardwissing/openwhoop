@@ -128,6 +128,7 @@ jest.mock('@/services/background/backgroundSyncState', () => ({
     lastImportedReadings: null,
     notificationPermission: 'unknown',
     notificationBaselineAt: null,
+    lastSyncImportSummary: null,
   })),
 }));
 

@@ -16,6 +16,7 @@ import {
   TREND_VIEWBOX_WIDTH,
   buildTrendDomain,
   buildTrendCoordinates,
+  buildTrendLineGeometry,
   mapTrendValueToY,
   selectTrendPointAtX,
 } from '@/components/charts/chartSelection';
@@ -46,29 +47,6 @@ function colorStops(accent: string) {
 
 function buildLine(points: Array<{ x: number; y: number }>) {
   return points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x} ${point.y}`).join(' ');
-}
-
-function buildLineSegments(coordinates: Array<{ x: number; y: number | null }>) {
-  const segments: Array<Array<{ x: number; y: number }>> = [];
-  let current: Array<{ x: number; y: number }> = [];
-
-  for (const coordinate of coordinates) {
-    if (coordinate.y === null) {
-      if (current.length > 0) {
-        segments.push(current);
-        current = [];
-      }
-      continue;
-    }
-
-    current.push({ x: coordinate.x, y: coordinate.y });
-  }
-
-  if (current.length > 0) {
-    segments.push(current);
-  }
-
-  return segments;
 }
 
 interface TrendBarFrame {
@@ -178,11 +156,12 @@ export function TrendChart({
   const domain = useMemo(() => buildTrendDomain(points, { mode }), [mode, points]);
   const coordinates = useMemo(() => buildTrendCoordinates(points, { mode, domain }), [domain, mode, points]);
   const barFrames = useMemo(() => buildBarFrames(coordinates, domain), [coordinates, domain]);
-  const lineSegments = useMemo(() => buildLineSegments(coordinates), [coordinates]);
-  const paths = useMemo(() => lineSegments.map((segment) => buildLine(segment)), [lineSegments]);
+  const lineGeometry = useMemo(() => buildTrendLineGeometry(coordinates), [coordinates]);
+  const paths = useMemo(() => lineGeometry.segments.map((segment) => buildLine(segment)), [lineGeometry]);
+  const bridgePaths = useMemo(() => lineGeometry.bridges.map((bridge) => buildLine(bridge)), [lineGeometry]);
   const areas = useMemo(
     () =>
-      lineSegments
+      lineGeometry.segments
         .filter((segment) => segment.length >= 2)
         .map((segment) => {
           const path = buildLine(segment);
@@ -190,7 +169,7 @@ export function TrendChart({
           const endX = segment.at(-1)?.x ?? startX;
           return `${path} L ${endX} ${TREND_VIEWBOX_BASELINE} L ${startX} ${TREND_VIEWBOX_BASELINE} Z`;
         }),
-    [lineSegments],
+    [lineGeometry],
   );
   const selectedCoordinate = selection ? coordinates[selection.index] ?? null : null;
   const selectedBar = selection ? barFrames[selection.index] ?? null : null;
@@ -414,6 +393,21 @@ export function TrendChart({
                 ) : null,
               )}
           {mode === 'line'
+            ? bridgePaths.map((path, index) => (
+                <Path
+                  key={`bridge-${index}`}
+                  d={path}
+                  fill="none"
+                  stroke={colors.subtle}
+                  strokeDasharray="2.2 2.2"
+                  strokeLinecap="round"
+                  strokeOpacity="0.72"
+                  strokeWidth={Math.max(lineStrokeWidth * 0.85, 0.7)}
+                  testID={testID ? `${testID}-bridge-${index}` : undefined}
+                />
+              ))
+            : null}
+          {mode === 'line'
             ? paths.map((path, index) => (
                 <Path
                   key={`shadow-${index}`}
@@ -456,6 +450,7 @@ export function TrendChart({
                 fill={accentColor}
                 opacity="0.18"
                 r="4.6"
+                testID={testID ? `${testID}-active-dot-outer` : undefined}
               />
               <Circle
                 cx={activeCoordinate.x}
@@ -464,6 +459,7 @@ export function TrendChart({
                 r="1.9"
                 stroke={colors.background}
                 strokeWidth="0.9"
+                testID={testID ? `${testID}-active-dot` : undefined}
               />
             </>
           ) : null}

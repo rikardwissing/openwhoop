@@ -316,7 +316,9 @@ export function HeartSnapshotCard({
   const sleepStageChipTransitionProgress = useSharedValue(0);
   const chartHeight = HEART_CARD_CHART_HEIGHT;
   const cardTitle = focusedCardContent?.title ?? 'Heart Rate';
-  const cardSubtitle = focusedCardContent?.subtitle ?? 'Explore your heart rate';
+  const defaultCardSubtitle =
+    showLiveHeartRate && liveHeartRateLabel ? liveHeartRateLabel : 'Explore your heart rate';
+  const cardSubtitle = focusedCardContent?.subtitle ?? defaultCardSubtitle;
   const metricColumns: HeartMetricColumn[] = focusedCardContent?.metrics ?? [
     {
       label: 'Resting HR',
@@ -726,12 +728,6 @@ export function HeartSnapshotCard({
             {focusedCardContent.chips.map((chip) => (
               <StatChip accent={chip.accentColor} key={`${chip.label}-${chip.value}`} label={chip.label} value={chip.value} />
             ))}
-          </View>
-        ) : null}
-
-        {!focusedCardContent && showLiveHeartRate && liveHeartRateLabel ? (
-          <View style={styles.cardChipRow}>
-            <StatChip accent={colors.heart} label="Live" value={liveHeartRateLabel} />
           </View>
         ) : null}
       </Animated.View>

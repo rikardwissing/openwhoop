@@ -1,6 +1,7 @@
 import {
   buildTrendCoordinates,
   buildTrendDomain,
+  buildTrendLineGeometry,
   buildSleepStageFrames,
   selectSleepStageAtX,
   selectTrendPointAtX,
@@ -103,6 +104,89 @@ describe('chart selection helpers', () => {
     expect(coordinates[0]?.y).not.toBeNull();
     expect(coordinates[1]?.y).not.toBeNull();
     expect((coordinates[0]?.y ?? 0) > (coordinates[1]?.y ?? 0)).toBe(true);
+  });
+
+  it('builds a dashed bridge across a single bounded missing point', () => {
+    const geometry = buildTrendLineGeometry([
+      { x: 0, y: 12 },
+      { x: 10, y: null },
+      { x: 20, y: 8 },
+    ]);
+
+    expect(geometry.segments).toEqual([
+      [{ x: 0, y: 12 }],
+      [{ x: 20, y: 8 }],
+    ]);
+    expect(geometry.bridges).toEqual([
+      [
+        { x: 0, y: 12 },
+        { x: 20, y: 8 },
+      ],
+    ]);
+  });
+
+  it('treats consecutive missing points as one bounded bridge', () => {
+    const geometry = buildTrendLineGeometry([
+      { x: 0, y: 12 },
+      { x: 10, y: null },
+      { x: 20, y: null },
+      { x: 30, y: 6 },
+    ]);
+
+    expect(geometry.bridges).toEqual([
+      [
+        { x: 0, y: 12 },
+        { x: 30, y: 6 },
+      ],
+    ]);
+  });
+
+  it('does not bridge leading or trailing missing runs', () => {
+    const geometry = buildTrendLineGeometry([
+      { x: 0, y: null },
+      { x: 10, y: 12 },
+      { x: 20, y: null },
+      { x: 30, y: 8 },
+      { x: 40, y: null },
+    ]);
+
+    expect(geometry.bridges).toEqual([
+      [
+        { x: 10, y: 12 },
+        { x: 30, y: 8 },
+      ],
+    ]);
+    expect(geometry.segments).toEqual([
+      [{ x: 10, y: 12 }],
+      [{ x: 30, y: 8 }],
+    ]);
+  });
+
+  it('returns no bridges for all-missing or fully contiguous series', () => {
+    expect(
+      buildTrendLineGeometry([
+        { x: 0, y: null },
+        { x: 10, y: null },
+      ]),
+    ).toEqual({
+      bridges: [],
+      segments: [],
+    });
+
+    expect(
+      buildTrendLineGeometry([
+        { x: 0, y: 12 },
+        { x: 10, y: 10 },
+        { x: 20, y: 8 },
+      ]),
+    ).toEqual({
+      bridges: [],
+      segments: [[
+        { x: 0, y: 12 },
+        { x: 10, y: 10 },
+        { x: 20, y: 8 },
+      ]],
+    });
   });
 
   it('builds cumulative sleep-stage offsets', () => {

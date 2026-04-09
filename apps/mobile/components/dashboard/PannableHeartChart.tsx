@@ -42,6 +42,7 @@ import {
   TREND_VIEWBOX_PLOT_BOTTOM,
   TREND_VIEWBOX_TOP,
   buildTrendDomain,
+  buildTrendLineGeometry,
   mapTrendValueToY,
 } from '@/components/charts/chartSelection';
 import { ChartSelectionBubble } from '@/components/charts/ChartSelectionBubble';
@@ -118,29 +119,6 @@ function chartShadowColor(accent: string) {
 
 function buildLine(points: Array<{ x: number; y: number }>) {
   return points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x} ${point.y}`).join(' ');
-}
-
-function buildLineSegments(coordinates: Array<{ x: number; y: number | null }>) {
-  const segments: Array<Array<{ x: number; y: number }>> = [];
-  let current: Array<{ x: number; y: number }> = [];
-
-  for (const coordinate of coordinates) {
-    if (coordinate.y === null) {
-      if (current.length > 0) {
-        segments.push(current);
-        current = [];
-      }
-      continue;
-    }
-
-    current.push({ x: coordinate.x, y: coordinate.y });
-  }
-
-  if (current.length > 0) {
-    segments.push(current);
-  }
-
-  return segments;
 }
 
 function buildHeartCoordinates(
@@ -787,11 +765,12 @@ export function PannableHeartChart({
     () => buildHeartCoordinates(points, baseDomain, chartPointSpacing),
     [baseDomain, chartPointSpacing, points],
   );
-  const lineSegments = useMemo(() => buildLineSegments(coordinates), [coordinates]);
-  const paths = useMemo(() => lineSegments.map((segment) => buildLine(segment)), [lineSegments]);
+  const lineGeometry = useMemo(() => buildTrendLineGeometry(coordinates), [coordinates]);
+  const paths = useMemo(() => lineGeometry.segments.map((segment) => buildLine(segment)), [lineGeometry]);
+  const bridgePaths = useMemo(() => lineGeometry.bridges.map((bridge) => buildLine(bridge)), [lineGeometry]);
   const areas = useMemo(
     () =>
-      lineSegments
+      lineGeometry.segments
         .filter((segment) => segment.length >= 2)
         .map((segment) => {
           const path = buildLine(segment);
@@ -799,7 +778,7 @@ export function PannableHeartChart({
           const endX = segment.at(-1)?.x ?? startX;
           return `${path} L ${endX} ${TREND_VIEWBOX_BASELINE} L ${startX} ${TREND_VIEWBOX_BASELINE} Z`;
         }),
-    [lineSegments],
+    [lineGeometry],
   );
   const chartContentWidth = Math.max(
     getHeartViewportContentWidth(viewportWidth, points.length, baseWindowPointCount),
@@ -1749,6 +1728,20 @@ export function PannableHeartChart({
                         <Path key={`area-${index}`} d={area} fill={`url(#${chartId}-fill)`} />
                       ))}
                     </G>
+                    {bridgePaths.map((path, index) => (
+                      <Path
+                        d={path}
+                        fill="none"
+                        key={`bridge-${index}`}
+                        stroke={colors.subtle}
+                        strokeDasharray="1.8 1.8"
+                        strokeLinecap="round"
+                        strokeOpacity="0.72"
+                        strokeWidth="0.68"
+                        testID={chartTestID ? `${chartTestID}-bridge-${index}` : undefined}
+                        vectorEffect="non-scaling-stroke"
+                      />
+                    ))}
                     <G>
                       {paths.map((path, index) => (
                         <Path
@@ -1847,6 +1840,7 @@ export function PannableHeartChart({
                   r="1.9"
                   stroke={colors.background}
                   strokeWidth="0.9"
+                  testID={chartTestID ? `${chartTestID}-active-dot` : undefined}
                 />
               </Svg>
             ) : null}

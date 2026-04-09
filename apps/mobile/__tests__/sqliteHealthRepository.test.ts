@@ -480,6 +480,7 @@ describe('SQLiteHealthRepository', () => {
         lastImportedReadings: 42,
         notificationPermission: 'granted',
         notificationBaselineAt: '2026-03-18 08:00:00',
+        lastSyncImportSummary: null,
       },
     });
 

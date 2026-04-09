@@ -1,14 +1,25 @@
-import type { SQLiteDatabase } from 'expo-sqlite';
+import type { SQLiteDatabase, SQLiteStatement } from 'expo-sqlite';
 import { BleManager, type Device, type Subscription } from 'react-native-ble-plx';
 
 import { markDerivedRefreshPending, refreshHeartAggregatesForRange } from '@/data/sqlite/SQLiteHealthRepository';
-import { acquireBackgroundSyncLock, releaseBackgroundSyncLock } from '@/services/background/backgroundSyncState';
+import { acquireBackgroundSyncLock, recordSyncImportSummary, releaseBackgroundSyncLock } from '@/services/background/backgroundSyncState';
 import { CMD_FROM_STRAP_UUID, CMD_TO_STRAP_UUID, DATA_FROM_STRAP_UUID, EVENTS_FROM_STRAP_UUID, EventNumber, MEMFAULT_UUID, WEARABLE_SERVICE_UUID } from '@/services/ble/constants';
 import { resolveScanDeviceName } from '@/services/ble/deviceNaming';
 import { createWearableBleManager, getRestoredWearableDevice } from '@/services/ble/bleManager';
 import { PacketAssembler, base64ToBytes, bytesToBase64, disableAlarmPacket, enterHighFrequencySyncPacket, exitHighFrequencySyncPacket, getBatteryLevelPacket, getBodyLocationAndStatusPacket, getNamePacket, helloHarvardPacket, historyEndPacket, historyStartPacket, parseNotification, restartPacket, setAlarmPacket, setClockPacket, toggleRealtimeHrPacket, type ImuSamplePacket, type SensorDataPacket, versionInfoPacket } from '@/services/ble/codec';
 import { HistorySyncWatchdog } from '@/services/ble/syncWatchdog';
-import type { ChargingState, DeviceState, SyncProgress, SyncResult, SyncSource, WearState, WearableLiveEvent, WearableScanResult } from '@/types/device';
+import type {
+  BackgroundSyncResult,
+  ChargingState,
+  DeviceState,
+  SyncImportPerformanceSummary,
+  SyncProgress,
+  SyncResult,
+  SyncSource,
+  WearState,
+  WearableLiveEvent,
+  WearableScanResult,
+} from '@/types/device';
 import { formatSqliteDateTime } from '@/utils/dateTime';
 import { isPlausibleRecordedBpm } from '@/utils/heartRate';
 
@@ -31,11 +42,68 @@ const CONNECT_SCAN_TIMEOUT_MS = 8_000;
 const BATTERY_REQUEST_TIMEOUT_MS = 1_500;
 const LIVE_UPDATES_RECONNECT_DELAY_MS = 3_000;
 const HISTORY_WRITE_BATCH_SIZE = 250;
+const HISTORY_WRITE_MAX_RETRIES = 4;
+const HISTORY_WRITE_RETRY_DELAY_MS = 150;
+const HISTORY_INSERT_SQL = `
+  INSERT INTO heart_rate (bpm, time, rr_intervals, imu_data, sensor_data, synced)
+  VALUES (?, ?, ?, ?, ?, 0)
+  ON CONFLICT(time) DO UPDATE SET
+    bpm = excluded.bpm,
+    rr_intervals = excluded.rr_intervals,
+    imu_data = excluded.imu_data,
+    sensor_data = excluded.sensor_data
+`;
+
+const SHOULD_LOG_SYNC_IMPORT_PERF =
+  typeof __DEV__ !== 'undefined' &&
+  __DEV__ &&
+  (typeof process === 'undefined' || process.env.NODE_ENV !== 'test');
+
+type PerformanceLogValue = string | number | boolean | null;
 
 function delay(ms: number) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+function logSyncImportPerfSummary(label: string, details: Record<string, PerformanceLogValue>) {
+  if (!SHOULD_LOG_SYNC_IMPORT_PERF) {
+    return;
+  }
+
+  const suffix = Object.entries(details)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(' ');
+  console.info(`[mobile-perf] ${label}${suffix ? ` ${suffix}` : ''}`);
+}
+
+function toSyncImportPerfLogDetails(summary: SyncImportPerformanceSummary): Record<string, PerformanceLogValue> {
+  return {
+    source: summary.source,
+    status: summary.status,
+    total_ms: summary.totalMs,
+    connect_ms: summary.connectMs,
+    history_request_to_complete_ms: summary.historyRequestToCompleteMs,
+    history_receive_ms: summary.historyReceiveMs,
+    db_flush_ms_total: summary.dbFlushMsTotal,
+    db_flush_ms_avg: summary.dbFlushMsAvg,
+    db_flush_ms_max: summary.dbFlushMsMax,
+    ack_wait_ms_total: summary.ackWaitMsTotal,
+    ack_wait_ms_avg: summary.ackWaitMsAvg,
+    ack_wait_ms_max: summary.ackWaitMsMax,
+    imported_rows: summary.importedRows,
+    persisted_rows: summary.persistedRows,
+    flush_count: summary.flushCount,
+    flush_rows_total: summary.flushRowsTotal,
+    history_end_count: summary.historyEndCount,
+    ack_sent_count: summary.ackSentCount,
+    max_pending_rows: summary.maxPendingRows,
+    rows_per_sec_receive: summary.rowsPerSecReceive,
+    rows_per_sec_persist: summary.rowsPerSecPersist,
+    suspected_bottleneck: summary.suspectedBottleneck,
+    error: summary.error,
+  };
 }
 
 function serializeSensorData(value: SensorDataPacket | null) {
@@ -59,7 +127,46 @@ function rrToString(rr: number[]) {
   return rr.join(',');
 }
 
-type TransactionWriter = Pick<SQLiteDatabase, 'runAsync' | 'execAsync'>;
+function toError(error: unknown, fallbackMessage: string) {
+  return error instanceof Error ? error : new Error(fallbackMessage);
+}
+
+function isRetryableSqliteWriteError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const message = error.message.toLowerCase();
+  return (
+    message.includes('database is locked') ||
+    message.includes('database locked') ||
+    message.includes('database is busy') ||
+    message.includes('database busy')
+  );
+}
+
+async function retryHistoryWrite<T>(task: () => Promise<T>): Promise<T> {
+  let attempt = 0;
+
+  while (true) {
+    try {
+      return await task();
+    } catch (error) {
+      attempt += 1;
+      if (!isRetryableSqliteWriteError(error) || attempt > HISTORY_WRITE_MAX_RETRIES) {
+        throw error;
+      }
+
+      await delay(HISTORY_WRITE_RETRY_DELAY_MS * attempt);
+    }
+  }
+}
+
+type TransactionWriter = Pick<SQLiteDatabase, 'runAsync' | 'execAsync'> & {
+  prepareAsync?: SQLiteDatabase['prepareAsync'];
+};
+
+type PreparedTransactionStatement = Pick<SQLiteStatement, 'executeAsync' | 'finalizeAsync'>;
 
 async function withExclusiveTransaction(
   db: SQLiteDatabase,
@@ -73,6 +180,43 @@ async function withExclusiveTransaction(
   }
 
   await callback(db);
+}
+
+async function writeHistoryRows(
+  tx: TransactionWriter,
+  rows: PendingHistoryRow[],
+) {
+  if (typeof tx.prepareAsync !== 'function') {
+    for (const row of rows) {
+      await tx.runAsync(
+        HISTORY_INSERT_SQL,
+        row.bpm,
+        row.time,
+        row.rrIntervals,
+        row.imuData,
+        row.sensorData,
+      );
+    }
+    return;
+  }
+
+  let statement: PreparedTransactionStatement | null = null;
+
+  try {
+    statement = await tx.prepareAsync(HISTORY_INSERT_SQL);
+
+    for (const row of rows) {
+      await statement.executeAsync(
+        row.bpm,
+        row.time,
+        row.rrIntervals,
+        row.imuData,
+        row.sensorData,
+      );
+    }
+  } finally {
+    await statement?.finalizeAsync();
+  }
 }
 
 interface DeviceStateUpdate {
@@ -95,6 +239,12 @@ interface PendingHistoryRow {
   rrIntervals: string;
   imuData: string | null;
   sensorData: string | null;
+}
+
+interface PendingHistoryAck {
+  cursor: number;
+  targetPersistedCount: number;
+  enqueuedAtMs: number;
 }
 
 export interface SyncExecutionOutcome {
@@ -671,15 +821,126 @@ export class WearableSyncService {
     let resolvedDeviceId = selected.id;
     let resolvedDeviceName = selected.name;
     let pendingHistoryRows: PendingHistoryRow[] = [];
+    let pendingHistoryAcks: PendingHistoryAck[] = [];
     let historyFlushQueued = false;
+    let historyAckQueued = false;
     let writeQueue = Promise.resolve();
     let commandQueue = Promise.resolve();
+    let writeFailure: Error | null = null;
+    let failSync: ((error: Error) => void) | null = null;
+    let queuedPersistableHistoryRowCount = 0;
+    let persistedHistoryRowCount = 0;
+    const syncStartedAtMs = Date.now();
+    let connectStartedAtMs: number | null = null;
+    let connectCompletedAtMs: number | null = null;
+    let historyRequestedAtMs: number | null = null;
+    let historyFirstPacketAtMs: number | null = null;
+    let historyLastPacketAtMs: number | null = null;
+    let historyCompletedAtMs: number | null = null;
+    let historyEndCount = 0;
+    let ackSentCount = 0;
+    let flushCount = 0;
+    let flushRowsTotal = 0;
+    let flushMsTotal = 0;
+    let flushMsMax = 0;
+    let ackWaitMsTotal = 0;
+    let ackWaitMsMax = 0;
+    let maxPendingHistoryRows = 0;
     const dataAssembler = new PacketAssembler();
     const responseAssembler = new PacketAssembler();
     const subscriptions: Subscription[] = [];
 
+    const summarizeSyncPerf = (
+      status: BackgroundSyncResult,
+      errorMessage?: string | null,
+    ): SyncImportPerformanceSummary => {
+      const connectMs =
+        connectStartedAtMs !== null && connectCompletedAtMs !== null
+          ? connectCompletedAtMs - connectStartedAtMs
+          : null;
+      const historyReceiveMs =
+        historyFirstPacketAtMs !== null && historyLastPacketAtMs !== null
+          ? Math.max(historyLastPacketAtMs - historyFirstPacketAtMs, 0)
+          : null;
+      const requestToCompleteMs =
+        historyRequestedAtMs !== null && historyCompletedAtMs !== null
+          ? Math.max(historyCompletedAtMs - historyRequestedAtMs, 0)
+          : null;
+      const averageFlushMs = flushCount > 0 ? Math.round(flushMsTotal / flushCount) : null;
+      const averageAckWaitMs = ackSentCount > 0 ? Math.round(ackWaitMsTotal / ackSentCount) : null;
+      const receiveRowsPerSecond =
+        historyReceiveMs && historyReceiveMs > 0
+          ? Math.round((importedReadings * 1000) / historyReceiveMs)
+          : null;
+      const persistedRowsPerSecond =
+        flushMsTotal > 0
+          ? Math.round((persistedHistoryRowCount * 1000) / flushMsTotal)
+          : null;
+
+      let suspectedBottleneck: 'ble' | 'db' | 'mixed' | 'unknown' = 'unknown';
+      if (importedReadings === 0) {
+        suspectedBottleneck = 'unknown';
+      } else if (ackWaitMsTotal > 1000 || maxPendingHistoryRows > HISTORY_WRITE_BATCH_SIZE * 3) {
+        suspectedBottleneck = 'db';
+      } else if (historyReceiveMs !== null && flushMsTotal < Math.max(historyReceiveMs * 0.2, 250)) {
+        suspectedBottleneck = 'ble';
+      } else if (flushCount > 0) {
+        suspectedBottleneck = 'mixed';
+      }
+
+      const summary: SyncImportPerformanceSummary = {
+        source,
+        status,
+        capturedAt: formatSqliteDateTime(new Date()),
+        totalMs: Date.now() - syncStartedAtMs,
+        connectMs,
+        historyRequestToCompleteMs: requestToCompleteMs,
+        historyReceiveMs,
+        dbFlushMsTotal: flushMsTotal,
+        dbFlushMsAvg: averageFlushMs,
+        dbFlushMsMax: flushMsMax,
+        ackWaitMsTotal: ackWaitMsTotal,
+        ackWaitMsAvg: averageAckWaitMs,
+        ackWaitMsMax: ackWaitMsMax,
+        importedRows: importedReadings,
+        persistedRows: persistedHistoryRowCount,
+        flushCount,
+        flushRowsTotal,
+        historyEndCount,
+        ackSentCount,
+        maxPendingRows: maxPendingHistoryRows,
+        rowsPerSecReceive: receiveRowsPerSecond,
+        rowsPerSecPersist: persistedRowsPerSecond,
+        suspectedBottleneck,
+        error: errorMessage ?? null,
+      };
+
+      logSyncImportPerfSummary('sync.import.summary', toSyncImportPerfLogDetails(summary));
+      return summary;
+    };
+
+    const recordWriteFailure = (error: unknown) => {
+      const resolved = toError(error, 'Failed to persist wearable history.');
+      if (!writeFailure) {
+        writeFailure = resolved;
+      }
+      return writeFailure;
+    };
+
     const queueWrite = (task: () => Promise<void>) => {
-      writeQueue = writeQueue.then(task);
+      writeQueue = writeQueue
+        .catch(() => {})
+        .then(async () => {
+          if (writeFailure) {
+            throw writeFailure;
+          }
+
+          try {
+            await task();
+          } catch (error) {
+            throw recordWriteFailure(error);
+          }
+        });
       return writeQueue;
     };
 
@@ -688,56 +949,103 @@ export class WearableSyncService {
       return commandQueue;
     };
 
-    const flushPendingHistoryRows = async () => {
+    const flushPendingHistoryRows = async (limit = HISTORY_WRITE_BATCH_SIZE) => {
       if (pendingHistoryRows.length === 0) {
         return;
       }
 
-      const rows = pendingHistoryRows;
-      pendingHistoryRows = [];
+      const rows = pendingHistoryRows.slice(0, Math.min(limit, pendingHistoryRows.length));
+      const flushStartedAt = Date.now();
 
-      await withExclusiveTransaction(this.db, async (tx) => {
-        for (const row of rows) {
-          await tx.runAsync(
-            `
-              INSERT INTO heart_rate (bpm, time, rr_intervals, imu_data, sensor_data, synced)
-              VALUES (?, ?, ?, ?, ?, 0)
-              ON CONFLICT(time) DO UPDATE SET
-                bpm = excluded.bpm,
-                rr_intervals = excluded.rr_intervals,
-                imu_data = excluded.imu_data,
-                sensor_data = excluded.sensor_data
-            `,
-            row.bpm,
-            row.time,
-            row.rrIntervals,
-            row.imuData,
-            row.sensorData,
-          );
-        }
+      await retryHistoryWrite(async () => {
+        await withExclusiveTransaction(this.db, async (tx) => {
+          await writeHistoryRows(tx, rows);
+        });
       });
+
+      pendingHistoryRows.splice(0, rows.length);
+      persistedHistoryRowCount += rows.length;
+      const flushDurationMs = Date.now() - flushStartedAt;
+      flushCount += 1;
+      flushRowsTotal += rows.length;
+      flushMsTotal += flushDurationMs;
+      flushMsMax = Math.max(flushMsMax, flushDurationMs);
+    };
+
+    const drainPendingHistoryRows = async () => {
+      while (pendingHistoryRows.length > 0) {
+        await flushPendingHistoryRows();
+      }
     };
 
     const queuePendingHistoryFlush = () => {
-      if (historyFlushQueued) {
+      if (historyFlushQueued || writeFailure) {
         return;
       }
 
       historyFlushQueued = true;
       void queueWrite(async () => {
-        try {
-          await flushPendingHistoryRows();
-        } finally {
+        await flushPendingHistoryRows();
+      })
+        .catch((error) => {
+          failSync?.(recordWriteFailure(error));
+        })
+        .finally(() => {
           historyFlushQueued = false;
 
-          if (pendingHistoryRows.length >= HISTORY_WRITE_BATCH_SIZE) {
+          if (!writeFailure && pendingHistoryRows.length >= HISTORY_WRITE_BATCH_SIZE) {
             queuePendingHistoryFlush();
           }
         }
-      }).catch(() => {});
+      );
+    };
+
+    const queuePendingHistoryAckProcessing = () => {
+      if (historyAckQueued || writeFailure) {
+        return;
+      }
+
+      historyAckQueued = true;
+      void queueWrite(async () => {
+        while (pendingHistoryAcks.length > 0) {
+          const nextAck = pendingHistoryAcks[0];
+
+          while (persistedHistoryRowCount < nextAck.targetPersistedCount) {
+            if (pendingHistoryRows.length === 0) {
+              throw new Error('History ACK is waiting for rows that were not available to flush.');
+            }
+
+            await flushPendingHistoryRows();
+          }
+
+          await queueCommand(() =>
+            this.sendCommand(
+              device!,
+              historyEndPacket(nextAck.cursor),
+            ),
+          );
+          const ackWaitMs = Date.now() - nextAck.enqueuedAtMs;
+          ackSentCount += 1;
+          ackWaitMsTotal += ackWaitMs;
+          ackWaitMsMax = Math.max(ackWaitMsMax, ackWaitMs);
+          pendingHistoryAcks.shift();
+        }
+      })
+        .catch((error) => {
+          failSync?.(recordWriteFailure(error));
+        })
+        .finally(() => {
+          historyAckQueued = false;
+
+          if (!writeFailure && pendingHistoryAcks.length > 0) {
+            queuePendingHistoryAckProcessing();
+          }
+        }
+      );
     };
 
     try {
+      connectStartedAtMs = Date.now();
       ({
         device,
         resolvedDeviceId,
@@ -750,6 +1058,7 @@ export class WearableSyncService {
           allowRescan: source === 'foreground',
         },
       ));
+      connectCompletedAtMs = Date.now();
 
       const completion = new Promise<void>((resolve, reject) => {
         let settled = false;
@@ -778,6 +1087,7 @@ export class WearableSyncService {
           clearTimers();
           reject(error);
         };
+        failSync = fail;
 
         const watchdogTimer = setInterval(() => {
           const timeoutError = watchdog.getTimeoutError({
@@ -806,7 +1116,16 @@ export class WearableSyncService {
               const parsed = parseNotification(frame);
               this.recordLiveEvent(parsed, onLiveEvent);
 
+              if (writeFailure) {
+                fail(writeFailure);
+                return;
+              }
+
               if (parsed.type === 'history') {
+                if (historyFirstPacketAtMs === null) {
+                  historyFirstPacketAtMs = Date.now();
+                }
+                historyLastPacketAtMs = Date.now();
                 importedReadings += 1;
                 lastHistoryCursor = parsed.reading.unix;
                 watchdog.markProgress();
@@ -831,6 +1150,8 @@ export class WearableSyncService {
                   imuData: serializeImuData(parsed.reading.imuData),
                   sensorData: serializeSensorData(parsed.reading.sensorData),
                 });
+                queuedPersistableHistoryRowCount += 1;
+                maxPendingHistoryRows = Math.max(maxPendingHistoryRows, pendingHistoryRows.length);
 
                 if (pendingHistoryRows.length >= HISTORY_WRITE_BATCH_SIZE) {
                   queuePendingHistoryFlush();
@@ -848,19 +1169,17 @@ export class WearableSyncService {
               if (parsed.type === 'metadata') {
                 watchdog.markProgress();
                 if (parsed.metadata.kind === 2) {
-                  void queueCommand(() =>
-                    this.sendCommand(
-                      device!,
-                      historyEndPacket(parsed.metadata.data),
-                    ),
-                  ).catch((commandError) => {
-                    fail(
-                      commandError instanceof Error ? commandError : new Error('Failed to acknowledge sync chunk.'),
-                    );
+                  historyEndCount += 1;
+                  pendingHistoryAcks.push({
+                    cursor: parsed.metadata.data,
+                    targetPersistedCount: queuedPersistableHistoryRowCount,
+                    enqueuedAtMs: Date.now(),
                   });
+                  queuePendingHistoryAckProcessing();
                 }
 
                 if (parsed.metadata.kind === 3) {
+                  historyCompletedAtMs = Date.now();
                   queuePendingHistoryFlush();
                   succeed();
                 }
@@ -890,11 +1209,12 @@ export class WearableSyncService {
       await this.sendCommand(device, enterHighFrequencySyncPacket());
 
       onProgress?.({ status: 'syncing', message: 'Requesting wearable history...' });
+      historyRequestedAtMs = Date.now();
       await this.sendCommand(device, historyStartPacket());
       await completion;
 
       await queueWrite(async () => {
-        await flushPendingHistoryRows();
+        await drainPendingHistoryRows();
       });
       await writeQueue;
       if (earliestImportedTime && latestImportedTime) {
@@ -914,6 +1234,7 @@ export class WearableSyncService {
       });
 
       onProgress?.({ status: 'complete', message: `Sync complete. Imported ${importedReadings} readings.`, importedReadings });
+      await recordSyncImportSummary(this.db, summarizeSyncPerf('success')).catch(() => {});
       return {
         status: 'success',
         importedReadings,
@@ -929,10 +1250,12 @@ export class WearableSyncService {
         syncError: message,
       });
       onProgress?.({ status: 'error', message });
+      await recordSyncImportSummary(this.db, summarizeSyncPerf('error', message)).catch(() => {});
       throw error;
     } finally {
+      failSync = null;
       await queueWrite(async () => {
-        await flushPendingHistoryRows();
+        await drainPendingHistoryRows();
       }).catch(() => {});
       await commandQueue.catch(() => {});
 

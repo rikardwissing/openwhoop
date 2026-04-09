@@ -6,6 +6,7 @@ export const DERIVED_DATA_SCHEMA_VERSION = 6;
 export async function initializeDatabase(db: SQLiteDatabase) {
   await db.execAsync(`
     PRAGMA journal_mode = WAL;
+    PRAGMA busy_timeout = 10000;
     PRAGMA foreign_keys = ON;
 
     CREATE TABLE IF NOT EXISTS heart_rate (
@@ -155,7 +156,8 @@ export async function initializeDatabase(db: SQLiteDatabase) {
       notification_permission TEXT NOT NULL DEFAULT 'unknown',
       notification_baseline_at TEXT,
       lock_owner TEXT,
-      lock_started_at TEXT
+      lock_started_at TEXT,
+      last_sync_import_summary_json TEXT
     );
 
     CREATE TABLE IF NOT EXISTS performance_diagnostic_runs (
@@ -256,6 +258,13 @@ export async function initializeDatabase(db: SQLiteDatabase) {
 
   if (!derivedDataStateColumnNames.has('last_processed_from_time')) {
     await db.execAsync('ALTER TABLE derived_data_state ADD COLUMN last_processed_from_time TEXT;');
+  }
+
+  const backgroundSyncStateColumns = await db.getAllAsync<{ name: string }>('PRAGMA table_info(background_sync_state)');
+  const backgroundSyncStateColumnNames = new Set(backgroundSyncStateColumns.map((column) => column.name));
+
+  if (!backgroundSyncStateColumnNames.has('last_sync_import_summary_json')) {
+    await db.execAsync('ALTER TABLE background_sync_state ADD COLUMN last_sync_import_summary_json TEXT;');
   }
 
   if (!derivedDataStateColumnNames.has('last_processed_to_time')) {

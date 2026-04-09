@@ -1,5 +1,5 @@
 import { act, fireEvent, render, waitFor, within } from '@testing-library/react-native';
-import { ScrollView, StyleSheet } from 'react-native';
+import { ScrollView, StyleSheet, processColor } from 'react-native';
 import Svg, { Stop } from 'react-native-svg';
 
 jest.mock('@expo/vector-icons', () => {
@@ -41,6 +41,12 @@ import { formatAxisTime } from '@/utils/dateTime';
 
 function getScrollView(screen: ReturnType<typeof render>) {
   return screen.UNSAFE_getByType(ScrollView);
+}
+
+function normalizeSvgColor(value: unknown) {
+  return typeof value === 'object' && value !== null && 'payload' in value
+    ? (value as { payload: number }).payload
+    : value;
 }
 
 function createResponderEvent(locationX: number, isActive: boolean) {
@@ -527,6 +533,26 @@ describe('chart gesture ownership', () => {
     );
   });
 
+  it('renders dashed bridges across bounded missing spans in line charts', () => {
+    const screen = render(
+      <TrendChart
+        accentColor="#00ffff"
+        points={[
+          { label: 'Mon', value: 72 },
+          { label: 'Tue', value: null },
+          { label: 'Wed', value: 74 },
+        ]}
+        testID="trend-chart"
+      />,
+    );
+
+    const bridge = screen.getByTestId('trend-chart-bridge-0');
+
+    expect(bridge).toBeTruthy();
+    expect(normalizeSvgColor(bridge.props.stroke)).toBe(processColor(colors.subtle));
+    expect(bridge.props.strokeDasharray).toEqual(['2.2', '2.2']);
+  });
+
   it('renders daily aggregate series as rounded bars when bar mode is enabled', () => {
     const screen = render(
       <TrendChart
@@ -544,6 +570,7 @@ describe('chart gesture ownership', () => {
     expect(screen.getByTestId('trend-chart-bar-0')).toBeTruthy();
     expect(screen.getByTestId('trend-chart-bar-1')).toBeTruthy();
     expect(screen.getByTestId('trend-chart-bar-2')).toBeTruthy();
+    expect(screen.queryByTestId('trend-chart-bridge-0')).toBeNull();
   });
 
   it('keeps the last bar gap consistent with the preceding bars', () => {
@@ -649,6 +676,41 @@ describe('chart gesture ownership', () => {
     expect(bubble).toBeTruthy();
     expect(within(bubble).getByText('Tue')).toBeTruthy();
     expect(within(bubble).getByText('76 bpm')).toBeTruthy();
+  });
+
+  it('keeps missing trend buckets selectable without drawing an active dot', () => {
+    const screen = render(
+      <TrendChart
+        accentColor="#00ffff"
+        points={[
+          { label: 'Mon', value: 72 },
+          { label: 'Tue', value: null },
+          { label: 'Wed', value: 74 },
+        ]}
+        selectionValueFormatter={(selection) =>
+          selection.point.value === null ? 'No data' : `${selection.point.value} bpm`
+        }
+        testID="trend-chart"
+      />,
+    );
+
+    const viewport = screen.getByTestId('trend-chart-viewport');
+    const overlay = screen.getByTestId('trend-chart');
+
+    act(() => {
+      viewport.props.onLayout?.({ nativeEvent: { layout: { width: 120, height: 148 } } });
+    });
+
+    act(() => {
+      overlay.props.onResponderGrant?.(createResponderEvent(60, true));
+    });
+
+    const bubble = screen.getByTestId('trend-chart-selection-bubble');
+
+    expect(bubble).toBeTruthy();
+    expect(within(bubble).getByText('Tue')).toBeTruthy();
+    expect(within(bubble).getByText('No data')).toBeTruthy();
+    expect(screen.queryByTestId('trend-chart-active-dot')).toBeNull();
   });
 
   it('reports horizontal drags on the trend chart axis row', () => {
@@ -819,5 +881,71 @@ describe('chart gesture ownership', () => {
     expect(bubble).toBeTruthy();
     expect(within(bubble).getByText('18')).toBeTruthy();
     expect(within(bubble).getByText('78 BPM')).toBeTruthy();
+  });
+
+  it('keeps dashed heart-chart bridges stable while zooming between windows', async () => {
+    const screen = render(
+      <PannableHeartChart
+        chartTestID="heart-chart"
+        jumpToLatestSignal={0}
+        markers={[
+          {
+            id: 'sleep-focus',
+            kind: 'sleep',
+            label: 'Sleep',
+            timeLabel: '1:00 AM - 4:00 AM',
+            startFraction: 0.25,
+            endFraction: 0.5,
+          },
+        ]}
+        points={Array.from({ length: 120 }, (_, index) => ({
+          label: `${index}`,
+          value: index >= 34 && index <= 36 ? null : 60 + (index % 20),
+        }))}
+        windowPointCount={60}
+      />,
+    );
+
+    const viewport = screen.getByTestId('heart-chart-viewport');
+
+    act(() => {
+      viewport.props.onLayout?.({ nativeEvent: { layout: { width: 240, height: 150 } } });
+    });
+
+    expect(screen.getByTestId('heart-chart-bridge-0')).toBeTruthy();
+
+    act(() => {
+      fireEvent.press(screen.getByTestId('heart-chart-marker-sleep-focus'));
+    });
+
+    expect(screen.getByTestId('heart-chart-bridge-0')).toBeTruthy();
+
+    act(() => {
+      screen.rerender(
+        <PannableHeartChart
+          chartTestID="heart-chart"
+          jumpToLatestSignal={1}
+          markers={[
+            {
+              id: 'sleep-focus',
+              kind: 'sleep',
+              label: 'Sleep',
+              timeLabel: '1:00 AM - 4:00 AM',
+              startFraction: 0.25,
+              endFraction: 0.5,
+            },
+          ]}
+          points={Array.from({ length: 120 }, (_, index) => ({
+            label: `${index}`,
+            value: index >= 34 && index <= 36 ? null : 60 + (index % 20),
+          }))}
+          windowPointCount={60}
+        />,
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('heart-chart-bridge-0')).toBeTruthy();
+    });
   });
 });

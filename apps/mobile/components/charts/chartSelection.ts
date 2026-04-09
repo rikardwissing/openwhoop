@@ -17,6 +17,16 @@ export interface TrendDomain {
   max: number;
 }
 
+export interface TrendLinePoint {
+  x: number;
+  y: number;
+}
+
+export interface TrendLineGeometry {
+  bridges: TrendLinePoint[][];
+  segments: TrendLinePoint[][];
+}
+
 interface TrendChartCoordinate extends TrendSelection {
   x: number;
   y: number | null;
@@ -151,6 +161,49 @@ export function buildTrendCoordinates(
     x: trendPointX(index, points.length, mode),
     y: point.value === null ? null : mapTrendValueToY(point.value, domain),
   }));
+}
+
+export function buildTrendLineGeometry(
+  coordinates: ReadonlyArray<{ x: number; y: number | null }>,
+): TrendLineGeometry {
+  const bridges: TrendLinePoint[][] = [];
+  const segments: TrendLinePoint[][] = [];
+  let current: TrendLinePoint[] = [];
+  let previousRealPoint: TrendLinePoint | null = null;
+  let pendingBridgeStart: TrendLinePoint | null = null;
+
+  for (const coordinate of coordinates) {
+    if (coordinate.y === null) {
+      if (current.length > 0) {
+        segments.push(current);
+        current = [];
+      }
+
+      if (previousRealPoint && !pendingBridgeStart) {
+        pendingBridgeStart = previousRealPoint;
+      }
+      continue;
+    }
+
+    const point = { x: coordinate.x, y: coordinate.y };
+
+    if (pendingBridgeStart) {
+      bridges.push([pendingBridgeStart, point]);
+      pendingBridgeStart = null;
+    }
+
+    current.push(point);
+    previousRealPoint = point;
+  }
+
+  if (current.length > 0) {
+    segments.push(current);
+  }
+
+  return {
+    bridges,
+    segments,
+  };
 }
 
 export function selectTrendPointAtX(

@@ -102,6 +102,7 @@ function defaultBackgroundSyncState(): BackgroundSyncState {
     lastImportedReadings: null,
     notificationPermission: 'unknown',
     notificationBaselineAt: null,
+    lastSyncImportSummary: null,
   };
 }
 

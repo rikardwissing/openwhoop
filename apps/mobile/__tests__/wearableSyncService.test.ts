@@ -69,6 +69,7 @@ class MockDevice {
   bodyStatusRaw: 0 | 1 | null = null;
   failBatteryRequest = false;
   historyFrames: Array<{ characteristic: string; frame: Uint8Array }> = [];
+  historyAckFrames: Array<{ characteristic: string; frame: Uint8Array }> = [];
   sentCommands: number[] = [];
   private readonly monitors = new Map<string, Set<DeviceMonitor>>();
 
@@ -136,6 +137,15 @@ class MockDevice {
 
     if (packet.cmd === CommandNumber.SendHistoricalData) {
       for (const entry of this.historyFrames) {
+        this.emitFrame(entry.characteristic, entry.frame);
+      }
+      return;
+    }
+
+    if (packet.cmd === CommandNumber.HistoricalDataResult) {
+      const frames = this.historyAckFrames;
+      this.historyAckFrames = [];
+      for (const entry of frames) {
         this.emitFrame(entry.characteristic, entry.frame);
       }
     }
@@ -283,16 +293,34 @@ class MockDb {
 
 class BufferedHistoryDb extends MockDb {
   heartInsertCount = 0;
+  exclusiveTransactionCount = 0;
   heartWriteTransactionCount = 0;
+  failHeartWriteTransactionsRemaining = 0;
 
   async withExclusiveTransactionAsync<T>(
     callback: (tx: Pick<BufferedHistoryDb, 'getFirstAsync' | 'runAsync' | 'execAsync'>) => Promise<T>,
   ) {
-    this.heartWriteTransactionCount += 1;
+    this.exclusiveTransactionCount += 1;
+    let recordedHeartWrite = false;
+
     return callback({
       getFirstAsync: this.getFirstAsync.bind(this),
-      runAsync: this.runAsync.bind(this),
       execAsync: this.execAsync.bind(this),
+      runAsync: async (sql: string, ...args: Array<string | number | null>) => {
+        if (sql.includes('INSERT INTO heart_rate')) {
+          if (!recordedHeartWrite) {
+            recordedHeartWrite = true;
+            this.heartWriteTransactionCount += 1;
+          }
+
+          if (this.failHeartWriteTransactionsRemaining > 0) {
+            this.failHeartWriteTransactionsRemaining -= 1;
+            throw new Error('database is locked');
+          }
+        }
+
+        return this.runAsync(sql, ...args);
+      },
     });
   }
 
@@ -308,6 +336,33 @@ class BufferedHistoryDb extends MockDb {
     if (sql.includes('INSERT INTO heart_rate')) {
       this.heartInsertCount += 1;
       return;
+    }
+
+    return super.runAsync(sql, ...args);
+  }
+}
+
+class DelayedBufferedHistoryDb extends BufferedHistoryDb {
+  private releaseNextHeartWritePromise: Promise<void> | null = null;
+  private releaseNextHeartWriteResolve: (() => void) | null = null;
+
+  blockNextHeartWrite() {
+    this.releaseNextHeartWritePromise = new Promise<void>((resolve) => {
+      this.releaseNextHeartWriteResolve = resolve;
+    });
+  }
+
+  releaseNextHeartWrite() {
+    this.releaseNextHeartWriteResolve?.();
+    this.releaseNextHeartWriteResolve = null;
+    this.releaseNextHeartWritePromise = null;
+  }
+
+  async runAsync(sql: string, ...args: Array<string | number | null>) {
+    if (sql.includes('INSERT INTO heart_rate') && this.releaseNextHeartWritePromise) {
+      const gate = this.releaseNextHeartWritePromise;
+      this.releaseNextHeartWritePromise = null;
+      await gate;
     }
 
     return super.runAsync(sql, ...args);
@@ -637,6 +692,7 @@ describe('WearableSyncService battery refresh', () => {
     expect(result.importedReadings).toBe(251);
     expect(db.heartInsertCount).toBe(251);
     expect(db.heartWriteTransactionCount).toBe(2);
+    expect(db.exclusiveTransactionCount).toBe(3);
     expect(mockRefreshHeartAggregatesForRange).toHaveBeenCalledWith(
       db,
       formatSqliteDateTime(new Date(1_710_000_001 * 1000)),
@@ -677,5 +733,157 @@ describe('WearableSyncService battery refresh', () => {
     expect(db.heartInsertCount).toBe(0);
     expect(mockRefreshHeartAggregatesForRange).not.toHaveBeenCalled();
     expect(mockMarkDerivedRefreshPending).not.toHaveBeenCalled();
+  });
+
+  it('keeps large history replays split into bounded write transactions', async () => {
+    const device = new MockDevice();
+    device.batteryTenthsPercent = 845;
+    device.historyFrames = [
+      ...Array.from({ length: 501 }, (_, index) => ({
+        characteristic: DATA_FROM_STRAP_UUID,
+        frame: framePacket(
+          PacketType.HistoricalData,
+          0,
+          0,
+          createHistoryPayload(1_710_100_001 + index * 60),
+        ),
+      })),
+      {
+        characteristic: DATA_FROM_STRAP_UUID,
+        frame: framePacket(
+          PacketType.Metadata,
+          0,
+          MetadataType.HistoryComplete,
+          createMetadataPayload(1_710_100_001 + 501 * 60, 0),
+        ),
+      },
+    ];
+    const db = new BufferedHistoryDb(null);
+    const manager = new MockBleManager(device);
+    const service = new WearableSyncService(db as never, manager as never);
+
+    const result = await service.syncSelected();
+
+    expect(result.importedReadings).toBe(501);
+    expect(db.heartInsertCount).toBe(501);
+    expect(db.heartWriteTransactionCount).toBe(3);
+  });
+
+  it('retries transient locked database writes without dropping history rows', async () => {
+    const device = new MockDevice();
+    device.batteryTenthsPercent = 845;
+    device.historyFrames = [
+      ...Array.from({ length: 251 }, (_, index) => ({
+        characteristic: DATA_FROM_STRAP_UUID,
+        frame: framePacket(
+          PacketType.HistoricalData,
+          0,
+          0,
+          createHistoryPayload(1_710_200_001 + index * 60),
+        ),
+      })),
+      {
+        characteristic: DATA_FROM_STRAP_UUID,
+        frame: framePacket(
+          PacketType.Metadata,
+          0,
+          MetadataType.HistoryComplete,
+          createMetadataPayload(1_710_200_001 + 251 * 60, 0),
+        ),
+      },
+    ];
+    const db = new BufferedHistoryDb(null);
+    db.failHeartWriteTransactionsRemaining = 1;
+    const manager = new MockBleManager(device);
+    const service = new WearableSyncService(db as never, manager as never);
+
+    const result = await service.syncSelected();
+
+    expect(result.importedReadings).toBe(251);
+    expect(db.heartInsertCount).toBe(251);
+    expect(db.heartWriteTransactionCount).toBe(3);
+    await expect(service.getDeviceState()).resolves.toMatchObject({
+      syncError: null,
+    });
+  });
+
+  it('waits to acknowledge a history chunk until its rows are committed', async () => {
+    const device = new MockDevice();
+    device.batteryTenthsPercent = 845;
+    device.historyFrames = [
+      {
+        characteristic: DATA_FROM_STRAP_UUID,
+        frame: framePacket(PacketType.HistoricalData, 0, 0, createHistoryPayload(1_710_300_001)),
+      },
+      {
+        characteristic: DATA_FROM_STRAP_UUID,
+        frame: framePacket(
+          PacketType.Metadata,
+          0,
+          MetadataType.HistoryEnd,
+          createMetadataPayload(1_710_300_001, 1_710_300_001),
+        ),
+      },
+    ];
+    device.historyAckFrames = [
+      {
+        characteristic: DATA_FROM_STRAP_UUID,
+        frame: framePacket(
+          PacketType.Metadata,
+          0,
+          MetadataType.HistoryComplete,
+          createMetadataPayload(1_710_300_001, 0),
+        ),
+      },
+    ];
+    const db = new DelayedBufferedHistoryDb(null);
+    db.blockNextHeartWrite();
+    const manager = new MockBleManager(device);
+    const service = new WearableSyncService(db as never, manager as never);
+
+    const syncPromise = service.syncSelected();
+
+    for (let attempt = 0; attempt < 20 && db.heartWriteTransactionCount === 0; attempt += 1) {
+      await new Promise((resolve) => {
+        setTimeout(resolve, 50);
+      });
+    }
+
+    expect(db.heartWriteTransactionCount).toBe(1);
+
+    expect(device.sentCommands).not.toContain(CommandNumber.HistoricalDataResult);
+
+    db.releaseNextHeartWrite();
+    const result = await syncPromise;
+
+    expect(result.importedReadings).toBe(1);
+    expect(device.sentCommands).toContain(CommandNumber.HistoricalDataResult);
+  });
+
+  it('does not acknowledge a history chunk when persisting it fails', async () => {
+    const device = new MockDevice();
+    device.batteryTenthsPercent = 845;
+    device.historyFrames = [
+      {
+        characteristic: DATA_FROM_STRAP_UUID,
+        frame: framePacket(PacketType.HistoricalData, 0, 0, createHistoryPayload(1_710_400_001)),
+      },
+      {
+        characteristic: DATA_FROM_STRAP_UUID,
+        frame: framePacket(
+          PacketType.Metadata,
+          0,
+          MetadataType.HistoryEnd,
+          createMetadataPayload(1_710_400_001, 1_710_400_001),
+        ),
+      },
+    ];
+    const db = new BufferedHistoryDb(null);
+    db.failHeartWriteTransactionsRemaining = Number.MAX_SAFE_INTEGER;
+    const manager = new MockBleManager(device);
+    const service = new WearableSyncService(db as never, manager as never);
+
+    await expect(service.syncSelected()).rejects.toThrow('database is locked');
+    expect(device.sentCommands).not.toContain(CommandNumber.HistoricalDataResult);
   });
 });

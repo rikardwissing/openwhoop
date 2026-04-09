@@ -149,6 +149,7 @@ export const defaultWearableSyncContextValue: WearableSyncContextValue = {
     lastImportedReadings: null,
     notificationPermission: 'unknown',
     notificationBaselineAt: null,
+    lastSyncImportSummary: null,
   },
   backgroundSyncDiagnostics: {
     apiStatus: 'unknown',

@@ -27,6 +27,7 @@ jest.mock('@/services/background/backgroundSyncState', () => ({
     lastImportedReadings: null,
     notificationPermission: 'unknown',
     notificationBaselineAt: null,
+    lastSyncImportSummary: null,
   })),
 }));
 
@@ -89,6 +90,7 @@ jest.mock('@/services/databaseExport', () => ({
 
 function createWearableContextValue(overrides: Partial<{
   deviceState: DeviceState;
+  backgroundSyncState: typeof defaultWearableSyncContextValue.backgroundSyncState;
   backgroundSyncDiagnostics: typeof defaultWearableSyncContextValue.backgroundSyncDiagnostics;
   liveEvents: WearableLiveEvent[];
   progress: SyncProgress;
@@ -110,6 +112,10 @@ function createWearableContextValue(overrides: Partial<{
     deviceState: {
       ...defaultWearableSyncContextValue.deviceState,
       ...overrides.deviceState,
+    },
+    backgroundSyncState: {
+      ...defaultWearableSyncContextValue.backgroundSyncState,
+      ...overrides.backgroundSyncState,
     },
   };
 }
@@ -213,8 +219,8 @@ describe('screen rendering', () => {
       },
     });
 
-    expect(await screen.findByText('Live')).toBeTruthy();
     expect(await screen.findByText('68 bpm')).toBeTruthy();
+    expect(screen.queryByText('Live')).toBeNull();
   });
 
   it('renders the dashboard heart snapshot immediately while upgrading to the 7d timeline', async () => {
@@ -563,11 +569,53 @@ describe('screen rendering', () => {
     expect(screen.getByText('15m')).toBeTruthy();
     expect(screen.getByText('Last started')).toBeTruthy();
     expect(screen.getByText('Last finished')).toBeTruthy();
+    expect(screen.getByText('Latest Sync Profile')).toBeTruthy();
+    expect(screen.getByText('No sync profile has been recorded on this phone yet.')).toBeTruthy();
     expect(screen.getByText('Trigger test run')).toBeTruthy();
     expect(screen.getAllByText('Unknown').length).toBeGreaterThan(0);
     expect(screen.getAllByText('--').length).toBeGreaterThan(0);
     expect(screen.queryByText('Scan nearby')).toBeNull();
     expect(screen.queryByText('Scan Results')).toBeNull();
+  });
+
+  it('renders the latest sync profile summary on settings', () => {
+    const screen = renderWithProviders(<SettingsScreen />, {
+      backgroundSyncState: {
+        lastSyncImportSummary: {
+          source: 'foreground',
+          status: 'success',
+          capturedAt: '2026-04-09 11:15:00',
+          totalMs: 12_345,
+          connectMs: 1_200,
+          historyRequestToCompleteMs: 10_800,
+          historyReceiveMs: 9_400,
+          dbFlushMsTotal: 1_800,
+          dbFlushMsAvg: 300,
+          dbFlushMsMax: 450,
+          ackWaitMsTotal: 120,
+          ackWaitMsAvg: 40,
+          ackWaitMsMax: 75,
+          importedRows: 10_000,
+          persistedRows: 9_850,
+          flushCount: 6,
+          flushRowsTotal: 9_850,
+          historyEndCount: 3,
+          ackSentCount: 3,
+          maxPendingRows: 500,
+          rowsPerSecReceive: 1_064,
+          rowsPerSecPersist: 5_472,
+          suspectedBottleneck: 'ble',
+          error: null,
+        },
+      },
+    });
+
+    expect(screen.getByText('Foreground')).toBeTruthy();
+    expect(screen.getByText('BLE')).toBeTruthy();
+    expect(screen.getByText('12.3 s')).toBeTruthy();
+    expect(screen.getByText('10,000')).toBeTruthy();
+    expect(screen.getByText(/Recorded 2026-04-09 11:15:00/)).toBeTruthy();
+    expect(screen.getByText(/Receive throughput 1,064\/s/)).toBeTruthy();
   });
 
   it('runs the background sync test trigger from settings', () => {
