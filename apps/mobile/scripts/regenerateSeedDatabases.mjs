@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, '..');
-const DERIVED_DATA_SCHEMA_VERSION = 1;
+const DERIVED_DATA_SCHEMA_VERSION = 7;
 
 const GRAVITY_STILL_THRESHOLD = 0.01;
 const GRAVITY_WINDOW_MINUTES = 15;
@@ -543,6 +543,7 @@ function resetDerivedSchema(db) {
     );
 
     DROP TABLE IF EXISTS activities;
+    DROP TABLE IF EXISTS activity_personalization;
     DROP TABLE IF EXISTS sleep_stage_segments;
     DROP TABLE IF EXISTS derived_data_state;
     DROP TABLE IF EXISTS sleep_cycles;
@@ -571,11 +572,27 @@ function resetDerivedSchema(db) {
       start TEXT NOT NULL UNIQUE,
       end TEXT NOT NULL,
       activity TEXT NOT NULL,
-      synced INTEGER NOT NULL DEFAULT 0
+      confidence REAL,
+      synced INTEGER NOT NULL DEFAULT 0,
+      source TEXT NOT NULL DEFAULT 'detected',
+      review_state TEXT NOT NULL DEFAULT 'none'
     );
 
     CREATE INDEX IF NOT EXISTS idx_activities_start ON activities(start);
     CREATE INDEX IF NOT EXISTS idx_activities_end ON activities(end);
+    CREATE INDEX IF NOT EXISTS idx_activities_source ON activities(source);
+    CREATE INDEX IF NOT EXISTS idx_activities_review_state ON activities(review_state);
+
+    CREATE TABLE activity_personalization (
+      activity_kind TEXT NOT NULL,
+      daypart TEXT NOT NULL,
+      positive_count INTEGER NOT NULL DEFAULT 0,
+      negative_count INTEGER NOT NULL DEFAULT 0,
+      min_duration_minutes REAL NOT NULL,
+      min_confidence REAL NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (activity_kind, daypart)
+    );
 
     CREATE TABLE sleep_stage_segments (
       id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
@@ -670,8 +687,8 @@ function regenerateDatabase(filePath) {
     }
 
     const insertActivity = db.prepare(`
-      INSERT INTO activities (period_id, start, end, activity, synced)
-      VALUES (?, ?, ?, ?, 0)
+      INSERT INTO activities (period_id, start, end, activity, confidence, synced, source, review_state)
+      VALUES (?, ?, ?, ?, ?, 0, 'detected', 'none')
     `);
     for (const activity of activities) {
       insertActivity.run(
@@ -679,6 +696,7 @@ function regenerateDatabase(filePath) {
         formatSqliteDateTime(activity.start),
         formatSqliteDateTime(activity.end),
         activity.activity,
+        null,
       );
     }
 

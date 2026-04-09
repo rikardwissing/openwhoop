@@ -1,6 +1,6 @@
 import { useEffect, type ReactElement } from 'react';
 import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
-import { Alert, ScrollView, processColor } from 'react-native';
+import { Alert, ScrollView, StyleSheet, processColor } from 'react-native';
 
 const mockPush = jest.fn();
 const mockReplace = jest.fn();
@@ -428,6 +428,33 @@ describe('screen rendering', () => {
     await waitFor(() => {
       expect(screen.getByTestId('history-selected-day-label').props.children).toBe('Thursday, April 23');
     });
+  });
+
+  it('distinguishes suggested heart-graph activities and lets you confirm them from the history screen', async () => {
+    const screen = renderWithProviders(<HistoryScreen />);
+
+    await screen.findByTestId('history-heart-chart');
+    await screen.findByTestId('history-heart-chart-marker-activity-tempo-run');
+
+    fireEvent.press(screen.getByTestId('history-heart-chart-marker-activity-tempo-run'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('history-heart-chart-activity-detail-panel')).toBeTruthy();
+      expect(screen.getByText('Suggested')).toBeTruthy();
+      expect(screen.getByTestId('history-heart-chart-activity-confirm')).toBeTruthy();
+      expect(screen.getByTestId('history-heart-chart-activity-relabel')).toBeTruthy();
+      expect(screen.getByTestId('history-heart-chart-activity-dismiss')).toBeTruthy();
+    });
+
+    fireEvent.press(screen.getByTestId('history-heart-chart-activity-confirm'));
+
+    await waitFor(
+      () => {
+        expect(screen.getByText('Confirmed')).toBeTruthy();
+        expect(screen.queryByTestId('history-heart-chart-activity-confirm')).toBeNull();
+      },
+      { timeout: 3000 },
+    );
   });
 
   it('runs sync from pull-to-refresh on dashboard screens when a wearable is selected', async () => {

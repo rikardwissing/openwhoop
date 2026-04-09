@@ -12,7 +12,8 @@ describe('MockHealthRepository', () => {
     expect(dashboard.recovery.score).toBe(64);
     expect(dashboard.summaryStats).toHaveLength(4);
     expect(dashboard.heartCard.series.length).toBe(145);
-    expect(dashboard.heartCard.markers).toHaveLength(1);
+    expect(dashboard.heartCard.markers).toHaveLength(4);
+    expect(dashboard.heartCard.markers.some((marker) => marker.id === 'activity-tempo-run')).toBe(true);
     expect(historyDashboard.heartCard.series.length).toBe(288);
     expect(dashboard.activitySummary).toHaveLength(3);
     expect(dashboard.insights.length).toBeGreaterThan(0);

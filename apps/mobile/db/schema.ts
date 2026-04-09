@@ -1,7 +1,7 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 
 export const APP_DATABASE_NAME = 'btwearable.db';
-export const DERIVED_DATA_SCHEMA_VERSION = 6;
+export const DERIVED_DATA_SCHEMA_VERSION = 7;
 
 export async function migrateLegacyHeartRateTable(db: SQLiteDatabase) {
   const heartRateColumns = await db.getAllAsync<{ name: string }>('PRAGMA table_info(heart_rate)');
@@ -107,6 +107,17 @@ export async function initializeDatabase(db: SQLiteDatabase) {
 
     CREATE INDEX IF NOT EXISTS idx_activities_start ON activities(start);
     CREATE INDEX IF NOT EXISTS idx_activities_end ON activities(end);
+
+    CREATE TABLE IF NOT EXISTS activity_personalization (
+      activity_kind TEXT NOT NULL,
+      daypart TEXT NOT NULL,
+      positive_count INTEGER NOT NULL DEFAULT 0,
+      negative_count INTEGER NOT NULL DEFAULT 0,
+      min_duration_minutes REAL NOT NULL,
+      min_confidence REAL NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (activity_kind, daypart)
+    );
 
     CREATE TABLE IF NOT EXISTS device_state (
       id TEXT PRIMARY KEY NOT NULL,
@@ -315,6 +326,26 @@ export async function initializeDatabase(db: SQLiteDatabase) {
     CREATE INDEX IF NOT EXISTS idx_activities_source ON activities(source);
     CREATE INDEX IF NOT EXISTS idx_activities_review_state ON activities(review_state);
   `);
+
+  const activityPersonalizationColumns = await db.getAllAsync<{ name: string }>('PRAGMA table_info(activity_personalization)');
+  const activityPersonalizationColumnNames = new Set(activityPersonalizationColumns.map((column) => column.name));
+
+  if (activityPersonalizationColumns.length > 0 && !activityPersonalizationColumnNames.has('daypart')) {
+    await db.execAsync(`
+      DROP TABLE IF EXISTS activity_personalization;
+
+      CREATE TABLE activity_personalization (
+        activity_kind TEXT NOT NULL,
+        daypart TEXT NOT NULL,
+        positive_count INTEGER NOT NULL DEFAULT 0,
+        negative_count INTEGER NOT NULL DEFAULT 0,
+        min_duration_minutes REAL NOT NULL,
+        min_confidence REAL NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (activity_kind, daypart)
+      );
+    `);
+  }
 
   const derivedDataStateColumns = await db.getAllAsync<{ name: string }>('PRAGMA table_info(derived_data_state)');
   const derivedDataStateColumnNames = new Set(derivedDataStateColumns.map((column) => column.name));

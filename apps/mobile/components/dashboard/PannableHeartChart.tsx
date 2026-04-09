@@ -51,7 +51,7 @@ import { colors, sleepStageColors, typography } from '@/constants/theme';
 import type { HeartIntradayMarker, SleepStage, TrendPoint } from '@/types/health';
 import { addMinutes, formatShortDate } from '@/utils/dateTime';
 import { formatMetricNumber } from '@/utils/formatters';
-import { mapHeartIntradayMarkersToTrendMarkers } from '@/utils/heartChartMarkers';
+import { getHeartIntradayMarkerPresentation, mapHeartIntradayMarkersToTrendMarkers } from '@/utils/heartChartMarkers';
 
 const HEART_POINT_INTERVAL_MINUTES = 5;
 const LOAD_MORE_EDGE_THRESHOLD_POINTS = 2;
@@ -488,6 +488,7 @@ interface HeartMarkerVisual {
   accessibilityLabel?: string;
   accentColor: string;
   backgroundColor: string;
+  badgeOpacity: number;
   bandWidth: number;
   centerX: number;
   endFraction: number;
@@ -638,6 +639,7 @@ function HeartMarkerBadge({
     {
       backgroundColor: colors.surfaceStrong,
       borderColor: marker.accentColor,
+      opacity: marker.badgeOpacity,
     },
   ];
 
@@ -645,11 +647,14 @@ function HeartMarkerBadge({
     return (
       <Animated.View pointerEvents="box-none" style={badgeWrapStyle}>
         <Pressable
-          accessibilityLabel={`Focus ${marker.label} ${marker.timeLabel}`}
+          accessibilityLabel={marker.accessibilityLabel ? `Focus ${marker.accessibilityLabel}` : `Focus ${marker.label} ${marker.timeLabel}`}
           accessibilityRole="button"
           hitSlop={6}
           onPress={onPress}
-          style={({ pressed }) => [badgeStyle, pressed ? styles.markerBadgePressed : null]}
+          style={({ pressed }) => [
+            badgeStyle,
+            pressed ? { opacity: marker.badgeOpacity * 0.82 } : null,
+          ]}
           testID={marker.testID}>
           <Ionicons color={marker.accentColor} name={marker.iconName} size={12} />
         </Pressable>
@@ -804,6 +809,7 @@ export function PannableHeartChart({
     () =>
       mapHeartIntradayMarkersToTrendMarkers(markers).map((marker, index) => {
         const sourceMarker = markers[index];
+        const presentation = sourceMarker ? getHeartIntradayMarkerPresentation(sourceMarker) : null;
         const startFraction = clampFraction(marker.startFraction);
         const endFraction = clampFraction(Math.max(marker.startFraction, marker.endFraction));
         const startX = startFraction * fullSeriesSpan;
@@ -818,6 +824,7 @@ export function PannableHeartChart({
           isZoomable: sourceMarker ? isZoomableHeartMarkerKind(sourceMarker.kind) : false,
           kind: sourceMarker?.kind ?? 'activity',
           label: sourceMarker?.label ?? marker.id,
+          badgeOpacity: presentation?.badgeOpacity ?? 1,
           startFraction,
           startX,
           testID: chartTestID ? `${chartTestID}-marker-${sanitizeMarkerId(marker.id)}` : undefined,

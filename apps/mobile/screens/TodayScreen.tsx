@@ -1,5 +1,5 @@
 import { useRouter } from 'expo-router';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
 import { DashboardHeroMetricCard } from '@/components/dashboard/DashboardHeroMetricCard';
@@ -16,19 +16,21 @@ import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
 import { colors, typography } from '@/constants/theme';
 import { useDashboardSnapshot, useDerivedRefreshState } from '@/hooks/useHealthData';
 import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
-import { useHealthDataVersion, useHealthRepository } from '@/providers/HealthDataProvider';
+import { useHealthDataVersion, useHealthRepository, useRefreshHealthData } from '@/providers/HealthDataProvider';
 import { useWearableSyncState } from '@/providers/WearableSyncProvider';
 import type { HeartCardSnapshot } from '@/types/health';
 import { hasFreshLiveHeartRate } from '@/types/device';
 import { getRecoveryMetricTone, getSleepMetricTone, getStrainMetricTone } from '@/utils/metricTone';
 
 const HEART_PREFETCH_RANGE = '7d';
+const HEART_ACTIVITY_REFRESH_SCOPES = ['dashboard', 'sleep', 'heart', 'wellness', 'trends'] as const;
 
 export function TodayScreen() {
   const router = useRouter();
   const state = useDashboardSnapshot();
   const derivedRefresh = useDerivedRefreshState();
   const repository = useHealthRepository();
+  const refreshHealthData = useRefreshHealthData();
   const heartVersion = useHealthDataVersion('heart');
   const { deviceState } = useWearableSyncState();
   const { onRefresh, refreshing } = useWearableRefreshControl();
@@ -107,6 +109,22 @@ export function TodayScreen() {
       cancelled = true;
     };
   }, [heartDayKey, heartVersion, repository]);
+
+  const refreshAfterActivityMutation = useCallback(() => {
+    refreshHealthData(HEART_ACTIVITY_REFRESH_SCOPES);
+  }, [refreshHealthData]);
+  const handleConfirmHeartActivity = useCallback(async (activityId: string) => {
+    await repository.confirmActivity(activityId);
+    refreshAfterActivityMutation();
+  }, [refreshAfterActivityMutation, repository]);
+  const handleDismissHeartActivity = useCallback(async (activityId: string) => {
+    await repository.dismissActivity(activityId);
+    refreshAfterActivityMutation();
+  }, [refreshAfterActivityMutation, repository]);
+  const handleRelabelHeartActivity = useCallback(async (activityId: string, activity: 'Activity' | 'Walk' | 'Workout' | 'Nap') => {
+    await repository.relabelActivity(activityId, activity);
+    refreshAfterActivityMutation();
+  }, [refreshAfterActivityMutation, repository]);
 
   if (!data && state.status === 'loading') {
     return (
@@ -193,6 +211,11 @@ export function TodayScreen() {
 
       {displayedHeartSnapshot ? (
         <HeartSnapshotCard
+          activityReviewActions={{
+            confirmActivity: handleConfirmHeartActivity,
+            dismissActivity: handleDismissHeartActivity,
+            relabelActivity: handleRelabelHeartActivity,
+          }}
           chartTestID="today-heart-chart"
           isRefreshing={isHeartCardRefreshing}
           liveHeartRateLabel={liveHeartRateLabel}

@@ -208,6 +208,9 @@ export type HeartIntradayMarkerKind = 'sleep' | 'nap' | 'activity';
 
 export interface HeartIntradayMarkerDetails {
   durationMinutes: number | null;
+  confidence?: number | null;
+  source?: ActivitySource;
+  reviewState?: ActivityReviewState;
   score?: number | null;
   asleepMinutes?: number | null;
   timeInBedMinutes?: number | null;

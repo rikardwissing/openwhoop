@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { DashboardHeroMetricCard } from '@/components/dashboard/DashboardHeroMetricCard';
@@ -15,8 +15,11 @@ import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
 import { colors, typography } from '@/constants/theme';
 import { useDashboardSnapshot } from '@/hooks/useHealthData';
 import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
+import { useHealthRepository, useRefreshHealthData } from '@/providers/HealthDataProvider';
 import { getRecoveryMetricTone, getSleepMetricTone, getStrainMetricTone } from '@/utils/metricTone';
 import { dateKey } from '@/utils/dateTime';
+
+const HEART_ACTIVITY_REFRESH_SCOPES = ['dashboard', 'sleep', 'heart', 'wellness', 'trends'] as const;
 
 function HistoryHeaderAccessory({
   canGoBack,
@@ -83,12 +86,30 @@ export function HistoryScreen() {
   const [pickerVisible, setPickerVisible] = useState(false);
   const state = useDashboardSnapshot(selectedDayKey);
   const { onRefresh, refreshing } = useWearableRefreshControl();
+  const repository = useHealthRepository();
+  const refreshHealthData = useRefreshHealthData();
   const data = state.data;
 
   const availableDays = useMemo(
     () => [...(data?.day.availableDays ?? [])].reverse(),
     [data?.day.availableDays],
   );
+
+  const refreshAfterActivityMutation = useCallback(() => {
+    refreshHealthData(HEART_ACTIVITY_REFRESH_SCOPES);
+  }, [refreshHealthData]);
+  const handleConfirmHeartActivity = useCallback(async (activityId: string) => {
+    await repository.confirmActivity(activityId);
+    refreshAfterActivityMutation();
+  }, [refreshAfterActivityMutation, repository]);
+  const handleDismissHeartActivity = useCallback(async (activityId: string) => {
+    await repository.dismissActivity(activityId);
+    refreshAfterActivityMutation();
+  }, [refreshAfterActivityMutation, repository]);
+  const handleRelabelHeartActivity = useCallback(async (activityId: string, activity: 'Activity' | 'Walk' | 'Workout' | 'Nap') => {
+    await repository.relabelActivity(activityId, activity);
+    refreshAfterActivityMutation();
+  }, [refreshAfterActivityMutation, repository]);
 
   if (!data && state.status === 'loading') {
     return (
@@ -172,6 +193,11 @@ export function HistoryScreen() {
         </View>
 
         <HeartSnapshotCard
+          activityReviewActions={{
+            confirmActivity: handleConfirmHeartActivity,
+            dismissActivity: handleDismissHeartActivity,
+            relabelActivity: handleRelabelHeartActivity,
+          }}
           chartTestID="history-heart-chart"
           snapshot={data.heartCard}
           trailingLabel={data.day.shortLabel}

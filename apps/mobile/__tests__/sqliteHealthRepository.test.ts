@@ -311,6 +311,53 @@ async function insertSingleWorkoutBoutDay(adapter: NodeSqliteAdapter) {
   };
 }
 
+async function insertSingleBorderlineWalkBoutDay(
+  adapter: NodeSqliteAdapter,
+  options?: { start?: Date; idOffset?: number },
+) {
+  const heartInsert = `
+    INSERT INTO heart_rate (id, bpm, time, rr_intervals, sensor_data, synced)
+    VALUES (?, ?, ?, ?, ?, 0)
+  `;
+  const start = options?.start ?? new Date(2026, 3, 7, 7, 0, 0);
+  const idOffset = options?.idOffset ?? 0;
+  const restGravityA: [number, number, number] = [0.15, -0.02, 0.97];
+  const restGravityB: [number, number, number] = [0.162, -0.018, 0.968];
+  const walkGravityA: [number, number, number] = [0.35, -0.42, 0.84];
+  const walkGravityB: [number, number, number] = [-0.28, -0.81, 0.51];
+
+  for (let minute = 0; minute < 4 * 60; minute += 1) {
+    const sampleDate = new Date(start.getTime() + minute * 60000);
+    const isWalk = minute >= 95 && minute < 114;
+    const gravity = isWalk
+      ? minute % 2 === 0
+        ? walkGravityA
+        : walkGravityB
+      : minute % 2 === 0
+        ? restGravityA
+        : restGravityB;
+
+    await adapter.runAsync(
+      heartInsert,
+      idOffset + minute + 1,
+      isWalk ? 90 : 65,
+      formatTestSqliteDateTime(sampleDate),
+      isWalk ? '672,668,664' : '920,930,925',
+      JSON.stringify({
+        ppg_green: isWalk ? 19_400 : 18_000,
+        skin_contact: 1,
+        signal_quality: 3074,
+        accel_gravity: gravity,
+      }),
+    );
+  }
+
+  return {
+    expectedStart: new Date(start.getTime() + 95 * 60000),
+    expectedEnd: new Date(start.getTime() + 113 * 60000),
+  };
+}
+
 function calculateExpectedStressValues(samples: Array<{ bpm: number; rr: number[] }>) {
   const stressWindow = 120;
 
@@ -759,6 +806,108 @@ describe('SQLiteHealthRepository', () => {
         review_state: 'dismissed',
       },
     ]);
+
+    adapter.close();
+  });
+
+  it('personalizes walk retention thresholds by daypart from confirmed activity history', async () => {
+    const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
+    await initializeDatabase(adapter as never);
+
+    for (let index = 0; index < 5; index += 1) {
+      const start = new Date(2026, 3, 1 + index, 8, 0, 0);
+      const end = new Date(start.getTime() + 18 * 60_000);
+
+      await adapter.runAsync(
+        `
+          INSERT INTO activities (period_id, start, end, activity, synced, source, review_state)
+          VALUES (?, ?, ?, ?, 0, 'manual', 'confirmed')
+        `,
+        `manual-walk-${index}`,
+        formatTestSqliteDateTime(start),
+        formatTestSqliteDateTime(end),
+        'Walk',
+      );
+    }
+
+    const morningWalk = await insertSingleBorderlineWalkBoutDay(adapter, {
+      start: new Date(2026, 3, 7, 7, 0, 0),
+      idOffset: 2000,
+    });
+    const eveningWalk = await insertSingleBorderlineWalkBoutDay(adapter, {
+      start: new Date(2026, 3, 7, 17, 0, 0),
+      idOffset: 4000,
+    });
+
+    await refreshDerivedData(adapter as never);
+
+    const personalizationRows = await adapter.getAllAsync<{
+      activity_kind: string;
+      daypart: string;
+      positive_count: number;
+      negative_count: number;
+      min_duration_minutes: number;
+      min_confidence: number;
+    }>(
+      `
+        SELECT activity_kind, daypart, positive_count, negative_count, min_duration_minutes, min_confidence
+        FROM activity_personalization
+        WHERE activity_kind = 'Walk' AND daypart IN ('all', 'morning', 'evening')
+        ORDER BY daypart ASC
+      `,
+    );
+    const detectedRows = await adapter.getAllAsync<{
+      start: string;
+      end: string;
+      activity: string;
+      source: string;
+      review_state: string;
+    }>(
+      `
+        SELECT start, end, activity, source, review_state
+        FROM activities
+        WHERE source = 'detected'
+        ORDER BY start ASC
+      `,
+    );
+
+    expect(personalizationRows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          activity_kind: 'Walk',
+          daypart: 'all',
+          positive_count: 5,
+          negative_count: 0,
+          min_duration_minutes: 18,
+          min_confidence: 0.7,
+        }),
+        expect.objectContaining({
+          activity_kind: 'Walk',
+          daypart: 'morning',
+          positive_count: 5,
+          negative_count: 0,
+          min_duration_minutes: 18,
+          min_confidence: 0.7,
+        }),
+        expect.objectContaining({
+          activity_kind: 'Walk',
+          daypart: 'evening',
+          positive_count: 0,
+          negative_count: 0,
+          min_duration_minutes: 20,
+          min_confidence: 0.75,
+        }),
+      ]),
+    );
+    expect(detectedRows).toHaveLength(1);
+    expect(detectedRows[0]).toMatchObject({
+      start: formatTestSqliteDateTime(morningWalk.expectedStart),
+      activity: 'Walk',
+      source: 'detected',
+      review_state: 'none',
+    });
+    expect(new Date(detectedRows[0]!.end.replace(' ', 'T')).getTime()).toBeGreaterThanOrEqual(morningWalk.expectedEnd.getTime());
+    expect(detectedRows[0]?.start).not.toBe(formatTestSqliteDateTime(eveningWalk.expectedStart));
 
     adapter.close();
   });

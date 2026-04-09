@@ -1,7 +1,8 @@
-import { startTransition, useCallback, useEffect, useRef, useState } from 'react';
+import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Ionicons } from '@expo/vector-icons';
 import {
   ActivityIndicator,
+  Modal,
   Pressable,
   StyleSheet,
   Text,
@@ -24,6 +25,7 @@ import { GlassCard } from '@/components/ui/GlassCard';
 import { PulsingHeartIcon } from '@/components/ui/PulsingHeartIcon';
 import { StatChip } from '@/components/ui/StatChip';
 import { colors, sleepStageColors, typography } from '@/constants/theme';
+import type { ManualActivityKind } from '@/data/HealthRepository';
 import type {
   ActivitySummary,
   DashboardInsight,
@@ -34,7 +36,12 @@ import type {
   StrainCardSnapshot,
 } from '@/types/health';
 import { formatCompactDuration, formatMetricValue, formatShortDuration } from '@/utils/formatters';
-import { getHeartIntradayMarkerPresentation } from '@/utils/heartChartMarkers';
+import {
+  canManageHeartIntradayMarker,
+  getHeartIntradayMarkerPresentation,
+  getHeartIntradayMarkerReviewLabel,
+  getHeartIntradayMarkerTrustState,
+} from '@/utils/heartChartMarkers';
 
 interface HeartMetricColumn {
   label: string;
@@ -68,6 +75,16 @@ const SLEEP_STAGE_PANEL_ANIMATION_DURATION_MS = 220;
 const SLEEP_STAGE_PANEL_MAX_HEIGHT = 120;
 const SLEEP_STAGE_PANEL_STAGE_DELAY_MS = HEART_CARD_CHROME_STAGE_DELAY_MS * 3;
 const SLEEP_STAGE_CHIP_STAGE_DELAY_MS = SLEEP_STAGE_PANEL_STAGE_DELAY_MS + 20;
+const ACTIVITY_DETAIL_PANEL_MAX_HEIGHT = 220;
+const ACTIVITY_DETAIL_PANEL_STAGE_DELAY_MS = HEART_CARD_CHROME_STAGE_DELAY_MS * 3;
+const ACTIVITY_DETAIL_CHIP_STAGE_DELAY_MS = ACTIVITY_DETAIL_PANEL_STAGE_DELAY_MS + 20;
+const REVIEW_ACTIVITY_OPTIONS: ManualActivityKind[] = ['Activity', 'Walk', 'Workout', 'Nap'];
+
+interface HeartActivityReviewActions {
+  confirmActivity: (activityId: string) => Promise<void>;
+  dismissActivity: (activityId: string) => Promise<void>;
+  relabelActivity: (activityId: string, activity: ManualActivityKind) => Promise<void>;
+}
 
 function accentColorForInsight(accent: DashboardInsight['accent']) {
   switch (accent) {
@@ -107,6 +124,36 @@ function CardAction({
         <Ionicons color={colors.primaryBright} name="chevron-forward" size={14} />
       </Pressable>
     </View>
+  );
+}
+
+function ReviewActionButton({
+  accentColor,
+  disabled = false,
+  label,
+  onPress,
+  testID,
+}: {
+  accentColor: string;
+  disabled?: boolean;
+  label: string;
+  onPress: () => void;
+  testID?: string;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      disabled={disabled}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.reviewActionButton,
+        { borderColor: accentColor },
+        disabled ? styles.reviewActionButtonDisabled : null,
+        pressed ? styles.actionPressed : null,
+      ]}
+      testID={testID}>
+      <Text style={[styles.reviewActionButtonLabel, { color: accentColor }]}>{label}</Text>
+    </Pressable>
   );
 }
 
@@ -167,6 +214,78 @@ function formatSleepStageName(stage: SleepStage) {
   }
 
   return `${stage[0]?.toUpperCase() ?? ''}${stage.slice(1)}`;
+}
+
+function activityReviewAccentColor(marker: HeartIntradayMarker) {
+  if (marker.details?.source === 'manual') {
+    return colors.primaryBright;
+  }
+
+  switch (marker.details?.reviewState) {
+    case 'confirmed':
+      return colors.success;
+    case 'relabelled':
+      return colors.aqua;
+    default:
+      return getHeartIntradayMarkerTrustState(marker) === 'suggested' ? colors.heart : colors.success;
+  }
+}
+
+function buildActivityMarkerChips(marker: HeartIntradayMarker): HeartMetricChip[] {
+  const chips: HeartMetricChip[] = [];
+  const reviewLabel = getHeartIntradayMarkerReviewLabel(marker);
+
+  if (reviewLabel) {
+    chips.push({
+      accentColor: activityReviewAccentColor(marker),
+      label: 'Status',
+      value: reviewLabel,
+    });
+  }
+
+  if (marker.details?.source === 'detected' && typeof marker.details.confidence === 'number') {
+    chips.push({
+      accentColor: getHeartIntradayMarkerTrustState(marker) === 'suggested' ? colors.heart : colors.cyan,
+      label: 'Confidence',
+      value: `${Math.round(marker.details.confidence * 100)}%`,
+    });
+  }
+
+  return chips;
+}
+
+function buildUpdatedActivityMarker(
+  marker: HeartIntradayMarker,
+  updates: { label?: ManualActivityKind; reviewState?: 'confirmed' | 'relabelled' },
+): HeartIntradayMarker {
+  const nextLabel = updates.label ?? (marker.label as ManualActivityKind);
+
+  return {
+    ...marker,
+    kind: nextLabel === 'Nap' ? 'nap' : 'activity',
+    label: nextLabel,
+    details: {
+      ...marker.details,
+      durationMinutes: marker.details?.durationMinutes ?? null,
+      source: marker.details?.source ?? 'detected',
+      reviewState: updates.reviewState ?? marker.details?.reviewState ?? 'none',
+    },
+  };
+}
+
+function applyHeartMarkerOverrides(
+  markers: readonly HeartIntradayMarker[],
+  overrides: Readonly<Record<string, HeartIntradayMarker | null>>,
+) {
+  return markers.flatMap((marker) => {
+    const override = overrides[marker.id];
+
+    if (override === null) {
+      return [];
+    }
+
+    return [override ?? marker];
+  });
 }
 
 function buildFocusedHeartCardContent(
@@ -251,12 +370,13 @@ function buildFocusedHeartCardContent(
             valueColor: colors.heart,
           },
     ],
-    chips: [],
+      chips: buildActivityMarkerChips(marker),
     stageChips: [],
   };
 }
 
 export function HeartSnapshotCard({
+  activityReviewActions,
   canLoadMore = false,
   chartTestID,
   isLoadingMore = false,
@@ -271,6 +391,7 @@ export function HeartSnapshotCard({
   viewportKey,
   windowPointCount,
 }: {
+  activityReviewActions?: HeartActivityReviewActions;
   canLoadMore?: boolean;
   chartTestID: string;
   isLoadingMore?: boolean;
@@ -288,25 +409,41 @@ export function HeartSnapshotCard({
   const resolvedWindowPointCount = windowPointCount ?? snapshot.series.length;
   const [isViewingLatestWindow, setIsViewingLatestWindow] = useState(true);
   const [latestJumpVersion, setLatestJumpVersion] = useState(0);
+  const [activityMarkerOverrides, setActivityMarkerOverrides] = useState<Record<string, HeartIntradayMarker | null>>({});
+  const [pendingActivityActionKey, setPendingActivityActionKey] = useState<string | null>(null);
+  const [activityActionError, setActivityActionError] = useState<string | null>(null);
+  const [relabelModalVisible, setRelabelModalVisible] = useState(false);
+  const resolvedMarkers = useMemo(
+    () => applyHeartMarkerOverrides(snapshot.markers, activityMarkerOverrides),
+    [activityMarkerOverrides, snapshot.markers],
+  );
   const [focusedMarkerTarget, setFocusedMarkerTarget] = useState<HeartIntradayMarker | null>(null);
   const [focusedMarker, setFocusedMarker] = useState<HeartIntradayMarker | null>(null);
   const [selectedSleepStage, setSelectedSleepStage] = useState<SleepStage | null>(null);
   const [isSleepStagePanelMounted, setIsSleepStagePanelMounted] = useState(false);
+  const [isActivityDetailPanelMounted, setIsActivityDetailPanelMounted] = useState(false);
   const [renderedSleepStageChips, setRenderedSleepStageChips] = useState<HeartMetricChip[]>([]);
   const isFocusTransitioningRef = useRef(false);
   const pendingFocusedMarkerRef = useRef<HeartIntradayMarker | null>(null);
   const sleepStagePanelUnmountTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activityDetailPanelUnmountTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const showsLatestWindowButton = trailingLabel === 'Last 12h';
   const focusedCardTargetContent = buildFocusedHeartCardContent(snapshot, focusedMarkerTarget);
   const focusedCardContent = buildFocusedHeartCardContent(snapshot, focusedMarker);
   const cardAccentColor = focusedCardTargetContent?.accentColor ?? colors.success;
   const chartAccentColor = focusedCardTargetContent?.chartAccentColor ?? colors.primary;
   const isSleepFocused = focusedMarker?.kind === 'sleep';
+  const isActivityFocused = focusedMarker?.kind === 'activity' || focusedMarker?.kind === 'nap';
+  const canManageFocusedActivity = Boolean(activityReviewActions && focusedMarker && canManageHeartIntradayMarker(focusedMarker));
+  const activityDetailChips = isActivityFocused ? focusedCardContent?.chips ?? [] : [];
   const sleepStageChips = focusedCardContent?.stageChips ?? [];
   const sleepStageChipSignature = sleepStageChips
     .map((chip) => `${chip.label}:${chip.value}:${chip.accentColor}`)
     .join('|');
   const sleepStagePanelVisible = isSleepFocused && sleepStageChips.length > 0;
+  const activityDetailPanelVisible =
+    isActivityFocused &&
+    (activityDetailChips.length > 0 || canManageFocusedActivity || activityActionError !== null);
   const cardHeaderTransitionProgress = useSharedValue(1);
   const cardMetricsTransitionProgress = useSharedValue(1);
   const cardChipsTransitionProgress = useSharedValue(1);
@@ -314,6 +451,10 @@ export function HeartSnapshotCard({
   const sleepStagePanelOpacity = useSharedValue(0);
   const sleepStagePanelMarginTop = useSharedValue(0);
   const sleepStageChipTransitionProgress = useSharedValue(0);
+  const activityDetailPanelMaxHeight = useSharedValue(0);
+  const activityDetailPanelOpacity = useSharedValue(0);
+  const activityDetailPanelMarginTop = useSharedValue(0);
+  const activityDetailTransitionProgress = useSharedValue(0);
   const chartHeight = HEART_CARD_CHART_HEIGHT;
   const cardTitle = focusedCardContent?.title ?? 'Heart Rate';
   const defaultCardSubtitle =
@@ -374,7 +515,7 @@ export function HeartSnapshotCard({
 
   const handleFocusedMarkerChange = useCallback((nextMarker: HeartIntradayMarker | null) => {
     pendingFocusedMarkerRef.current = nextMarker;
-    setFocusedMarkerTarget((current) => (current?.id === nextMarker?.id ? current : nextMarker));
+    setFocusedMarkerTarget((current) => (current === nextMarker ? current : nextMarker));
 
     if (isFocusTransitioningRef.current) {
       return;
@@ -398,20 +539,109 @@ export function HeartSnapshotCard({
     });
   }, [animateCardChromeStages]);
 
+  const clearActivityMarkerOverride = useCallback((activityId: string) => {
+    setActivityMarkerOverrides((current) => {
+      const next = { ...current };
+      delete next[activityId];
+      return next;
+    });
+  }, []);
+
+  const handleConfirmFocusedActivity = useCallback(async () => {
+    if (!activityReviewActions || !focusedMarker || !canManageHeartIntradayMarker(focusedMarker)) {
+      return;
+    }
+
+    setActivityActionError(null);
+    setPendingActivityActionKey(`confirm:${focusedMarker.id}`);
+    setActivityMarkerOverrides((current) => ({
+      ...current,
+      [focusedMarker.id]: buildUpdatedActivityMarker(focusedMarker, { reviewState: 'confirmed' }),
+    }));
+
+    try {
+      await activityReviewActions.confirmActivity(focusedMarker.id);
+    } catch (error) {
+      clearActivityMarkerOverride(focusedMarker.id);
+      setActivityActionError(error instanceof Error ? error.message : 'Unable to confirm this activity right now.');
+    } finally {
+      setPendingActivityActionKey(null);
+    }
+  }, [activityReviewActions, clearActivityMarkerOverride, focusedMarker]);
+
+  const handleDismissFocusedActivity = useCallback(async () => {
+    if (!activityReviewActions || !focusedMarker || !canManageHeartIntradayMarker(focusedMarker)) {
+      return;
+    }
+
+    setActivityActionError(null);
+    setPendingActivityActionKey(`dismiss:${focusedMarker.id}`);
+    setActivityMarkerOverrides((current) => ({
+      ...current,
+      [focusedMarker.id]: null,
+    }));
+    setLatestJumpVersion((current) => current + 1);
+
+    try {
+      await activityReviewActions.dismissActivity(focusedMarker.id);
+    } catch (error) {
+      clearActivityMarkerOverride(focusedMarker.id);
+      setActivityActionError(error instanceof Error ? error.message : 'Unable to dismiss this activity right now.');
+    } finally {
+      setPendingActivityActionKey(null);
+    }
+  }, [activityReviewActions, clearActivityMarkerOverride, focusedMarker]);
+
+  const handleRelabelFocusedActivity = useCallback(async (activity: ManualActivityKind) => {
+    if (!activityReviewActions || !focusedMarker || !canManageHeartIntradayMarker(focusedMarker)) {
+      return;
+    }
+
+    setActivityActionError(null);
+    setPendingActivityActionKey(`relabel:${focusedMarker.id}`);
+    setActivityMarkerOverrides((current) => ({
+      ...current,
+      [focusedMarker.id]: buildUpdatedActivityMarker(focusedMarker, {
+        label: activity,
+        reviewState: 'relabelled',
+      }),
+    }));
+
+    try {
+      await activityReviewActions.relabelActivity(focusedMarker.id, activity);
+      setRelabelModalVisible(false);
+    } catch (error) {
+      clearActivityMarkerOverride(focusedMarker.id);
+      setActivityActionError(error instanceof Error ? error.message : 'Unable to relabel this activity right now.');
+    } finally {
+      setPendingActivityActionKey(null);
+    }
+  }, [activityReviewActions, clearActivityMarkerOverride, focusedMarker]);
+
   useEffect(() => {
     setIsViewingLatestWindow(true);
     setLatestJumpVersion(0);
+    setActivityMarkerOverrides({});
+    setPendingActivityActionKey(null);
+    setActivityActionError(null);
+    setRelabelModalVisible(false);
     isFocusTransitioningRef.current = false;
     pendingFocusedMarkerRef.current = null;
     cardHeaderTransitionProgress.value = 1;
     cardMetricsTransitionProgress.value = 1;
     cardChipsTransitionProgress.value = 1;
     sleepStageChipTransitionProgress.value = 0;
+    activityDetailTransitionProgress.value = 0;
     if (sleepStagePanelUnmountTimeoutRef.current !== null) {
       clearTimeout(sleepStagePanelUnmountTimeoutRef.current);
       sleepStagePanelUnmountTimeoutRef.current = null;
     }
+    if (activityDetailPanelUnmountTimeoutRef.current !== null) {
+      clearTimeout(activityDetailPanelUnmountTimeoutRef.current);
+      activityDetailPanelUnmountTimeoutRef.current = null;
+    }
     setIsSleepStagePanelMounted(false);
+    setIsActivityDetailPanelMounted(false);
     setRenderedSleepStageChips([]);
     setFocusedMarkerTarget(null);
     setFocusedMarker(null);
@@ -420,6 +650,7 @@ export function HeartSnapshotCard({
     cardChipsTransitionProgress,
     cardHeaderTransitionProgress,
     cardMetricsTransitionProgress,
+    activityDetailTransitionProgress,
     sleepStageChipTransitionProgress,
     viewportKey,
   ]);
@@ -435,6 +666,14 @@ export function HeartSnapshotCard({
   useEffect(() => {
     setSelectedSleepStage(null);
   }, [focusedMarker?.id]);
+
+  useEffect(() => {
+    setActivityActionError(null);
+
+    if (!canManageFocusedActivity) {
+      setRelabelModalVisible(false);
+    }
+  }, [canManageFocusedActivity, focusedMarker?.id]);
 
   const handleSleepStagePress = useCallback((stage: SleepStage) => {
     setSelectedSleepStage((current) => (current === stage ? null : stage));
@@ -466,6 +705,31 @@ export function HeartSnapshotCard({
       setRenderedSleepStageChips([]);
     }, SLEEP_STAGE_PANEL_ANIMATION_DURATION_MS);
   }, [isSleepStagePanelMounted, sleepStageChipSignature, sleepStagePanelVisible]);
+
+  useEffect(() => {
+    if (activityDetailPanelVisible) {
+      if (activityDetailPanelUnmountTimeoutRef.current !== null) {
+        clearTimeout(activityDetailPanelUnmountTimeoutRef.current);
+        activityDetailPanelUnmountTimeoutRef.current = null;
+      }
+
+      setIsActivityDetailPanelMounted(true);
+      return;
+    }
+
+    if (!isActivityDetailPanelMounted) {
+      return;
+    }
+
+    if (activityDetailPanelUnmountTimeoutRef.current !== null) {
+      clearTimeout(activityDetailPanelUnmountTimeoutRef.current);
+    }
+
+    activityDetailPanelUnmountTimeoutRef.current = setTimeout(() => {
+      activityDetailPanelUnmountTimeoutRef.current = null;
+      setIsActivityDetailPanelMounted(false);
+    }, SLEEP_STAGE_PANEL_ANIMATION_DURATION_MS);
+  }, [activityDetailPanelVisible, isActivityDetailPanelMounted]);
 
   useEffect(() => {
     const nextMaxHeight = sleepStagePanelVisible ? SLEEP_STAGE_PANEL_MAX_HEIGHT : 0;
@@ -516,10 +780,63 @@ export function HeartSnapshotCard({
     sleepStagePanelVisible,
   ]);
 
+  useEffect(() => {
+    const nextMaxHeight = activityDetailPanelVisible ? ACTIVITY_DETAIL_PANEL_MAX_HEIGHT : 0;
+    const nextOpacity = activityDetailPanelVisible ? 1 : 0;
+    const nextMarginTop = activityDetailPanelVisible ? 12 : 0;
+    const panelDelay = activityDetailPanelVisible ? ACTIVITY_DETAIL_PANEL_STAGE_DELAY_MS : 0;
+    const contentDelay = activityDetailPanelVisible ? ACTIVITY_DETAIL_CHIP_STAGE_DELAY_MS : 0;
+
+    cancelAnimation(activityDetailPanelMaxHeight);
+    cancelAnimation(activityDetailPanelOpacity);
+    cancelAnimation(activityDetailPanelMarginTop);
+    cancelAnimation(activityDetailTransitionProgress);
+
+    activityDetailPanelMaxHeight.value = withDelay(
+      panelDelay,
+      withTiming(nextMaxHeight, {
+        duration: SLEEP_STAGE_PANEL_ANIMATION_DURATION_MS,
+        easing: Easing.out(Easing.cubic),
+      }),
+    );
+    activityDetailPanelOpacity.value = withDelay(
+      panelDelay,
+      withTiming(nextOpacity, {
+        duration: SLEEP_STAGE_PANEL_ANIMATION_DURATION_MS,
+        easing: Easing.out(Easing.cubic),
+      }),
+    );
+    activityDetailPanelMarginTop.value = withDelay(
+      panelDelay,
+      withTiming(nextMarginTop, {
+        duration: SLEEP_STAGE_PANEL_ANIMATION_DURATION_MS,
+        easing: Easing.out(Easing.cubic),
+      }),
+    );
+    activityDetailTransitionProgress.value = withDelay(
+      contentDelay,
+      withTiming(activityDetailPanelVisible ? 1 : 0, {
+        duration:
+          activityDetailPanelVisible ? HEART_CARD_CHROME_IN_DURATION_MS : HEART_CARD_CHROME_OUT_DURATION_MS,
+        easing: Easing.out(Easing.cubic),
+      }),
+    );
+  }, [
+    activityDetailPanelMarginTop,
+    activityDetailPanelMaxHeight,
+    activityDetailPanelOpacity,
+    activityDetailPanelVisible,
+    activityDetailTransitionProgress,
+  ]);
+
   useEffect(
     () => () => {
       if (sleepStagePanelUnmountTimeoutRef.current !== null) {
         clearTimeout(sleepStagePanelUnmountTimeoutRef.current);
+      }
+
+      if (activityDetailPanelUnmountTimeoutRef.current !== null) {
+        clearTimeout(activityDetailPanelUnmountTimeoutRef.current);
       }
     },
     [],
@@ -543,6 +860,26 @@ export function HeartSnapshotCard({
       ],
     }),
     [sleepStageChipTransitionProgress],
+  );
+
+  const animatedActivityDetailPanelStyle = useAnimatedStyle(
+    () => ({
+      maxHeight: activityDetailPanelMaxHeight.value,
+      marginTop: activityDetailPanelMarginTop.value,
+      opacity: activityDetailPanelOpacity.value,
+    }),
+    [activityDetailPanelMarginTop, activityDetailPanelMaxHeight, activityDetailPanelOpacity],
+  );
+
+  const animatedActivityDetailStageStyle = useAnimatedStyle(
+    () => ({
+      opacity: activityDetailTransitionProgress.value,
+      transform: [
+        { translateY: (1 - activityDetailTransitionProgress.value) * -6 },
+        { scale: 0.99 + activityDetailTransitionProgress.value * 0.01 },
+      ],
+    }),
+    [activityDetailTransitionProgress],
   );
 
   const animatedCardHeaderStageStyle = useAnimatedStyle(
@@ -723,7 +1060,7 @@ export function HeartSnapshotCard({
       </Animated.View>
 
       <Animated.View style={animatedCardChipsStageStyle}>
-        {focusedCardContent?.chips.length ? (
+        {focusedCardContent?.chips.length && !isActivityFocused ? (
           <View style={styles.cardChipRow}>
             {focusedCardContent.chips.map((chip) => (
               <StatChip accent={chip.accentColor} key={`${chip.label}-${chip.value}`} label={chip.label} value={chip.value} />
@@ -741,7 +1078,7 @@ export function HeartSnapshotCard({
         height={chartHeight}
         highlightedSleepStage={isSleepFocused ? selectedSleepStage : null}
         isLoadingMore={isLoadingMore}
-        markers={snapshot.markers}
+        markers={resolvedMarkers}
         jumpToLatestSignal={latestJumpVersion}
         onFocusedMarkerChange={handleFocusedMarkerChange}
         onFocusTransitionStateChange={handleFocusTransitionStateChange}
@@ -794,12 +1131,119 @@ export function HeartSnapshotCard({
           ) : null}
         </View>
       </Animated.View>
+      <Animated.View
+        pointerEvents={activityDetailPanelVisible ? 'auto' : 'none'}
+        style={[styles.sleepStagePanelWrap, animatedActivityDetailPanelStyle]}>
+        <View style={styles.sleepStagePanel}>
+          {isActivityDetailPanelMounted ? (
+            <Animated.View
+              style={[styles.activityDetailContent, animatedActivityDetailStageStyle]}
+              testID={chartTestID ? `${chartTestID}-activity-detail-panel` : undefined}>
+              {activityDetailChips.length ? (
+                <View style={styles.activityDetailChipRow}>
+                  {activityDetailChips.map((chip) => (
+                    <StatChip
+                      accent={chip.accentColor}
+                      key={`${chip.label}-${chip.value}`}
+                      label={chip.label}
+                      value={chip.value}
+                    />
+                  ))}
+                </View>
+              ) : null}
+              {activityActionError ? <Text style={styles.reviewActionError}>{activityActionError}</Text> : null}
+              {canManageFocusedActivity ? (
+                <View style={styles.reviewActionRow}>
+                  <ReviewActionButton
+                    accentColor={colors.success}
+                    disabled={pendingActivityActionKey !== null}
+                    label={pendingActivityActionKey === `confirm:${focusedMarker?.id}` ? 'Saving...' : 'Confirm'}
+                    onPress={() => {
+                      void handleConfirmFocusedActivity();
+                    }}
+                    testID={chartTestID ? `${chartTestID}-activity-confirm` : undefined}
+                  />
+                  <ReviewActionButton
+                    accentColor={colors.aqua}
+                    disabled={pendingActivityActionKey !== null}
+                    label={pendingActivityActionKey === `relabel:${focusedMarker?.id}` ? 'Saving...' : 'Relabel'}
+                    onPress={() => setRelabelModalVisible(true)}
+                    testID={chartTestID ? `${chartTestID}-activity-relabel` : undefined}
+                  />
+                  <ReviewActionButton
+                    accentColor={colors.alert}
+                    disabled={pendingActivityActionKey !== null}
+                    label={pendingActivityActionKey === `dismiss:${focusedMarker?.id}` ? 'Saving...' : 'Dismiss'}
+                    onPress={() => {
+                      void handleDismissFocusedActivity();
+                    }}
+                    testID={chartTestID ? `${chartTestID}-activity-dismiss` : undefined}
+                  />
+                </View>
+              ) : null}
+            </Animated.View>
+          ) : null}
+        </View>
+      </Animated.View>
       {isLoadingMore ? (
         <View style={styles.historyLoaderRow}>
           <ActivityIndicator color={colors.primary} size="small" />
           <Text style={styles.historyLoaderText}>Loading more heart history...</Text>
         </View>
       ) : null}
+
+      <Modal
+        animationType="fade"
+        onRequestClose={() => {
+          if (pendingActivityActionKey === null) {
+            setRelabelModalVisible(false);
+          }
+        }}
+        transparent
+        visible={relabelModalVisible}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard} testID={chartTestID ? `${chartTestID}-relabel-modal` : undefined}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Relabel activity</Text>
+              <Pressable
+                accessibilityRole="button"
+                disabled={pendingActivityActionKey !== null}
+                onPress={() => setRelabelModalVisible(false)}
+                style={({ pressed }) => [styles.modalClose, pressed ? styles.actionPressed : null]}
+                testID={chartTestID ? `${chartTestID}-relabel-close-button` : undefined}>
+                <Text style={styles.modalCloseLabel}>Close</Text>
+              </Pressable>
+            </View>
+
+            <Text style={styles.modalCopy}>Choose the corrected label for this suggested activity.</Text>
+            {activityActionError ? <Text style={styles.reviewActionError}>{activityActionError}</Text> : null}
+
+            <View style={styles.modalOptionGrid}>
+              {REVIEW_ACTIVITY_OPTIONS.map((option) => {
+                const selected = focusedMarker?.label === option;
+
+                return (
+                  <Pressable
+                    accessibilityRole="button"
+                    disabled={pendingActivityActionKey !== null}
+                    key={option}
+                    onPress={() => {
+                      void handleRelabelFocusedActivity(option);
+                    }}
+                    style={({ pressed }) => [
+                      styles.modalOptionButton,
+                      selected ? styles.modalOptionButtonSelected : null,
+                      pressed ? styles.actionPressed : null,
+                    ]}
+                    testID={chartTestID ? `${chartTestID}-relabel-option-${option.toLowerCase()}` : undefined}>
+                    <Text style={[styles.modalOptionLabel, selected ? styles.modalOptionLabelSelected : null]}>{option}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          </View>
+        </View>
+      </Modal>
     </GlassCard>
   );
 }
@@ -1183,6 +1627,41 @@ const styles = StyleSheet.create({
     gap: 10,
     marginBottom: 10,
   },
+  activityDetailContent: {
+    gap: 12,
+  },
+  activityDetailChipRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  reviewActionError: {
+    color: colors.alert,
+    fontFamily: typography.body,
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  reviewActionRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  reviewActionButton: {
+    alignItems: 'center',
+    backgroundColor: colors.surfaceStrong,
+    borderRadius: 999,
+    borderWidth: 1,
+    minHeight: 36,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  reviewActionButtonDisabled: {
+    opacity: 0.52,
+  },
+  reviewActionButtonLabel: {
+    fontFamily: typography.bodySemiBold,
+    fontSize: 12,
+  },
   sleepStagePanelWrap: {
     overflow: 'hidden',
   },
@@ -1300,6 +1779,76 @@ const styles = StyleSheet.create({
     fontFamily: typography.body,
     fontSize: 14,
     lineHeight: 20,
+  },
+  modalBackdrop: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(2, 6, 13, 0.76)',
+    flex: 1,
+    justifyContent: 'center',
+    padding: 20,
+  },
+  modalCard: {
+    backgroundColor: colors.surfaceStrong,
+    borderColor: colors.border,
+    borderRadius: 22,
+    borderWidth: 1,
+    maxWidth: 420,
+    padding: 18,
+    width: '100%',
+  },
+  modalHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  modalTitle: {
+    color: colors.text,
+    fontFamily: typography.headingMedium,
+    fontSize: 22,
+  },
+  modalClose: {
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+  },
+  modalCloseLabel: {
+    color: colors.muted,
+    fontFamily: typography.bodySemiBold,
+    fontSize: 12,
+  },
+  modalCopy: {
+    color: colors.muted,
+    fontFamily: typography.body,
+    fontSize: 13,
+    lineHeight: 20,
+    marginTop: 8,
+  },
+  modalOptionGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+    marginTop: 16,
+  },
+  modalOptionButton: {
+    alignItems: 'center',
+    backgroundColor: colors.surfaceMuted,
+    borderColor: colors.border,
+    borderRadius: 14,
+    borderWidth: 1,
+    minWidth: 92,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  modalOptionButtonSelected: {
+    backgroundColor: 'rgba(86, 255, 209, 0.12)',
+    borderColor: 'rgba(86, 255, 209, 0.34)',
+  },
+  modalOptionLabel: {
+    color: colors.text,
+    fontFamily: typography.bodySemiBold,
+    fontSize: 13,
+  },
+  modalOptionLabelSelected: {
+    color: colors.aqua,
   },
   activityRow: {
     alignItems: 'center',

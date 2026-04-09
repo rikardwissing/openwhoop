@@ -1,8 +1,17 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 
 import type { ActivityRescanResult, HealthCacheScope, HealthRepository, ManualActivityKind } from '@/data/HealthRepository';
-import { detectActivityArtifacts } from '@/data/sqlite/activityDetector';
-import type { ActivityDetectorPeriod } from '@/data/sqlite/activityDetector';
+import {
+  ACTIVITY_DETECTOR_DAYPARTS,
+  DEFAULT_ACTIVITY_DETECTOR_THRESHOLDS,
+  detectActivityArtifacts,
+  activityDetectorDaypartForDate,
+} from '@/data/sqlite/activityDetector';
+import type {
+  ActivityDetectorDaypart,
+  ActivityDetectorPeriod,
+  ActivityDetectorPersonalization,
+} from '@/data/sqlite/activityDetector';
 import { generateSleepStageRecords, isAwakePpgValue } from '@/data/sqlite/sleepStages';
 import { DERIVED_DATA_SCHEMA_VERSION } from '@/db/schema';
 import type {
@@ -238,6 +247,23 @@ interface ActivityRecord {
   reviewState: ActivityReviewState;
 }
 
+interface ActivityPersonalizationRow {
+  activity_kind: string;
+  daypart: string;
+  positive_count: number;
+  negative_count: number;
+  min_duration_minutes: number;
+  min_confidence: number;
+  updated_at: string;
+}
+
+interface ActivityPersonalizationSourceRow {
+  activity: string;
+  review_state: string | null;
+  start: string;
+  end: string;
+}
+
 interface SleepStageRow {
   id: number;
   sleep_id: string;
@@ -442,6 +468,31 @@ const aggregateAccessLocks = new WeakMap<object, Promise<void>>();
 const HEART_METRIC_UPDATE_BATCH_SIZE = 200;
 const ACTIVITY_SELECT_COLUMNS = 'id, period_id, start, end, activity, confidence, source, review_state';
 const MANUAL_ACTIVITY_KINDS = new Set<ManualActivityKind>(['Activity', 'Walk', 'Workout', 'Nap']);
+const PERSONALIZABLE_ACTIVITY_NAMES = ['Activity', 'Walk', 'Workout'] as const;
+const ACTIVITY_PERSONALIZATION_MIN_REVIEWED_SAMPLES = 2;
+const ACTIVITY_PERSONALIZATION_MAX_DURATION_REDUCTION_MINUTES = 4;
+const ACTIVITY_PERSONALIZATION_MAX_CONFIDENCE_DELTA = 0.05;
+const ACTIVITY_PERSONALIZATION_CONFIDENCE_STEP = 0.01;
+const ACTIVITY_PERSONALIZATION_DAYPART_MIN_REVIEWED_SAMPLES = 2;
+const ACTIVITY_PERSONALIZATION_MIN_DURATION_BY_KIND = {
+  activity: 12,
+  walk: 12,
+  workout: 10,
+} as const;
+const DETECTOR_KIND_BY_ACTIVITY = {
+  Activity: 'activity',
+  Walk: 'walk',
+  Workout: 'workout',
+} as const;
+
+type PersonalizableActivityName = typeof PERSONALIZABLE_ACTIVITY_NAMES[number];
+type DetectorPersonalizationKind = keyof typeof DEFAULT_ACTIVITY_DETECTOR_THRESHOLDS;
+type PersistedActivityPersonalizationDaypart = 'all' | ActivityDetectorDaypart;
+
+const PERSISTED_ACTIVITY_PERSONALIZATION_DAYPARTS: readonly PersistedActivityPersonalizationDaypart[] = [
+  'all',
+  ...ACTIVITY_DETECTOR_DAYPARTS,
+];
 
 function parseActivityDatabaseId(activityId: string): number | null {
   const match = /^(?:activity|manual)-(\d+)$/.exec(activityId);
@@ -589,6 +640,213 @@ function toActivityRecord(row: ActivityRow): ActivityRecord {
         source,
         reviewState,
   };
+}
+
+function isPersonalizableActivityName(activity: string): activity is PersonalizableActivityName {
+  return PERSONALIZABLE_ACTIVITY_NAMES.some((candidate) => candidate === activity);
+}
+
+function buildDefaultActivityDetectorPersonalization(): ActivityDetectorPersonalization {
+  return {
+    activity: { ...DEFAULT_ACTIVITY_DETECTOR_THRESHOLDS.activity },
+    walk: { ...DEFAULT_ACTIVITY_DETECTOR_THRESHOLDS.walk },
+    workout: { ...DEFAULT_ACTIVITY_DETECTOR_THRESHOLDS.workout },
+  };
+}
+
+function buildActivityDetectorPersonalization(reviewedRows: readonly ActivityPersonalizationSourceRow[]) {
+  const personalization = buildDefaultActivityDetectorPersonalization();
+  const stats = new Map<
+    PersonalizableActivityName,
+    Map<
+      PersistedActivityPersonalizationDaypart,
+      {
+        positiveCount: number;
+        negativeCount: number;
+        positiveDurations: number[];
+      }
+    >
+  >(
+    PERSONALIZABLE_ACTIVITY_NAMES.map((activity) => {
+      const entries = new Map<
+        PersistedActivityPersonalizationDaypart,
+        {
+          positiveCount: number;
+          negativeCount: number;
+          positiveDurations: number[];
+        }
+      >(
+        PERSISTED_ACTIVITY_PERSONALIZATION_DAYPARTS.map((daypart) => [
+          daypart,
+          {
+            positiveCount: 0,
+            negativeCount: 0,
+            positiveDurations: [],
+          },
+        ]),
+      );
+
+      return [activity, entries];
+    }),
+  );
+
+  for (const row of reviewedRows) {
+    if (!isPersonalizableActivityName(row.activity)) {
+      continue;
+    }
+
+    const entries = stats.get(row.activity)!;
+    const daypart = activityDetectorDaypartForDate(parseSqliteDateTime(row.start));
+    const applicableDayparts: PersistedActivityPersonalizationDaypart[] = ['all', daypart];
+    const durationMinutes = Math.max(
+      1,
+      minutesBetween(parseSqliteDateTime(row.start), parseSqliteDateTime(row.end)),
+    );
+
+    for (const applicableDaypart of applicableDayparts) {
+      const entry = entries.get(applicableDaypart)!;
+
+      if (row.review_state === 'dismissed') {
+        entry.negativeCount += 1;
+        continue;
+      }
+
+      if (row.review_state === 'confirmed' || row.review_state === 'relabelled') {
+        entry.positiveCount += 1;
+        entry.positiveDurations.push(durationMinutes);
+      }
+    }
+  }
+
+  const updatedAt = formatSqliteDateTime(new Date());
+  const rows: ActivityPersonalizationRow[] = [];
+
+  for (const activity of PERSONALIZABLE_ACTIVITY_NAMES) {
+    const detectorKind = DETECTOR_KIND_BY_ACTIVITY[activity];
+    const defaults = DEFAULT_ACTIVITY_DETECTOR_THRESHOLDS[detectorKind];
+    const entries = stats.get(activity)!;
+
+    for (const daypart of PERSISTED_ACTIVITY_PERSONALIZATION_DAYPARTS) {
+      const entry = entries.get(daypart)!;
+      const medianPositiveDuration = median(entry.positiveDurations);
+      let minDurationMinutes = defaults.minDurationMinutes;
+      const minimumSamples = daypart === 'all'
+        ? ACTIVITY_PERSONALIZATION_MIN_REVIEWED_SAMPLES
+        : ACTIVITY_PERSONALIZATION_DAYPART_MIN_REVIEWED_SAMPLES;
+
+      if (entry.positiveCount >= minimumSamples && medianPositiveDuration !== null) {
+        const reduction = clamp(
+          defaults.minDurationMinutes - medianPositiveDuration,
+          0,
+          ACTIVITY_PERSONALIZATION_MAX_DURATION_REDUCTION_MINUTES,
+        );
+        minDurationMinutes = Math.max(
+          ACTIVITY_PERSONALIZATION_MIN_DURATION_BY_KIND[detectorKind],
+          defaults.minDurationMinutes - reduction,
+        );
+      }
+
+      const reviewedCount = entry.positiveCount + entry.negativeCount;
+      let minConfidence = defaults.minConfidence;
+      if (reviewedCount >= minimumSamples) {
+        const confidenceShift = clamp(
+          (entry.negativeCount - entry.positiveCount) * ACTIVITY_PERSONALIZATION_CONFIDENCE_STEP,
+          -ACTIVITY_PERSONALIZATION_MAX_CONFIDENCE_DELTA,
+          ACTIVITY_PERSONALIZATION_MAX_CONFIDENCE_DELTA,
+        );
+        minConfidence = clamp(
+          defaults.minConfidence + confidenceShift,
+          defaults.minConfidence - ACTIVITY_PERSONALIZATION_MAX_CONFIDENCE_DELTA,
+          defaults.minConfidence + ACTIVITY_PERSONALIZATION_MAX_CONFIDENCE_DELTA,
+        );
+      }
+
+      if (daypart === 'all') {
+        personalization[detectorKind] = {
+          minDurationMinutes,
+          minConfidence,
+          dayparts: {},
+        };
+      } else {
+        personalization[detectorKind] = {
+          ...personalization[detectorKind],
+          dayparts: {
+            ...personalization[detectorKind]?.dayparts,
+            [daypart]: {
+              minDurationMinutes,
+              minConfidence,
+            },
+          },
+        };
+      }
+
+      rows.push({
+        activity_kind: activity,
+        daypart,
+        positive_count: entry.positiveCount,
+        negative_count: entry.negativeCount,
+        min_duration_minutes: Number(minDurationMinutes.toFixed(2)),
+        min_confidence: Number(minConfidence.toFixed(2)),
+        updated_at: updatedAt,
+      });
+    }
+  }
+
+  return {
+    personalization,
+    rows,
+  };
+}
+
+async function replaceActivityDetectorPersonalizationRows(
+  db: SQLiteDatabase,
+  rows: readonly ActivityPersonalizationRow[],
+) {
+  await withAggregateMutationLock(db, async () => {
+    await withExclusiveTransaction(db, async (tx) => {
+      await tx.execAsync('DELETE FROM activity_personalization;');
+
+      for (const row of rows) {
+        await tx.runAsync(
+          `
+            INSERT INTO activity_personalization (
+              activity_kind,
+              daypart,
+              positive_count,
+              negative_count,
+              min_duration_minutes,
+              min_confidence,
+              updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+          `,
+          row.activity_kind,
+          row.daypart,
+          row.positive_count,
+          row.negative_count,
+          row.min_duration_minutes,
+          row.min_confidence,
+          row.updated_at,
+        );
+      }
+    });
+  });
+}
+
+async function rebuildActivityDetectorPersonalization(db: SQLiteDatabase): Promise<ActivityDetectorPersonalization> {
+  const reviewedRows = await db.getAllAsync<ActivityPersonalizationSourceRow>(
+    `
+      SELECT activity, review_state, start, end
+      FROM activities
+      WHERE activity IN ('Activity', 'Walk', 'Workout') AND review_state <> 'none'
+      ORDER BY start ASC
+    `,
+  );
+  const built = buildActivityDetectorPersonalization(reviewedRows);
+
+  await replaceActivityDetectorPersonalizationRows(db, built.rows);
+
+  return built.personalization;
 }
 
 function toHeartDayStatRecord(row: HeartDayStatRow): HeartDayStatRecord {
@@ -2638,6 +2896,15 @@ function buildHeartIntradaySleepDetails(
   };
 }
 
+function buildHeartIntradayActivityDetails(activity: ActivityRecord): HeartIntradayMarkerDetails {
+  return {
+    durationMinutes: Math.max(1, Math.round(exactMinutesBetween(activity.start, activity.end))),
+    confidence: activity.confidence,
+    source: activity.source,
+    reviewState: activity.reviewState,
+  };
+}
+
 function buildHeartIntradayMarkers(
   windowStart: Date,
   windowEnd: Date,
@@ -2675,9 +2942,7 @@ function buildHeartIntradayMarkers(
       timeLabel: `${formatClock(range.start)} - ${formatClock(range.end)}`,
       startFraction: range.startFraction,
       endFraction: range.endFraction,
-      details: {
-        durationMinutes: Math.max(1, Math.round(exactMinutesBetween(activity.start, activity.end))),
-      },
+      details: buildHeartIntradayActivityDetails(activity),
     } satisfies HeartIntradayMarker];
   });
 
@@ -3540,8 +3805,11 @@ function buildDerivedMetricMaps(heartRows: HeartRateRecord[]) {
   return updates;
 }
 
-function buildDerivedDetectionArtifacts(heartRows: HeartRateRecord[]) {
-  const detectionArtifacts = detectActivityArtifacts(heartRows);
+function buildDerivedDetectionArtifacts(
+  heartRows: HeartRateRecord[],
+  personalization?: ActivityDetectorPersonalization,
+) {
+  const detectionArtifacts = detectActivityArtifacts(heartRows, personalization);
   const sleepCandidates = mergeNearbySleepPeriods(
     detectionArtifacts.sleepCandidates,
   ).filter((period) => period.durationMinutes >= MIN_SLEEP_DURATION_MINUTES);
@@ -4316,8 +4584,14 @@ export async function refreshDerivedDataRange(
     rows: metricRows.length,
   });
 
+  const personalizationStartedAt = Date.now();
+  const detectorPersonalization = await rebuildActivityDetectorPersonalization(db);
+  logMobilePerf('derived.range.buildActivityPersonalization', personalizationStartedAt, {
+    reviewedKinds: Object.keys(detectorPersonalization).length,
+  });
+
   const artifactBuildStartedAt = Date.now();
-  const artifacts = buildDerivedDetectionArtifacts(detectionRows);
+  const artifacts = buildDerivedDetectionArtifacts(detectionRows, detectorPersonalization);
   logMobilePerf('derived.range.buildArtifacts', artifactBuildStartedAt, {
     rows: detectionRows.length,
     sleepCycles: artifacts.sleepCycles.length,
@@ -4402,8 +4676,14 @@ export async function refreshDerivedData(db: SQLiteDatabase) {
     rows: heartRows.length,
   });
 
+  const personalizationStartedAt = Date.now();
+  const detectorPersonalization = await rebuildActivityDetectorPersonalization(db);
+  logMobilePerf('derived.full.buildActivityPersonalization', personalizationStartedAt, {
+    reviewedKinds: Object.keys(detectorPersonalization).length,
+  });
+
   const artifactBuildStartedAt = Date.now();
-  const artifacts = buildDerivedDetectionArtifacts(heartRows);
+  const artifacts = buildDerivedDetectionArtifacts(heartRows, detectorPersonalization);
   logMobilePerf('derived.full.buildArtifacts', artifactBuildStartedAt, {
     rows: heartRows.length,
     sleepCycles: artifacts.sleepCycles.length,
@@ -5675,8 +5955,10 @@ export class SQLiteHealthRepository implements HealthRepository {
         startSql,
       );
 
+      await rebuildActivityDetectorPersonalization(this.db);
+
       await refreshDashboardSnapshot(this.db, 'full');
-      this.invalidateCaches(['dashboard', 'sleep', 'wellness', 'trends']);
+      this.invalidateCaches(['dashboard', 'sleep', 'heart', 'wellness', 'trends']);
 
       return row ? `manual-${row.id}` : `manual-${startSql}`;
     });
@@ -5698,8 +5980,10 @@ export class SQLiteHealthRepository implements HealthRepository {
         databaseId,
       );
 
+      await rebuildActivityDetectorPersonalization(this.db);
+
       await refreshDashboardSnapshot(this.db, 'full');
-      this.invalidateCaches(['dashboard', 'sleep', 'wellness', 'trends']);
+      this.invalidateCaches(['dashboard', 'sleep', 'heart', 'wellness', 'trends']);
     });
   }
 
@@ -5719,8 +6003,10 @@ export class SQLiteHealthRepository implements HealthRepository {
         databaseId,
       );
 
+      await rebuildActivityDetectorPersonalization(this.db);
+
       await refreshDashboardSnapshot(this.db, 'full');
-      this.invalidateCaches(['dashboard', 'sleep', 'wellness', 'trends']);
+      this.invalidateCaches(['dashboard', 'sleep', 'heart', 'wellness', 'trends']);
     });
   }
 
@@ -5760,8 +6046,10 @@ export class SQLiteHealthRepository implements HealthRepository {
         databaseId,
       );
 
+      await rebuildActivityDetectorPersonalization(this.db);
+
       await refreshDashboardSnapshot(this.db, 'full');
-      this.invalidateCaches(['dashboard', 'sleep', 'wellness', 'trends']);
+      this.invalidateCaches(['dashboard', 'sleep', 'heart', 'wellness', 'trends']);
     });
   }
 

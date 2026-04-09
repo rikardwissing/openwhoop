@@ -36,6 +36,8 @@ const MIN_CONTACT_RATIO = 0.5;
 const MIN_SIGNAL_RATIO = 0.5;
 
 export type ActivityDetectorKind = 'sleep' | 'activity' | 'walk' | 'workout';
+export type ActivityDetectorDaypart = 'morning' | 'midday' | 'evening' | 'night';
+export const ACTIVITY_DETECTOR_DAYPARTS = ['morning', 'midday', 'evening', 'night'] as const;
 
 export interface ActivityDetectorInputRow {
   date: Date;
@@ -58,6 +60,54 @@ export interface ActivityDetectorPeriod {
 export interface ActivityDetectionArtifacts {
   sleepCandidates: ActivityDetectorPeriod[];
   activityCandidates: ActivityDetectorPeriod[];
+}
+
+type PersonalizableActivityDetectorKind = Exclude<ActivityDetectorKind, 'sleep'>;
+
+export interface ActivityDetectorThresholdPersonalization {
+  minDurationMinutes?: number;
+  minConfidence?: number;
+}
+
+export interface ActivityDetectorKindPersonalization extends ActivityDetectorThresholdPersonalization {
+  dayparts?: Partial<Record<ActivityDetectorDaypart, ActivityDetectorThresholdPersonalization>>;
+}
+
+export type ActivityDetectorPersonalization = Partial<
+  Record<PersonalizableActivityDetectorKind, ActivityDetectorKindPersonalization>
+>;
+
+export const DEFAULT_ACTIVITY_DETECTOR_THRESHOLDS = {
+  activity: {
+    minDurationMinutes: MIN_ACTIVITY_DURATION_MINUTES,
+    minConfidence: MIN_ACTIVITY_CONFIDENCE,
+  },
+  walk: {
+    minDurationMinutes: MIN_ACTIVITY_DURATION_MINUTES,
+    minConfidence: MIN_WALK_CONFIDENCE,
+  },
+  workout: {
+    minDurationMinutes: MIN_WORKOUT_DURATION_MINUTES,
+    minConfidence: MIN_WORKOUT_CONFIDENCE,
+  },
+} satisfies Record<PersonalizableActivityDetectorKind, Required<ActivityDetectorThresholdPersonalization>>;
+
+export function activityDetectorDaypartForDate(date: Date): ActivityDetectorDaypart {
+  const hour = date.getHours();
+
+  if (hour >= 5 && hour < 11) {
+    return 'morning';
+  }
+
+  if (hour >= 11 && hour < 16) {
+    return 'midday';
+  }
+
+  if (hour >= 16 && hour < 21) {
+    return 'evening';
+  }
+
+  return 'night';
 }
 
 type BinaryPeriodKind = 'sleep' | 'wake';
@@ -560,6 +610,34 @@ function classifyActivityKind(period: ActivityDetectorPeriod, epochs: readonly A
   return 'activity';
 }
 
+function resolveActivityDetectorThresholds(
+  kind: PersonalizableActivityDetectorKind,
+  periodStart: Date,
+  personalization?: ActivityDetectorPersonalization,
+) {
+  const defaults = DEFAULT_ACTIVITY_DETECTOR_THRESHOLDS[kind];
+  const overrides = personalization?.[kind];
+  const daypart = activityDetectorDaypartForDate(periodStart);
+  const daypartOverrides = overrides?.dayparts?.[daypart];
+
+  const resolveDuration = (override: ActivityDetectorThresholdPersonalization | undefined, fallback: number) =>
+    typeof override?.minDurationMinutes === 'number' && Number.isFinite(override.minDurationMinutes)
+      ? Math.max(1, override.minDurationMinutes)
+      : fallback;
+  const resolveConfidence = (override: ActivityDetectorThresholdPersonalization | undefined, fallback: number) =>
+    typeof override?.minConfidence === 'number' && Number.isFinite(override.minConfidence)
+      ? clamp(override.minConfidence, 0.1, 1)
+      : fallback;
+
+  const baseDuration = resolveDuration(overrides, defaults.minDurationMinutes);
+  const baseConfidence = resolveConfidence(overrides, defaults.minConfidence);
+
+  return {
+    minDurationMinutes: resolveDuration(daypartOverrides, baseDuration),
+    minConfidence: resolveConfidence(daypartOverrides, baseConfidence),
+  };
+}
+
 function hasRrBpmDisagreement(period: ActivityDetectorPeriod, epochs: readonly ActivityEpoch[]) {
   const overlapping = epochs.filter((epoch) => epoch.end >= period.start && epoch.start <= period.end);
   let weightedRrDerivedBpm = 0;
@@ -585,23 +663,29 @@ function hasRrBpmDisagreement(period: ActivityDetectorPeriod, epochs: readonly A
   return Math.abs(observedBpm - rrDerivedBpm) > MAX_RR_BPM_DISAGREEMENT;
 }
 
-function passesActivityRetentionThreshold(period: ActivityDetectorPeriod, epochs: readonly ActivityEpoch[]) {
+function passesActivityRetentionThreshold(
+  period: ActivityDetectorPeriod,
+  epochs: readonly ActivityEpoch[],
+  personalization?: ActivityDetectorPersonalization,
+) {
   if (hasRrBpmDisagreement(period, epochs)) {
     return false;
   }
 
-  if (period.kind === 'workout') {
-    return period.durationMinutes >= MIN_WORKOUT_DURATION_MINUTES && period.confidence >= MIN_WORKOUT_CONFIDENCE;
-  }
+  const thresholds = resolveActivityDetectorThresholds(
+    period.kind === 'walk' || period.kind === 'workout' ? period.kind : 'activity',
+    period.start,
+    personalization,
+  );
 
-  if (period.kind === 'walk') {
-    return period.durationMinutes >= MIN_ACTIVITY_DURATION_MINUTES && period.confidence >= MIN_WALK_CONFIDENCE;
-  }
-
-  return period.durationMinutes >= MIN_ACTIVITY_DURATION_MINUTES && period.confidence >= MIN_ACTIVITY_CONFIDENCE;
+  return period.durationMinutes >= thresholds.minDurationMinutes && period.confidence >= thresholds.minConfidence;
 }
 
-function collectActivityCandidates(epochs: readonly ActivityEpoch[], context: ActivityContext) {
+function collectActivityCandidates(
+  epochs: readonly ActivityEpoch[],
+  context: ActivityContext,
+  personalization?: ActivityDetectorPersonalization,
+) {
   if (epochs.length === 0) {
     return [] as ActivityDetectorPeriod[];
   }
@@ -687,10 +771,13 @@ function collectActivityCandidates(epochs: readonly ActivityEpoch[], context: Ac
       ...period,
       kind: classifyActivityKind(period, epochs, context),
     }))
-    .filter((period) => passesActivityRetentionThreshold(period, epochs));
+    .filter((period) => passesActivityRetentionThreshold(period, epochs, personalization));
 }
 
-export function detectActivityArtifacts(rows: readonly ActivityDetectorInputRow[]): ActivityDetectionArtifacts {
+export function detectActivityArtifacts(
+  rows: readonly ActivityDetectorInputRow[],
+  personalization?: ActivityDetectorPersonalization,
+): ActivityDetectionArtifacts {
   const periods = detectStillnessPeriods(rows);
   const sleepCandidates = periods
     .filter((period) => period.kind === 'sleep' && period.durationMinutes >= MIN_SLEEP_CANDIDATE_DURATION_MINUTES)
@@ -711,7 +798,11 @@ export function detectActivityArtifacts(rows: readonly ActivityDetectorInputRow[
   }
 
   const context = buildActivityContext(epochs);
-  const activityCandidates = collectActivityCandidates(classifyActivityEpochs(epochs, context), context);
+  const activityCandidates = collectActivityCandidates(
+    classifyActivityEpochs(epochs, context),
+    context,
+    personalization,
+  );
 
   return {
     sleepCandidates,

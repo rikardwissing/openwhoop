@@ -466,9 +466,12 @@ function buildMockSleepMarkerDetails(session: SleepSession): HeartIntradayMarker
   };
 }
 
-function buildMockActivityMarkerDetails(durationMinutes: number): HeartIntradayMarker['details'] {
+function buildMockActivityMarkerDetails(activity: MockActivityRecord): HeartIntradayMarker['details'] {
   return {
-    durationMinutes,
+    durationMinutes: activity.durationMinutes,
+    confidence: null,
+    source: activity.source,
+    reviewState: activity.reviewState,
   };
 }
 
@@ -482,7 +485,7 @@ function buildIntradayActivityMarkers(activities: MockActivityRecord[]): HeartIn
       timeLabel: `${formatClockMinutes(activity.startMinutes)} - ${formatClockMinutes(activity.startMinutes + activity.durationMinutes)}`,
       startFraction: fractionOfDay(activity.startMinutes),
       endFraction: fractionOfDay(activity.startMinutes + activity.durationMinutes),
-      details: buildMockActivityMarkerDetails(activity.durationMinutes),
+      details: buildMockActivityMarkerDetails(activity),
     }));
 }
 
@@ -569,7 +572,7 @@ export class MockHealthRepository implements HealthRepository {
           todayDashboardHeartWindowStart,
           todayDashboardHeartWindowEnd,
         ),
-        details: buildMockActivityMarkerDetails(activity.durationMinutes),
+        details: buildMockActivityMarkerDetails(activity),
       };
     });
 

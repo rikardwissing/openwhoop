@@ -20,6 +20,26 @@ function makeRow(
   };
 }
 
+function buildPersonalizableWalkRows(start = new Date(2026, 3, 6, 7, 0, 0)) {
+  const rows: ActivityDetectorInputRow[] = [];
+  const restGravityA: [number, number, number] = [0.15, -0.02, 0.97];
+  const restGravityB: [number, number, number] = [0.162, -0.018, 0.968];
+  const walkGravityA: [number, number, number] = [0.35, -0.42, 0.84];
+  const walkGravityB: [number, number, number] = [-0.28, -0.81, 0.51];
+
+  for (let minute = 0; minute < 4 * 60; minute += 1) {
+    const date = new Date(start.getTime() + minute * 60_000);
+    const isWalk = minute >= 95 && minute < 114;
+    rows.push(makeRow(
+      date,
+      isWalk ? 90 : 65,
+      isWalk ? (minute % 2 === 0 ? walkGravityA : walkGravityB) : (minute % 2 === 0 ? restGravityA : restGravityB),
+    ));
+  }
+
+  return rows;
+}
+
 describe('activityDetector sleep candidates', () => {
   it('keeps dense overnight sleep onset instead of collapsing it into wake on 1Hz data', () => {
     const rows: ActivityDetectorInputRow[] = [];
@@ -93,6 +113,44 @@ describe('activityDetector sleep candidates', () => {
     const artifacts = detectActivityArtifacts(rows);
 
     expect(artifacts.activityCandidates).toHaveLength(0);
+  });
+
+  it('keeps shorter walk bouts when personalized walk floors allow them', () => {
+    const artifacts = detectActivityArtifacts(buildPersonalizableWalkRows(), {
+      walk: {
+        minDurationMinutes: 18,
+        minConfidence: 0.7,
+      },
+    });
+
+    expect(artifacts.activityCandidates).toHaveLength(1);
+    expect(artifacts.activityCandidates[0]?.kind).toBe('walk');
+    expect(artifacts.activityCandidates[0]?.durationMinutes).toBeGreaterThanOrEqual(18);
+  });
+
+  it('applies daypart-specific walk floors on top of global personalization', () => {
+    const artifacts = detectActivityArtifacts(
+      [
+        ...buildPersonalizableWalkRows(new Date(2026, 3, 6, 7, 0, 0)),
+        ...buildPersonalizableWalkRows(new Date(2026, 3, 6, 17, 0, 0)),
+      ],
+      {
+        walk: {
+          minDurationMinutes: 18,
+          minConfidence: 0.7,
+          dayparts: {
+            evening: {
+              minDurationMinutes: 20,
+              minConfidence: 0.75,
+            },
+          },
+        },
+      },
+    );
+
+    expect(artifacts.activityCandidates).toHaveLength(1);
+    expect(artifacts.activityCandidates[0]?.kind).toBe('walk');
+    expect(artifacts.activityCandidates[0]?.start.getHours()).toBe(8);
   });
 
   it('keeps sustained stronger daytime exercise bouts as activity candidates', () => {
