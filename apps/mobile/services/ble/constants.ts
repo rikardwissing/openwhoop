@@ -39,6 +39,7 @@ export enum EventNumber {
 export enum CommandNumber {
   ToggleRealtimeHr = 3,
   SetClock = 10,
+  ToggleR7DataCollection = 16,
   SendHistoricalData = 22,
   HistoricalDataResult = 23,
   GetBatteryLevel = 26,

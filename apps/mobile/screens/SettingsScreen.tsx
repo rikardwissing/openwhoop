@@ -15,6 +15,7 @@ import { StatChip } from '@/components/ui/StatChip';
 import { brandMark } from '@/constants/assets';
 import { brand } from '@/constants/brand';
 import { colors, typography } from '@/constants/theme';
+import { inspectDatabaseMaintenance, runDatabaseMaintenance } from '@/db/maintenance';
 import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
 import { useOptionalAppDatabase, useOptionalAppDatabaseControls } from '@/providers/AppDatabaseProvider';
 import { useHealthRepository, useRefreshHealthData } from '@/providers/HealthDataProvider';
@@ -25,13 +26,11 @@ import {
   useWearableSyncState,
 } from '@/providers/WearableSyncProvider';
 import { exportAndShareDatabaseSnapshot } from '@/services/databaseExport';
-import { disableBackgroundSync } from '@/services/background/backgroundSyncTask';
 import {
   describeBatteryStatus,
   describeChargingState,
   describeWearState,
   isBlockingSyncStatus,
-  type BackgroundTaskApiStatus,
   type SyncImportPerformanceSummary,
 } from '@/types/device';
 
@@ -125,20 +124,7 @@ function formatBytes(sizeBytes: number) {
   return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function describeNotificationPermission(permission: 'unknown' | 'granted' | 'provisional' | 'denied') {
-  switch (permission) {
-    case 'granted':
-      return 'Allowed';
-    case 'provisional':
-      return 'Provisional';
-    case 'denied':
-      return 'Denied';
-    default:
-      return 'Unknown';
-  }
-}
-
-function describeBackgroundResult(result: 'success' | 'skipped' | 'error' | null) {
+function describeSyncResult(result: 'success' | 'skipped' | 'error' | null) {
   switch (result) {
     case 'success':
       return 'Success';
@@ -151,7 +137,7 @@ function describeBackgroundResult(result: 'success' | 'skipped' | 'error' | null
   }
 }
 
-function describeBackgroundRunState(
+function describeSyncRunState(
   lastRunStartedAt: string | null,
   lastRunFinishedAt: string | null,
   lastResult: 'success' | 'skipped' | 'error' | null,
@@ -160,18 +146,7 @@ function describeBackgroundRunState(
     return 'Running';
   }
 
-  return describeBackgroundResult(lastResult);
-}
-
-function describeBackgroundApiStatus(status: BackgroundTaskApiStatus) {
-  switch (status) {
-    case 'available':
-      return 'Available';
-    case 'restricted':
-      return 'Restricted';
-    default:
-      return 'Unknown';
-  }
+  return describeSyncResult(lastResult);
 }
 
 function describeSyncSource(source: SyncImportPerformanceSummary['source']) {
@@ -304,10 +279,10 @@ export function SettingsScreen() {
   const databaseControls = useOptionalAppDatabaseControls();
   const repository = useHealthRepository();
   const refreshHealthData = useRefreshHealthData();
-  const { backgroundSyncDiagnostics, backgroundSyncState, deviceState } = useWearableSyncState();
+  const { backgroundSyncState, deviceState } = useWearableSyncState();
   const { liveEvents } = useWearableLiveEvents();
   const { progress } = useWearableSyncProgress();
-  const { forgetDevice, syncSelected, triggerBackgroundSyncTest, restartDevice } = useWearableSyncActions();
+  const { forgetDevice, syncSelected, restartDevice } = useWearableSyncActions();
   const { onRefresh, refreshing } = useWearableRefreshControl();
   const [exportState, setExportState] = useState<{
     status: 'idle' | 'running' | 'success' | 'error';
@@ -338,23 +313,29 @@ export function SettingsScreen() {
     status: 'idle',
     message: 'Remove local wearable history, pairing state, diagnostics, and seeded data from this phone.',
   });
+  const [maintenanceState, setMaintenanceState] = useState<{
+    status: 'idle' | 'running' | 'success' | 'error';
+    message: string;
+  }>({
+    status: 'idle',
+    message: 'Run manual cleanup to drop the legacy IMU column if needed and vacuum free SQLite pages.',
+  });
   const deviceBusy = isBlockingSyncStatus(progress.status);
+  const maintenanceBusy = maintenanceState.status === 'running';
   const batteryChipAccent = batteryAccent(deviceState.batteryPercent);
   const chargingChipAccent = chargingAccent(deviceState.chargingStatus);
   const wearChipAccent = wearAccent(deviceState.bodyStatus);
-  const exportDisabled = deviceBusy || exportState.status === 'running' || !db;
+  const exportDisabled = deviceBusy || maintenanceBusy || exportState.status === 'running' || !db;
   const clearDataDisabled =
     progress.status === 'scanning' ||
     deviceBusy ||
+    maintenanceBusy ||
     clearDataState.status === 'running' ||
     !databaseControls;
   const performanceSweepDisabled =
-    progress.status === 'scanning' || deviceBusy || performanceSweepState.status === 'running' || !db;
-  const backgroundRunState = describeBackgroundRunState(
-    backgroundSyncState.lastRunStartedAt,
-    backgroundSyncState.lastRunFinishedAt,
-    backgroundSyncState.lastResult,
-  );
+    progress.status === 'scanning' || deviceBusy || maintenanceBusy || performanceSweepState.status === 'running' || !db;
+  const maintenanceDisabled =
+    progress.status === 'scanning' || deviceBusy || exportState.status === 'running' || performanceSweepState.status === 'running' || clearDataState.status === 'running' || maintenanceBusy || !db;
   const latestSyncImportSummary = backgroundSyncState.lastSyncImportSummary;
   const latestPerformanceRun = performanceRuns[0] ?? null;
 
@@ -452,6 +433,66 @@ export function SettingsScreen() {
     }
   }
 
+  async function handleRunDatabaseMaintenance() {
+    if (!db) {
+      setMaintenanceState({
+        status: 'error',
+        message: 'Local database maintenance needs the local SQLite provider in this build.',
+      });
+      return;
+    }
+
+    setMaintenanceState({
+      status: 'running',
+      message: 'Inspecting the local database for cleanup work...',
+    });
+
+    try {
+      const inspection = await inspectDatabaseMaintenance(db);
+
+      if (!inspection.needsMaintenance) {
+        setMaintenanceState({
+          status: 'success',
+          message: `No local database cleanup is needed right now. Current file size is ${formatBytes(inspection.sizeBytes)}.`,
+        });
+        return;
+      }
+
+      setMaintenanceState({
+        status: 'running',
+        message: 'Running local database maintenance...',
+      });
+
+      const result = await runDatabaseMaintenance(db);
+      const actions: string[] = [];
+
+      if (result.migratedLegacyHeartRate) {
+        actions.push('removed the legacy IMU schema');
+      }
+
+      if (result.vacuumed) {
+        actions.push(
+          result.reclaimedBytes > 0
+            ? `reclaimed ${formatBytes(result.reclaimedBytes)}`
+            : 'vacuumed free pages',
+        );
+      }
+
+      setMaintenanceState({
+        status: 'success',
+        message:
+          actions.length > 0
+            ? `Local database maintenance complete: ${actions.join(' and ')}. Current file size is ${formatBytes(result.sizeBytesAfter)}.`
+            : `Local database maintenance finished. Current file size is ${formatBytes(result.sizeBytesAfter)}.`,
+      });
+    } catch (error) {
+      setMaintenanceState({
+        status: 'error',
+        message: error instanceof Error ? error.message : 'Unable to run local database maintenance.',
+      });
+    }
+  }
+
   async function handleRunFullPerformanceSweep() {
     if (!db) {
       setPerformanceSweepState({
@@ -508,8 +549,6 @@ export function SettingsScreen() {
     try {
       if (deviceState.id) {
         await forgetDevice();
-      } else {
-        await disableBackgroundSync();
       }
       await databaseControls.clearAllLocalData();
       router.replace('/');
@@ -770,7 +809,7 @@ export function SettingsScreen() {
                 <StatChip
                   accent={colors.borderStrong}
                   label="Last sync"
-                  value={latestPerformanceRun.lastSyncResult ? describeBackgroundRunState(latestPerformanceRun.lastSyncStartedAt, latestPerformanceRun.lastSyncFinishedAt, latestPerformanceRun.lastSyncResult) : 'Unknown'}
+                  value={latestPerformanceRun.lastSyncResult ? describeSyncRunState(latestPerformanceRun.lastSyncStartedAt, latestPerformanceRun.lastSyncFinishedAt, latestPerformanceRun.lastSyncResult) : 'Unknown'}
                 />
               </View>
 
@@ -788,95 +827,12 @@ export function SettingsScreen() {
           ) : null}
 
           <View>
-            <Text style={styles.settingTitle}>Recent sweeps</Text>
-            <Text style={styles.settingSubtitle}>{performanceHistoryState.message}</Text>
-          </View>
-
-          {performanceRuns.length === 0 ? (
-            <Text
-              style={[
-                styles.roadmapText,
-                performanceHistoryState.status === 'error' ? styles.errorText : null,
-              ]}>
-              {performanceHistoryState.message}
-            </Text>
-          ) : (
-            performanceRuns.map((run) => (
-              <Text key={run.id} style={styles.roadmapText}>
-                {summarizeDiagnosticRun(run)}
-              </Text>
-            ))
-          )}
-        </View>
-      </GlassCard>
-
-      <GlassCard accentColor={colors.violet}>
-        <SectionHeader title="Background Sync" trailing={deviceState.id ? 'Auto after pairing' : 'Inactive'} />
-        <View style={styles.settingColumn}>
-          <View style={styles.chipWrap}>
-            <StatChip
-              accent={backgroundSyncDiagnostics.apiStatus === 'available' ? colors.success : colors.borderStrong}
-              label="API"
-              value={describeBackgroundApiStatus(backgroundSyncDiagnostics.apiStatus)}
-            />
-            <StatChip
-              accent={backgroundSyncDiagnostics.isTaskRegistered ? colors.success : colors.borderStrong}
-              label="Registered"
-              value={backgroundSyncDiagnostics.isTaskRegistered ? 'Yes' : 'No'}
-            />
-            <StatChip
-              accent={colors.borderStrong}
-              label="Min interval"
-              value={`${backgroundSyncDiagnostics.minimumIntervalMinutes}m`}
-            />
-            <StatChip
-              accent={deviceState.id ? colors.success : colors.borderStrong}
-              label="Status"
-              value={deviceState.id ? 'Enabled' : 'No wearable'}
-            />
-            <StatChip
-              accent={colors.borderStrong}
-              label="Alerts"
-              value={describeNotificationPermission(backgroundSyncState.notificationPermission)}
-            />
-            <StatChip
-              accent={colors.borderStrong}
-              label="Last started"
-              value={backgroundSyncState.lastRunStartedAt ?? 'Not yet'}
-            />
-            <StatChip
-              accent={colors.borderStrong}
-              label="Last finished"
-              value={backgroundSyncState.lastRunFinishedAt ?? 'Not yet'}
-            />
-            <StatChip
-              accent={
-                backgroundRunState === 'Error'
-                  ? colors.alert
-                  : backgroundRunState === 'Success'
-                    ? colors.success
-                    : colors.borderStrong
-              }
-              label="Last result"
-              value={backgroundRunState}
-            />
-          </View>
-
-          <Text style={styles.roadmapText}>
-            Background sync is best effort on iPhone while the app stays in the background or suspended. iOS chooses the actual run time, and short intervals are often delayed substantially.
-          </Text>
-          <Text style={styles.roadmapText}>
-            If you force-quit the app from the app switcher, iOS stops relaunching it for this work until you open it again.
-          </Text>
-          <Text style={styles.roadmapText}>
-            Keep the official wearable app closed while Unstrap owns the strap. Two apps syncing the same device can race each other and create gaps.
-          </Text>
-          <View>
             <Text style={styles.settingTitle}>Latest Sync Profile</Text>
             <Text style={styles.settingSubtitle}>
-              Stores the last import timing snapshot recorded on this phone from either a manual or background sync.
+              Stores the last import timing snapshot recorded on this phone from the most recent sync run.
             </Text>
           </View>
+
           {latestSyncImportSummary ? (
             <>
               <View style={styles.chipWrap}>
@@ -888,7 +844,7 @@ export function SettingsScreen() {
                 <StatChip
                   accent={syncImportStatusAccent(latestSyncImportSummary.status)}
                   label="Outcome"
-                  value={describeBackgroundResult(latestSyncImportSummary.status)}
+                  value={describeSyncResult(latestSyncImportSummary.status)}
                 />
                 <StatChip
                   accent={syncImportBottleneckAccent(latestSyncImportSummary.suspectedBottleneck)}
@@ -940,24 +896,58 @@ export function SettingsScreen() {
           ) : (
             <Text style={styles.roadmapText}>No sync profile has been recorded on this phone yet.</Text>
           )}
-          {__DEV__ ? (
-            <>
-              <View style={styles.buttonRow}>
-                <ActionButton
-                  label="Trigger test run"
-                  onPress={() => {
-                    void triggerBackgroundSyncTest();
-                  }}
-                  disabled={!deviceState.id || progress.status === 'scanning' || deviceBusy}
-                  tone="secondary"
-                />
-              </View>
-              <Text style={styles.settingSubtitle}>
-                Debug only. This uses Expo's test hook to run the background worker immediately on a physical development build.
+
+          <View>
+            <Text style={styles.settingTitle}>Recent sweeps</Text>
+            <Text style={styles.settingSubtitle}>{performanceHistoryState.message}</Text>
+          </View>
+
+          {performanceRuns.length === 0 ? (
+            <Text
+              style={[
+                styles.roadmapText,
+                performanceHistoryState.status === 'error' ? styles.errorText : null,
+              ]}>
+              {performanceHistoryState.message}
+            </Text>
+          ) : (
+            performanceRuns.map((run) => (
+              <Text key={run.id} style={styles.roadmapText}>
+                {summarizeDiagnosticRun(run)}
               </Text>
-            </>
-          ) : null}
-          {backgroundSyncState.lastError ? <Text style={styles.errorText}>{backgroundSyncState.lastError}</Text> : null}
+            ))
+          )}
+        </View>
+      </GlassCard>
+
+      <GlassCard accentColor={colors.primary}>
+        <SectionHeader title="Database Maintenance" trailing="Manual" />
+        <View style={styles.settingColumn}>
+          <View>
+            <Text style={styles.settingTitle}>Compact and repair local database</Text>
+            <Text style={styles.settingSubtitle}>
+              Runs the legacy IMU cleanup if it is still needed and vacuums free SQLite pages so the on-device database can shrink.
+            </Text>
+          </View>
+
+          <View style={styles.buttonRow}>
+            <ActionButton
+              label={maintenanceState.status === 'running' ? 'Running Maintenance...' : 'Run Database Maintenance'}
+              onPress={() => {
+                void handleRunDatabaseMaintenance();
+              }}
+              disabled={maintenanceDisabled}
+              tone="secondary"
+            />
+          </View>
+
+          <Text
+            style={[
+              styles.roadmapText,
+              maintenanceState.status === 'error' ? styles.errorText : null,
+            ]}>
+            {db ? maintenanceState.message : 'Local database maintenance is only available when the app is running with the local SQLite provider.'}
+          </Text>
         </View>
       </GlassCard>
 

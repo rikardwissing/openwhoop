@@ -3,6 +3,56 @@ import type { SQLiteDatabase } from 'expo-sqlite';
 export const APP_DATABASE_NAME = 'btwearable.db';
 export const DERIVED_DATA_SCHEMA_VERSION = 6;
 
+export async function migrateLegacyHeartRateTable(db: SQLiteDatabase) {
+  const heartRateColumns = await db.getAllAsync<{ name: string }>('PRAGMA table_info(heart_rate)');
+  const heartRateColumnNames = new Set(heartRateColumns.map((column) => column.name));
+
+  if (!heartRateColumnNames.has('imu_data')) {
+    return;
+  }
+
+  await db.execAsync('PRAGMA foreign_keys = OFF;');
+
+  try {
+    await db.execAsync(`
+      BEGIN IMMEDIATE;
+
+      DROP TABLE IF EXISTS heart_rate_next;
+
+      CREATE TABLE heart_rate_next (
+        id INTEGER PRIMARY KEY NOT NULL,
+        bpm INTEGER NOT NULL,
+        time TEXT NOT NULL UNIQUE,
+        rr_intervals TEXT NOT NULL,
+        activity INTEGER,
+        stress REAL,
+        synced INTEGER NOT NULL DEFAULT 0,
+        sensor_data TEXT,
+        spo2 REAL,
+        skin_temp REAL
+      );
+
+      INSERT INTO heart_rate_next (id, bpm, time, rr_intervals, activity, stress, synced, sensor_data, spo2, skin_temp)
+      SELECT id, bpm, time, rr_intervals, activity, stress, synced, sensor_data, spo2, skin_temp
+      FROM heart_rate;
+
+      DROP TABLE heart_rate;
+      ALTER TABLE heart_rate_next RENAME TO heart_rate;
+      CREATE INDEX IF NOT EXISTS idx_heart_rate_time ON heart_rate(time);
+
+      COMMIT;
+    `);
+  } catch (error) {
+    try {
+      await db.execAsync('ROLLBACK; DROP TABLE IF EXISTS heart_rate_next;');
+    } catch {}
+
+    throw error;
+  } finally {
+    await db.execAsync('PRAGMA foreign_keys = ON;');
+  }
+}
+
 export async function initializeDatabase(db: SQLiteDatabase) {
   await db.execAsync(`
     PRAGMA journal_mode = WAL;
@@ -16,7 +66,6 @@ export async function initializeDatabase(db: SQLiteDatabase) {
       rr_intervals TEXT NOT NULL,
       activity INTEGER,
       stress REAL,
-      imu_data TEXT,
       synced INTEGER NOT NULL DEFAULT 0,
       sensor_data TEXT,
       spo2 REAL,

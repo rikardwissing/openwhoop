@@ -1,15 +1,20 @@
 import { detectActivityArtifacts, type ActivityDetectorInputRow } from '@/data/sqlite/activityDetector';
 
-function makeRow(date: Date, bpm: number, gravity: [number, number, number]): ActivityDetectorInputRow {
+function makeRow(
+  date: Date,
+  bpm: number,
+  gravity: [number, number, number] | null,
+  overrides: Partial<ActivityDetectorInputRow> = {},
+): ActivityDetectorInputRow {
   return {
     date,
     bpm,
     rr: [1000, 990, 980],
     gravity,
-    imuData: null,
     skinContact: 1,
     signalQuality: 3074,
     ppgGreen: 18_000,
+    ...overrides,
   };
 }
 
@@ -44,4 +49,25 @@ describe('activityDetector sleep candidates', () => {
     expect(overnightSleep!.start.getTime()).toBeGreaterThanOrEqual(new Date(2026, 3, 5, 2, 20, 0).getTime());
     expect(overnightSleep!.start.getTime()).toBeLessThanOrEqual(new Date(2026, 3, 5, 2, 45, 0).getTime());
   });
+
+  it('does not classify sustained daytime wrist movement as activity without imu or a heart-rate lift', () => {
+    const rows: ActivityDetectorInputRow[] = [];
+    const start = new Date(2026, 3, 6, 9, 0, 0);
+    const wristMotionA: [number, number, number] = [0.55, -0.58, 0.61];
+    const wristMotionB: [number, number, number] = [-0.42, 0.73, 0.54];
+
+    for (let minute = 0; minute < 90; minute += 1) {
+      rows.push(makeRow(
+        new Date(start.getTime() + minute * 60_000),
+        66,
+        minute % 2 === 0 ? wristMotionA : wristMotionB,
+      ));
+    }
+
+    const artifacts = detectActivityArtifacts(rows);
+
+    expect(artifacts.sleepCandidates).toHaveLength(0);
+    expect(artifacts.activityCandidates).toHaveLength(0);
+  });
+
 });

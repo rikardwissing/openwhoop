@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
+import { inspectDatabaseMaintenance, runDatabaseMaintenance } from '@/db/maintenance';
 import { DERIVED_DATA_SCHEMA_VERSION, initializeDatabase } from '@/db/schema';
 import {
   SQLiteHealthRepository,
@@ -323,6 +324,86 @@ function calculateExpectedStressValues(samples: Array<{ bpm: number; rr: number[
 }
 
 describe('SQLiteHealthRepository', () => {
+  it('reads pragma-backed database size inspection from SQLite row names', async () => {
+    const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
+
+    await initializeDatabase(adapter as never);
+    await adapter.execAsync(`
+      INSERT INTO heart_rate (bpm, time, rr_intervals, synced, sensor_data, spo2, skin_temp)
+      VALUES (72, '2026-04-09 12:46:14', '820,810', 1, '{"ppg_green":15000}', 98, 33.6);
+    `);
+
+    const inspection = await inspectDatabaseMaintenance(adapter as never);
+
+    expect(inspection.pageCount).toBeGreaterThan(0);
+    expect(inspection.pageSizeBytes).toBeGreaterThan(0);
+    expect(inspection.sizeBytes).toBe(inspection.pageCount * inspection.pageSizeBytes);
+
+    adapter.close();
+  });
+
+  it('runs explicit database maintenance to drop imu_data while preserving rows', async () => {
+    const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
+
+    await adapter.execAsync(`
+      CREATE TABLE heart_rate (
+        id INTEGER PRIMARY KEY NOT NULL,
+        bpm INTEGER NOT NULL,
+        time TEXT NOT NULL UNIQUE,
+        rr_intervals TEXT NOT NULL,
+        activity INTEGER,
+        stress REAL,
+        imu_data TEXT,
+        synced INTEGER NOT NULL DEFAULT 0,
+        sensor_data TEXT,
+        spo2 REAL,
+        skin_temp REAL
+      );
+
+      CREATE INDEX idx_heart_rate_time ON heart_rate(time);
+
+      INSERT INTO heart_rate (id, bpm, time, rr_intervals, activity, stress, imu_data, synced, sensor_data, spo2, skin_temp)
+      VALUES (1, 72, '2026-04-09 12:46:14', '820,810', 4, 5.5, '[{"legacy":true}]', 1, '{"ppg_green":15000}', 98, 33.6);
+    `);
+
+    await initializeDatabase(adapter as never);
+    const maintenance = await runDatabaseMaintenance(adapter as never);
+
+    const columns = await adapter.getAllAsync<{ name: string }>('PRAGMA table_info(heart_rate)');
+    const row = await adapter.getFirstAsync<{
+      id: number;
+      bpm: number;
+      time: string;
+      rr_intervals: string;
+      activity: number | null;
+      stress: number | null;
+      synced: number;
+      sensor_data: string | null;
+      spo2: number | null;
+      skin_temp: number | null;
+    }>('SELECT id, bpm, time, rr_intervals, activity, stress, synced, sensor_data, spo2, skin_temp FROM heart_rate WHERE id = 1');
+    const indexes = await adapter.getAllAsync<{ name: string }>('PRAGMA index_list(heart_rate)');
+
+    expect(columns.map((column) => column.name)).not.toContain('imu_data');
+    expect(row).toEqual({
+      id: 1,
+      bpm: 72,
+      time: '2026-04-09 12:46:14',
+      rr_intervals: '820,810',
+      activity: 4,
+      stress: 5.5,
+      synced: 1,
+      sensor_data: '{"ppg_green":15000}',
+      spo2: 98,
+      skin_temp: 33.6,
+    });
+    expect(maintenance.ran).toBe(true);
+    expect(maintenance.migratedLegacyHeartRate).toBe(true);
+    expect(indexes.map((index) => index.name)).toContain('idx_heart_rate_time');
+
+    adapter.close();
+  });
+
   it('skips derived refresh when derived state matches the source history', async () => {
     const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
     await initializeDatabase(adapter as never);

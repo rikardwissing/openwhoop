@@ -2,11 +2,17 @@ import type { SQLiteDatabase, SQLiteStatement } from 'expo-sqlite';
 import { BleManager, type Device, type Subscription } from 'react-native-ble-plx';
 
 import { markDerivedRefreshPending, refreshHeartAggregatesForRange } from '@/data/sqlite/SQLiteHealthRepository';
-import { acquireBackgroundSyncLock, recordSyncImportSummary, releaseBackgroundSyncLock } from '@/services/background/backgroundSyncState';
+import {
+  acquireBackgroundSyncLock,
+  recordBackgroundRunResult,
+  recordBackgroundRunStart,
+  recordSyncImportSummary,
+  releaseBackgroundSyncLock,
+} from '@/services/background/backgroundSyncState';
 import { CMD_FROM_STRAP_UUID, CMD_TO_STRAP_UUID, DATA_FROM_STRAP_UUID, EVENTS_FROM_STRAP_UUID, EventNumber, MEMFAULT_UUID, WEARABLE_SERVICE_UUID } from '@/services/ble/constants';
 import { resolveScanDeviceName } from '@/services/ble/deviceNaming';
 import { createWearableBleManager, getRestoredWearableDevice } from '@/services/ble/bleManager';
-import { PacketAssembler, base64ToBytes, bytesToBase64, disableAlarmPacket, enterHighFrequencySyncPacket, exitHighFrequencySyncPacket, getBatteryLevelPacket, getBodyLocationAndStatusPacket, getNamePacket, helloHarvardPacket, historyEndPacket, historyStartPacket, parseNotification, restartPacket, setAlarmPacket, setClockPacket, toggleRealtimeHrPacket, type ImuSamplePacket, type SensorDataPacket, versionInfoPacket } from '@/services/ble/codec';
+import { PacketAssembler, base64ToBytes, bytesToBase64, disableAlarmPacket, enterHighFrequencySyncPacket, exitHighFrequencySyncPacket, getBatteryLevelPacket, getBodyLocationAndStatusPacket, getNamePacket, helloHarvardPacket, historyEndPacket, historyStartPacket, parseNotification, restartPacket, setAlarmPacket, setClockPacket, toggleR7DataCollectionPacket, toggleRealtimeHrPacket, type SensorDataPacket, versionInfoPacket } from '@/services/ble/codec';
 import { HistorySyncWatchdog } from '@/services/ble/syncWatchdog';
 import type {
   BackgroundSyncResult,
@@ -21,7 +27,7 @@ import type {
   WearableScanResult,
 } from '@/types/device';
 import { formatSqliteDateTime } from '@/utils/dateTime';
-import { isPlausibleRecordedBpm } from '@/utils/heartRate';
+import { MAX_PLAUSIBLE_RECORDED_BPM, MIN_PLAUSIBLE_RECORDED_BPM, isPlausibleRecordedBpm } from '@/utils/heartRate';
 
 const SELECTED_DEVICE_SQL = `
   INSERT INTO device_state (id, name, last_seen_at, last_synced_at, firmware, battery_percent, charging_status, body_status, sync_error)
@@ -45,19 +51,23 @@ const HISTORY_WRITE_BATCH_SIZE = 250;
 const HISTORY_WRITE_MAX_RETRIES = 4;
 const HISTORY_WRITE_RETRY_DELAY_MS = 150;
 const HISTORY_INSERT_SQL = `
-  INSERT INTO heart_rate (bpm, time, rr_intervals, imu_data, sensor_data, synced)
-  VALUES (?, ?, ?, ?, ?, 0)
+  INSERT INTO heart_rate (bpm, time, rr_intervals, sensor_data, synced)
+  VALUES (?, ?, ?, ?, 0)
   ON CONFLICT(time) DO UPDATE SET
-    bpm = excluded.bpm,
-    rr_intervals = excluded.rr_intervals,
-    imu_data = excluded.imu_data,
-    sensor_data = excluded.sensor_data
+    bpm = CASE
+      WHEN excluded.bpm BETWEEN ${MIN_PLAUSIBLE_RECORDED_BPM} AND ${MAX_PLAUSIBLE_RECORDED_BPM} THEN excluded.bpm
+      WHEN heart_rate.bpm BETWEEN ${MIN_PLAUSIBLE_RECORDED_BPM} AND ${MAX_PLAUSIBLE_RECORDED_BPM} THEN heart_rate.bpm
+      ELSE excluded.bpm
+    END,
+    rr_intervals = COALESCE(NULLIF(excluded.rr_intervals, ''), heart_rate.rr_intervals),
+    sensor_data = COALESCE(excluded.sensor_data, heart_rate.sensor_data)
 `;
 
 const SHOULD_LOG_SYNC_IMPORT_PERF =
   typeof __DEV__ !== 'undefined' &&
   __DEV__ &&
   (typeof process === 'undefined' || process.env.NODE_ENV !== 'test');
+const HISTORY_PACKET_DEBUG_SAMPLE_LIMIT = 8;
 
 type PerformanceLogValue = string | number | boolean | null;
 
@@ -76,6 +86,17 @@ function logSyncImportPerfSummary(label: string, details: Record<string, Perform
     .map(([key, value]) => `${key}=${value}`)
     .join(' ');
   console.info(`[mobile-perf] ${label}${suffix ? ` ${suffix}` : ''}`);
+}
+
+function incrementLogCounter<K extends string | number>(counts: Map<K, number>, key: K) {
+  counts.set(key, (counts.get(key) ?? 0) + 1);
+}
+
+function formatLogCounter<K extends string | number>(counts: Map<K, number>) {
+  return [...counts.entries()]
+    .sort(([leftKey], [rightKey]) => String(leftKey).localeCompare(String(rightKey), undefined, { numeric: true }))
+    .map(([key, count]) => `${key}:${count}`)
+    .join(',');
 }
 
 function toSyncImportPerfLogDetails(summary: SyncImportPerformanceSummary): Record<string, PerformanceLogValue> {
@@ -110,17 +131,12 @@ function serializeSensorData(value: SensorDataPacket | null) {
   return value ? JSON.stringify(value) : null;
 }
 
-function serializeImuData(value: ImuSamplePacket[] | null) {
-  return value && value.length > 0 ? JSON.stringify(value) : null;
-}
-
 function shouldPersistHistoryReading(reading: {
   bpm: number;
   rr: number[];
   sensorData: SensorDataPacket | null;
-  imuData: ImuSamplePacket[] | null;
 }) {
-  return isPlausibleRecordedBpm(reading.bpm) || reading.rr.length > 0 || reading.sensorData !== null || reading.imuData !== null;
+  return isPlausibleRecordedBpm(reading.bpm) || reading.rr.length > 0 || reading.sensorData !== null;
 }
 
 function rrToString(rr: number[]) {
@@ -193,7 +209,6 @@ async function writeHistoryRows(
         row.bpm,
         row.time,
         row.rrIntervals,
-        row.imuData,
         row.sensorData,
       );
     }
@@ -210,7 +225,6 @@ async function writeHistoryRows(
         row.bpm,
         row.time,
         row.rrIntervals,
-        row.imuData,
         row.sensorData,
       );
     }
@@ -237,7 +251,6 @@ interface PendingHistoryRow {
   bpm: number;
   time: string;
   rrIntervals: string;
-  imuData: string | null;
   sensorData: string | null;
 }
 
@@ -789,15 +802,30 @@ export class WearableSyncService {
       throw new Error('Select a wearable before syncing.');
     }
 
+    const startedAt = formatSqliteDateTime(new Date());
+    await recordBackgroundRunStart(this.db, {
+      deviceId: selected.id,
+      source,
+      startedAt,
+    }).catch(() => {});
+
     const lockOwner = `${source}:${Date.now()}`;
     const lockAcquired = await acquireBackgroundSyncLock(this.db, lockOwner);
     if (!lockAcquired) {
       const completedAt = formatSqliteDateTime(new Date());
+      await recordBackgroundRunResult(this.db, {
+        deviceId: selected.id,
+        source,
+        result: 'skipped',
+        finishedAt: completedAt,
+        importedReadings: 0,
+        error: 'sync-lock-active',
+      }).catch(() => {});
       onProgress?.({
         status: 'complete',
         message: source === 'foreground'
           ? 'A sync is already running. Wait for it to finish before starting another one.'
-          : 'Skipped background sync because another sync is already running.',
+          : 'Skipped sync because another sync is already running.',
         importedReadings: 0,
       });
       return {
@@ -846,6 +874,14 @@ export class WearableSyncService {
     let ackWaitMsTotal = 0;
     let ackWaitMsMax = 0;
     let maxPendingHistoryRows = 0;
+    let historyPacketsWithImu = 0;
+    let historyPacketsWithSensor = 0;
+    let historyPacketsWithoutSensorOrImu = 0;
+    let maxImuSamplesPerHistoryPacket = 0;
+    let firstImuReadingTime: string | null = null;
+    let firstSensorReadingTime: string | null = null;
+    let loggedHistoryPacketSamples = 0;
+    const historyPacketShapeCounts = new Map<string, number>();
     const dataAssembler = new PacketAssembler();
     const responseAssembler = new PacketAssembler();
     const subscriptions: Subscription[] = [];
@@ -914,6 +950,21 @@ export class WearableSyncService {
         suspectedBottleneck,
         error: errorMessage ?? null,
       };
+
+      if (importedReadings > 0) {
+        logSyncImportPerfSummary('sync.history.summary', {
+          firmware,
+          history_packets: importedReadings,
+          imu_packets: historyPacketsWithImu,
+          sensor_packets: historyPacketsWithSensor,
+          empty_packets: historyPacketsWithoutSensorOrImu,
+          imu_packet_pct: Math.round((historyPacketsWithImu / importedReadings) * 1000) / 10,
+          packet_shapes: formatLogCounter(historyPacketShapeCounts) || null,
+          max_imu_samples: maxImuSamplesPerHistoryPacket || null,
+          first_imu_time: firstImuReadingTime,
+          first_sensor_time: firstSensorReadingTime,
+        });
+      }
 
       logSyncImportPerfSummary('sync.import.summary', toSyncImportPerfLogDetails(summary));
       return summary;
@@ -1130,11 +1181,42 @@ export class WearableSyncService {
                 lastHistoryCursor = parsed.reading.unix;
                 watchdog.markProgress();
 
+                const readingTime = formatSqliteDateTime(new Date(parsed.reading.unix));
+                const imuSampleCount = parsed.reading.imuSampleCount;
+                const hasImuData = imuSampleCount > 0;
+                const hasSensorData = parsed.reading.sensorData !== null;
+
+                incrementLogCounter(historyPacketShapeCounts, `${frame.seq}:${frame.data.length}`);
+
+                if (hasImuData) {
+                  historyPacketsWithImu += 1;
+                  maxImuSamplesPerHistoryPacket = Math.max(maxImuSamplesPerHistoryPacket, imuSampleCount);
+                  firstImuReadingTime ??= readingTime;
+                } else if (hasSensorData) {
+                  historyPacketsWithSensor += 1;
+                  firstSensorReadingTime ??= readingTime;
+                } else {
+                  historyPacketsWithoutSensorOrImu += 1;
+                }
+
+                if (loggedHistoryPacketSamples < HISTORY_PACKET_DEBUG_SAMPLE_LIMIT) {
+                  loggedHistoryPacketSamples += 1;
+                  logSyncImportPerfSummary('sync.history.packet', {
+                    index: importedReadings,
+                    seq: frame.seq,
+                    payload_len: frame.data.length,
+                    has_imu: hasImuData,
+                    imu_samples: imuSampleCount || null,
+                    has_sensor: hasSensorData,
+                    bpm: parsed.reading.bpm,
+                    time: readingTime,
+                  });
+                }
+
                 if (!shouldPersistHistoryReading(parsed.reading)) {
                   continue;
                 }
 
-                const readingTime = formatSqliteDateTime(new Date(parsed.reading.unix));
                 earliestImportedTime =
                   earliestImportedTime === null || readingTime < earliestImportedTime
                     ? readingTime
@@ -1147,7 +1229,6 @@ export class WearableSyncService {
                   bpm: parsed.reading.bpm,
                   time: readingTime,
                   rrIntervals: rrToString(parsed.reading.rr),
-                  imuData: serializeImuData(parsed.reading.imuData),
                   sensorData: serializeSensorData(parsed.reading.sensorData),
                 });
                 queuedPersistableHistoryRowCount += 1;
@@ -1205,6 +1286,7 @@ export class WearableSyncService {
       await this.sendCommand(device, setClockPacket(Math.floor(Date.now() / 1000)));
       await this.sendCommand(device, getNamePacket());
       await this.sendCommand(device, versionInfoPacket());
+      await this.sendCommand(device, toggleR7DataCollectionPacket(false));
       batteryPercent = await this.refreshBatteryPercent(device, resolvedDeviceId);
       await this.sendCommand(device, enterHighFrequencySyncPacket());
 
@@ -1233,6 +1315,14 @@ export class WearableSyncService {
         batteryPercent,
       });
 
+      await recordBackgroundRunResult(this.db, {
+        deviceId: resolvedDeviceId,
+        source,
+        result: 'success',
+        finishedAt: completedAt,
+        importedReadings,
+        error: null,
+      }).catch(() => {});
       onProgress?.({ status: 'complete', message: `Sync complete. Imported ${importedReadings} readings.`, importedReadings });
       await recordSyncImportSummary(this.db, summarizeSyncPerf('success')).catch(() => {});
       return {
@@ -1249,6 +1339,14 @@ export class WearableSyncService {
         firmware,
         syncError: message,
       });
+      await recordBackgroundRunResult(this.db, {
+        deviceId: resolvedDeviceId,
+        source,
+        result: 'error',
+        finishedAt: formatSqliteDateTime(new Date()),
+        importedReadings,
+        error: message,
+      }).catch(() => {});
       onProgress?.({ status: 'error', message });
       await recordSyncImportSummary(this.db, summarizeSyncPerf('error', message)).catch(() => {});
       throw error;

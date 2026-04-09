@@ -23,31 +23,18 @@ const ACTIVE_STRONG_MOTION_FLOOR = 0.015;
 const ACTIVE_POSTURE_SHIFT_FLOOR = 0.12;
 const ACTIVE_HEART_RATE_FLOOR = 88;
 const ACTIVE_HEART_RATE_DELTA = 15;
-const ACTIVE_IMU_ACCEL_FLOOR = 0.08;
-const ACTIVE_IMU_GYRO_FLOOR = 35;
 const WALK_HEART_RATE_FLOOR = 74;
 const WORKOUT_HEART_RATE_FLOOR = 104;
-const WORKOUT_IMU_GYRO_FLOOR = 75;
 const MIN_CONTACT_RATIO = 0.5;
 const MIN_SIGNAL_RATIO = 0.5;
 
 export type ActivityDetectorKind = 'sleep' | 'activity' | 'walk' | 'workout';
-
-export interface ActivityDetectorImuSample {
-  acc_x_g: number;
-  acc_y_g: number;
-  acc_z_g: number;
-  gyr_x_dps: number;
-  gyr_y_dps: number;
-  gyr_z_dps: number;
-}
 
 export interface ActivityDetectorInputRow {
   date: Date;
   bpm: number;
   rr: readonly number[];
   gravity: [number, number, number] | null;
-  imuData: readonly ActivityDetectorImuSample[] | null;
   skinContact: number | null;
   signalQuality: number | null;
   ppgGreen: number | null;
@@ -87,12 +74,12 @@ interface ActivityEpoch {
   end: Date;
   avgBpm: number;
   motionScore: number;
-  imuAccelScore: number;
-  imuGyroScore: number;
   postureCentroid: [number, number, number] | null;
   postureShift: number;
   contactRatio: number;
   signalQualityRatio: number;
+  hasContactData: boolean;
+  hasSignalQualityData: boolean;
   state: ActivityEpochState;
   confidence: number;
 }
@@ -103,28 +90,6 @@ interface ActivityContext {
   bpmQ90: number;
   motionQ75: number;
   motionQ90: number;
-  imuAccelQ75: number;
-  imuAccelQ90: number;
-  imuGyroQ75: number;
-  imuGyroQ90: number;
-}
-
-function magnitude3(x: number, y: number, z: number) {
-  return Math.sqrt(x * x + y * y + z * z);
-}
-
-function summarizeImuSamples(samples: readonly ActivityDetectorImuSample[] | null) {
-  if (!samples || samples.length === 0) {
-    return {
-      accelScore: 0,
-      gyroScore: 0,
-    };
-  }
-
-  return {
-    accelScore: mean(samples.map((sample) => Math.abs(magnitude3(sample.acc_x_g, sample.acc_y_g, sample.acc_z_g) - 1))),
-    gyroScore: mean(samples.map((sample) => magnitude3(sample.gyr_x_dps, sample.gyr_y_dps, sample.gyr_z_dps))),
-  };
 }
 
 function quantile(values: number[], percentile: number) {
@@ -154,6 +119,14 @@ function gravityDelta(left: [number, number, number] | null, right: [number, num
   const dy = left[1] - right[1];
   const dz = left[2] - right[2];
   return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+function postureShiftDelta(left: [number, number, number] | null, right: [number, number, number] | null) {
+  if (!left || !right) {
+    return 0;
+  }
+
+  return gravityDelta(left, right);
 }
 
 function aggregateStillnessRows(history: readonly ActivityDetectorInputRow[], bucketMs: number) {
@@ -438,23 +411,11 @@ function buildActivityEpochs(
           mean(gravityRows.map((row) => row.gravity![2])),
         ] as [number, number, number];
     const motionValues: number[] = [];
-    const imuAccelValues: number[] = [];
-    const imuGyroValues: number[] = [];
 
     for (let index = 1; index < bucketRows.length; index += 1) {
       const delta = gravityDelta(bucketRows[index - 1].gravity, bucketRows[index].gravity);
       if (Number.isFinite(delta) && delta !== Number.MAX_VALUE) {
         motionValues.push(delta);
-      }
-    }
-
-    for (const row of bucketRows) {
-      const imuSummary = summarizeImuSamples(row.imuData);
-      if (imuSummary.accelScore > 0) {
-        imuAccelValues.push(imuSummary.accelScore);
-      }
-      if (imuSummary.gyroScore > 0) {
-        imuGyroValues.push(imuSummary.gyroScore);
       }
     }
 
@@ -466,21 +427,24 @@ function buildActivityEpochs(
       end: bucketRows[bucketRows.length - 1].date,
       avgBpm: mean(bucketRows.map((row) => row.bpm)),
       motionScore: motionValues.length === 0 ? 0 : mean(motionValues),
-      imuAccelScore: imuAccelValues.length === 0 ? 0 : mean(imuAccelValues),
-      imuGyroScore: imuGyroValues.length === 0 ? 0 : mean(imuGyroValues),
       postureCentroid,
       postureShift: 0,
       contactRatio:
         contactValues.length === 0 ? 1 : contactValues.filter((value) => value > 0).length / contactValues.length,
       signalQualityRatio:
         signalValues.length === 0 ? 1 : signalValues.filter((value) => value > 0).length / signalValues.length,
+      hasContactData: contactValues.length > 0,
+      hasSignalQualityData: signalValues.length > 0,
       state: 'rest' as const,
       confidence: 0,
     } satisfies ActivityEpoch;
   });
 
   for (let index = 0; index < epochs.length; index += 1) {
-    epochs[index].postureShift = gravityDelta(epochs[index - 1]?.postureCentroid ?? null, epochs[index].postureCentroid);
+    epochs[index].postureShift = postureShiftDelta(
+      epochs[index - 1]?.postureCentroid ?? null,
+      epochs[index].postureCentroid,
+    );
   }
 
   return {
@@ -492,12 +456,8 @@ function buildActivityEpochs(
 function buildActivityContext(epochs: readonly ActivityEpoch[]): ActivityContext {
   const bpmValues = epochs.map((epoch) => epoch.avgBpm).filter((value) => Number.isFinite(value));
   const motionValues = epochs.map((epoch) => epoch.motionScore).filter((value) => Number.isFinite(value));
-  const imuAccelValues = epochs.map((epoch) => epoch.imuAccelScore).filter((value) => Number.isFinite(value) && value > 0);
-  const imuGyroValues = epochs.map((epoch) => epoch.imuGyroScore).filter((value) => Number.isFinite(value) && value > 0);
   const bpmMedian = median(bpmValues) ?? 0;
   const motionMedian = median(motionValues) ?? 0;
-  const imuAccelMedian = median(imuAccelValues) ?? 0;
-  const imuGyroMedian = median(imuGyroValues) ?? 0;
 
   return {
     bpmQ50: bpmMedian,
@@ -505,10 +465,6 @@ function buildActivityContext(epochs: readonly ActivityEpoch[]): ActivityContext
     bpmQ90: quantile(bpmValues, 0.9) ?? bpmMedian,
     motionQ75: quantile(motionValues, 0.75) ?? motionMedian,
     motionQ90: quantile(motionValues, 0.9) ?? motionMedian,
-    imuAccelQ75: quantile(imuAccelValues, 0.75) ?? imuAccelMedian,
-    imuAccelQ90: quantile(imuAccelValues, 0.9) ?? imuAccelMedian,
-    imuGyroQ75: quantile(imuGyroValues, 0.75) ?? imuGyroMedian,
-    imuGyroQ90: quantile(imuGyroValues, 0.9) ?? imuGyroMedian,
   };
 }
 
@@ -516,29 +472,38 @@ function classifyActivityEpochs(epochs: ActivityEpoch[], context: ActivityContex
   let previousState: ActivityEpochState = 'rest';
 
   for (const epoch of epochs) {
-    if (epoch.contactRatio < MIN_CONTACT_RATIO) {
+    if (epoch.hasContactData && epoch.contactRatio < MIN_CONTACT_RATIO) {
       epoch.state = 'off_body';
       epoch.confidence = 1;
       previousState = epoch.state;
       continue;
     }
 
-    const lowSignal = epoch.signalQualityRatio < MIN_SIGNAL_RATIO;
+    const lowSignal = epoch.hasSignalQualityData && epoch.signalQualityRatio < MIN_SIGNAL_RATIO;
+    const hasQualitySignals = epoch.hasContactData || epoch.hasSignalQualityData;
     const strongMotion = epoch.motionScore >= Math.max(context.motionQ90, ACTIVE_STRONG_MOTION_FLOOR);
     const mediumMotion = epoch.motionScore >= Math.max(context.motionQ75, ACTIVE_MOTION_FLOOR);
-    const imuAccelActive = epoch.imuAccelScore >= Math.max(context.imuAccelQ90, ACTIVE_IMU_ACCEL_FLOOR);
-    const imuGyroActive = epoch.imuGyroScore >= Math.max(context.imuGyroQ90, ACTIVE_IMU_GYRO_FLOOR);
     const postureChange = epoch.postureShift >= ACTIVE_POSTURE_SHIFT_FLOOR;
     const elevatedHeartRate = epoch.avgBpm >= Math.max(context.bpmQ90, ACTIVE_HEART_RATE_FLOOR);
     const aboveBaselineHeartRate = epoch.avgBpm >= Math.max(context.bpmQ75 + 8, context.bpmQ50 + ACTIVE_HEART_RATE_DELTA, 78);
+    const gravityMotionSupported =
+      hasQualitySignals &&
+      postureChange &&
+      aboveBaselineHeartRate &&
+      (strongMotion || (mediumMotion && elevatedHeartRate));
     const motionDriven: boolean =
-      (strongMotion || imuAccelActive || imuGyroActive) &&
+      gravityMotionSupported &&
       (postureChange || previousState === 'activity' || epoch.avgBpm >= Math.max(context.bpmQ50 + 6, 72));
     const heartDriven: boolean =
-      elevatedHeartRate && (mediumMotion || imuAccelActive || postureChange || previousState === 'activity');
-    const sustainedActivity: boolean = previousState === 'activity' && (mediumMotion || imuAccelActive) && aboveBaselineHeartRate;
+      elevatedHeartRate && ((hasQualitySignals && mediumMotion && postureChange) || previousState === 'activity');
+    const sustainedActivity: boolean =
+      previousState === 'activity' &&
+      aboveBaselineHeartRate &&
+      hasQualitySignals &&
+      mediumMotion &&
+      postureChange;
     const isActivity: boolean = motionDriven || heartDriven || sustainedActivity;
-    const evidenceCount = [strongMotion || mediumMotion || imuAccelActive || imuGyroActive, postureChange, elevatedHeartRate || aboveBaselineHeartRate]
+    const evidenceCount = [strongMotion || mediumMotion, postureChange, elevatedHeartRate || aboveBaselineHeartRate]
       .filter(Boolean)
       .length;
 
@@ -558,22 +523,17 @@ function classifyActivityKind(period: ActivityDetectorPeriod, epochs: readonly A
 
   const avgBpm = mean(overlapping.map((epoch) => epoch.avgBpm));
   const avgMotion = mean(overlapping.map((epoch) => epoch.motionScore));
-  const avgImuAccel = mean(overlapping.map((epoch) => epoch.imuAccelScore));
-  const avgImuGyro = mean(overlapping.map((epoch) => epoch.imuGyroScore));
   const maxMotion = Math.max(...overlapping.map((epoch) => epoch.motionScore));
-  const maxImuGyro = Math.max(...overlapping.map((epoch) => epoch.imuGyroScore));
 
   const workoutHeart = avgBpm >= Math.max(context.bpmQ90 + 6, WORKOUT_HEART_RATE_FLOOR);
   const workoutMotion = maxMotion >= Math.max(context.motionQ90 * 1.1, ACTIVE_STRONG_MOTION_FLOOR * 1.5);
-  const workoutImu = maxImuGyro >= Math.max(context.imuGyroQ90, WORKOUT_IMU_GYRO_FLOOR);
-  if (workoutHeart && (workoutMotion || workoutImu || period.durationMinutes >= 20)) {
+  if (workoutHeart && (workoutMotion || period.durationMinutes >= 20)) {
     return 'workout';
   }
 
   const walkHeart = avgBpm >= Math.max(context.bpmQ50 + 4, WALK_HEART_RATE_FLOOR);
   const walkMotion = avgMotion >= Math.max(context.motionQ75, ACTIVE_MOTION_FLOOR);
-  const walkImu = avgImuAccel >= Math.max(context.imuAccelQ75, ACTIVE_IMU_ACCEL_FLOOR) || avgImuGyro >= Math.max(context.imuGyroQ75, ACTIVE_IMU_GYRO_FLOOR * 0.6);
-  if ((walkHeart && walkMotion) || walkImu) {
+  if (walkHeart && walkMotion) {
     return 'walk';
   }
 

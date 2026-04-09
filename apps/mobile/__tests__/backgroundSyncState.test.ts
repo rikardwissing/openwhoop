@@ -54,7 +54,7 @@ class MockBackgroundSyncDb {
   }
 }
 
-describe('background sync state coordination', () => {
+describe('sync state coordination', () => {
   it('returns the default state before any row exists', async () => {
     const db = new MockBackgroundSyncDb();
 

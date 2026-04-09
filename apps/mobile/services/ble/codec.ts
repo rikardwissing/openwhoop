@@ -17,21 +17,12 @@ export interface SensorDataPacket {
   accel_gravity: [number, number, number];
 }
 
-export interface ImuSamplePacket {
-  acc_x_g: number;
-  acc_y_g: number;
-  acc_z_g: number;
-  gyr_x_dps: number;
-  gyr_y_dps: number;
-  gyr_z_dps: number;
-}
-
 export interface HistoryReadingPacket {
   unix: number;
   bpm: number;
   rr: number[];
   sensorData: SensorDataPacket | null;
-  imuData: ImuSamplePacket[] | null;
+  imuSampleCount: number;
 }
 
 export interface MetadataPacket {
@@ -253,6 +244,15 @@ export function toggleRealtimeHrPacket(enable: boolean) {
   return framePacket(PacketType.Command, 0, CommandNumber.ToggleRealtimeHr, Uint8Array.from([enable ? 0x01 : 0x00]));
 }
 
+export function toggleR7DataCollectionPacket(enable: boolean) {
+  return framePacket(
+    PacketType.Command,
+    0,
+    CommandNumber.ToggleR7DataCollection,
+    Uint8Array.from([enable ? 0x01 : 0x00]),
+  );
+}
+
 export function setAlarmPacket(unixSeconds: number) {
   const payload = new Uint8Array(9);
   payload[0] = 0x01;
@@ -353,34 +353,14 @@ function parseHistoryPacket(packet: FramedPacket): HistoryReadingPacket {
       }
     }
 
-    const ACC_X_OFFSET = 85;
-    const ACC_Y_OFFSET = 285;
-    const ACC_Z_OFFSET = 485;
-    const GYR_X_OFFSET = 688;
-    const GYR_Y_OFFSET = 888;
-    const GYR_Z_OFFSET = 1088;
     const N_SAMPLES_IMU = 100;
-    const ACC_SENS = 1875;
-    const GYR_SENS = 15;
-    const imuData: ImuSamplePacket[] = [];
-
-    for (let index = 0; index < N_SAMPLES_IMU; index += 1) {
-      imuData.push({
-        acc_x_g: readI16BE(bytes, ACC_X_OFFSET + index * 2) / ACC_SENS,
-        acc_y_g: readI16BE(bytes, ACC_Y_OFFSET + index * 2) / ACC_SENS,
-        acc_z_g: readI16BE(bytes, ACC_Z_OFFSET + index * 2) / ACC_SENS,
-        gyr_x_dps: readI16BE(bytes, GYR_X_OFFSET + index * 2) / GYR_SENS,
-        gyr_y_dps: readI16BE(bytes, GYR_Y_OFFSET + index * 2) / GYR_SENS,
-        gyr_z_dps: readI16BE(bytes, GYR_Z_OFFSET + index * 2) / GYR_SENS,
-      });
-    }
 
     return {
       unix,
       bpm,
       rr,
       sensorData: null,
-      imuData,
+      imuSampleCount: N_SAMPLES_IMU,
     };
   }
 
@@ -418,7 +398,7 @@ function parseHistoryPacket(packet: FramedPacket): HistoryReadingPacket {
           readF32LE(bytes, 41),
         ],
       },
-      imuData: null,
+      imuSampleCount: 0,
     };
   }
 
@@ -438,7 +418,7 @@ function parseHistoryPacket(packet: FramedPacket): HistoryReadingPacket {
     bpm,
     rr: rr.slice(0, rrCount),
     sensorData: null,
-    imuData: null,
+    imuSampleCount: 0,
   };
 }
 

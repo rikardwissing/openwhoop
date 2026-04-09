@@ -1,3 +1,5 @@
+import { DatabaseSync } from 'node:sqlite';
+
 jest.mock('react-native-ble-plx', () => ({
   BleManager: class {
     destroy() {}
@@ -10,11 +12,14 @@ jest.mock('@/data/sqlite/SQLiteHealthRepository', () => ({
 }));
 
 import { markDerivedRefreshPending, refreshHeartAggregatesForRange } from '@/data/sqlite/SQLiteHealthRepository';
+import { initializeDatabase } from '@/db/schema';
 import { CMD_FROM_STRAP_UUID, CommandNumber, DATA_FROM_STRAP_UUID, EVENTS_FROM_STRAP_UUID, EventNumber, MetadataType, PacketType } from '@/services/ble/constants';
 import { PacketAssembler, base64ToBytes, bytesToBase64, framePacket } from '@/services/ble/codec';
 import { WearableSyncService } from '@/services/ble/WearableSyncService';
 import type { WearableLiveEvent } from '@/types/device';
 import { formatSqliteDateTime } from '@/utils/dateTime';
+
+type SqlArg = string | number | null;
 
 const mockMarkDerivedRefreshPending = jest.mocked(markDerivedRefreshPending);
 const mockRefreshHeartAggregatesForRange = jest.mocked(refreshHeartAggregatesForRange);
@@ -29,6 +34,16 @@ function writeU32LE(bytes: Uint8Array, offset: number, value: number) {
   bytes[offset + 1] = (value >> 8) & 0xff;
   bytes[offset + 2] = (value >> 16) & 0xff;
   bytes[offset + 3] = (value >> 24) & 0xff;
+}
+
+function writeF32LE(bytes: Uint8Array, offset: number, value: number) {
+  const view = new DataView(bytes.buffer);
+  view.setFloat32(offset, value, true);
+}
+
+function writeI16BE(bytes: Uint8Array, offset: number, value: number) {
+  const view = new DataView(bytes.buffer);
+  view.setInt16(offset, value, false);
 }
 
 function encodeAscii(value: string) {
@@ -48,6 +63,47 @@ function createHistoryPayload(unixSeconds: number, bpm = 64) {
   writeU32LE(payload, 4, unixSeconds);
   payload[14] = bpm;
   payload[15] = 0;
+  return payload;
+}
+
+function createSensorHistoryPayload(unixSeconds: number, bpm = 69) {
+  const payload = new Uint8Array(77);
+  writeU32LE(payload, 4, unixSeconds);
+  payload[14] = bpm;
+  payload[15] = 1;
+  writeU16LE(payload, 16, 820);
+  writeU16LE(payload, 26, 15_500);
+  writeF32LE(payload, 33, 0.11);
+  writeF32LE(payload, 37, -0.02);
+  writeF32LE(payload, 41, 0.98);
+  payload[48] = 1;
+  writeU16LE(payload, 61, 5_400);
+  writeU16LE(payload, 63, 7_800);
+  writeU16LE(payload, 65, 312);
+  writeU16LE(payload, 67, 42);
+  writeU16LE(payload, 69, 12);
+  writeU16LE(payload, 71, 18);
+  writeU16LE(payload, 73, 210);
+  writeU16LE(payload, 75, 99);
+  return payload;
+}
+
+function createImuHistoryPayload(unixSeconds: number, bpm = 2) {
+  const payload = new Uint8Array(1288);
+  writeU32LE(payload, 4, unixSeconds);
+  payload[14] = bpm;
+  payload[15] = 1;
+  writeU16LE(payload, 16, 720);
+
+  for (let index = 0; index < 100; index += 1) {
+    writeI16BE(payload, 85 + index * 2, 1875);
+    writeI16BE(payload, 285 + index * 2, 0);
+    writeI16BE(payload, 485 + index * 2, 0);
+    writeI16BE(payload, 688 + index * 2, 300);
+    writeI16BE(payload, 888 + index * 2, 450);
+    writeI16BE(payload, 1088 + index * 2, 600);
+  }
+
   return payload;
 }
 
@@ -71,6 +127,7 @@ class MockDevice {
   historyFrames: Array<{ characteristic: string; frame: Uint8Array }> = [];
   historyAckFrames: Array<{ characteristic: string; frame: Uint8Array }> = [];
   sentCommands: number[] = [];
+  sentCommandPayloads: Array<{ cmd: number; data: number[] }> = [];
   private readonly monitors = new Map<string, Set<DeviceMonitor>>();
 
   async discoverAllServicesAndCharacteristics() {
@@ -100,6 +157,7 @@ class MockDevice {
     }
 
     this.sentCommands.push(packet.cmd);
+    this.sentCommandPayloads.push({ cmd: packet.cmd, data: [...packet.data] });
 
     if (packet.cmd === CommandNumber.GetBatteryLevel) {
       if (this.failBatteryRequest) {
@@ -367,6 +425,68 @@ class DelayedBufferedHistoryDb extends BufferedHistoryDb {
 
     return super.runAsync(sql, ...args);
   }
+}
+
+class SqliteSyncDb {
+  constructor(private readonly db: DatabaseSync) {}
+
+  async getFirstAsync<T>(sql: string, ...args: SqlArg[]) {
+    return (this.db.prepare(sql).get(...args) as T | undefined) ?? null;
+  }
+
+  async getAllAsync<T>(sql: string, ...args: SqlArg[]) {
+    return this.db.prepare(sql).all(...args) as T[];
+  }
+
+  async runAsync(sql: string, ...args: SqlArg[]) {
+    return this.db.prepare(sql).run(...args);
+  }
+
+  async execAsync(sql: string) {
+    this.db.exec(sql);
+  }
+
+  async withExclusiveTransactionAsync<T>(callback: (tx: Pick<SqliteSyncDb, 'getFirstAsync' | 'runAsync' | 'execAsync'>) => Promise<T>) {
+    this.db.exec('BEGIN IMMEDIATE');
+
+    try {
+      const result = await callback({
+        getFirstAsync: this.getFirstAsync.bind(this),
+        runAsync: this.runAsync.bind(this),
+        execAsync: this.execAsync.bind(this),
+      });
+      this.db.exec('COMMIT');
+      return result;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  close() {
+    this.db.close();
+  }
+}
+
+async function createSqliteSyncDb(initialBatteryPercent: number | null) {
+  const adapter = new SqliteSyncDb(new DatabaseSync(':memory:'));
+  await initializeDatabase(adapter as never);
+  await adapter.runAsync(
+    `
+      INSERT INTO device_state (id, name, last_seen_at, last_synced_at, firmware, battery_percent, charging_status, body_status, sync_error)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+    'strap-1',
+    'Neo Strap',
+    '2026-04-02 08:00:00',
+    '2026-04-02 07:00:00',
+    '1.2.3',
+    initialBatteryPercent,
+    null,
+    null,
+    null,
+  );
+  return adapter;
 }
 
 describe('WearableSyncService battery refresh', () => {
@@ -658,6 +778,86 @@ describe('WearableSyncService battery refresh', () => {
       'Firmware reply',
       'Battery reply',
     ]);
+  });
+
+  it('disables strap-side R7 data collection before requesting history sync', async () => {
+    const device = new MockDevice();
+    device.batteryTenthsPercent = 845;
+    device.historyFrames = [
+      {
+        characteristic: DATA_FROM_STRAP_UUID,
+        frame: framePacket(
+          PacketType.Metadata,
+          0,
+          MetadataType.HistoryComplete,
+          createMetadataPayload(1_710_000_001, 0),
+        ),
+      },
+    ];
+    const db = new MockDb(null);
+    const manager = new MockBleManager(device);
+    const service = new WearableSyncService(db as never, manager as never);
+
+    await service.syncSelected();
+
+    const disableImuIndex = device.sentCommands.indexOf(CommandNumber.ToggleR7DataCollection);
+    const highFreqIndex = device.sentCommands.indexOf(CommandNumber.EnterHighFreqSync);
+    const historyStartIndex = device.sentCommands.indexOf(CommandNumber.SendHistoricalData);
+    const toggleCommand = device.sentCommandPayloads.find((entry) => entry.cmd === CommandNumber.ToggleR7DataCollection);
+
+    expect(toggleCommand?.data).toEqual([0x00]);
+    expect(disableImuIndex).toBeGreaterThanOrEqual(0);
+    expect(highFreqIndex).toBeGreaterThan(disableImuIndex);
+    expect(historyStartIndex).toBeGreaterThan(highFreqIndex);
+  });
+
+  it('keeps sensor-backed heart rows when IMU packets arrive for the same second', async () => {
+    const unixSeconds = 1_744_201_219;
+    const device = new MockDevice();
+    device.batteryTenthsPercent = 845;
+    device.historyFrames = [
+      {
+        characteristic: DATA_FROM_STRAP_UUID,
+        frame: framePacket(PacketType.HistoricalData, 10, 0, createImuHistoryPayload(unixSeconds, 2)),
+      },
+      {
+        characteristic: DATA_FROM_STRAP_UUID,
+        frame: framePacket(PacketType.HistoricalData, 24, 0, createSensorHistoryPayload(unixSeconds, 69)),
+      },
+      {
+        characteristic: DATA_FROM_STRAP_UUID,
+        frame: framePacket(
+          PacketType.Metadata,
+          0,
+          MetadataType.HistoryComplete,
+          createMetadataPayload(unixSeconds, 0),
+        ),
+      },
+    ];
+    const db = await createSqliteSyncDb(null);
+    const manager = new MockBleManager(device);
+    const service = new WearableSyncService(db as never, manager as never);
+
+    try {
+      const result = await service.syncSelected();
+      const stored = await db.getFirstAsync<{
+        bpm: number;
+        rr_intervals: string;
+        sensor_data: string | null;
+      }>(
+        'SELECT bpm, rr_intervals, sensor_data FROM heart_rate WHERE time = ?',
+        formatSqliteDateTime(new Date(unixSeconds * 1000)),
+      );
+      const rowCount = await db.getFirstAsync<{ count: number }>('SELECT COUNT(*) AS count FROM heart_rate');
+
+      expect(result.importedReadings).toBe(2);
+      expect(rowCount?.count).toBe(1);
+      expect(stored?.bpm).toBe(69);
+      expect(stored?.rr_intervals).toBe('820');
+      expect(stored?.sensor_data).not.toBeNull();
+    } finally {
+      db.close();
+    }
   });
 
   it('buffers history writes into batched transactions and flushes the final partial batch', async () => {

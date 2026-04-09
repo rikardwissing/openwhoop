@@ -11,7 +11,6 @@ export type SyncStatus =
 export type SyncSource = 'foreground' | 'background';
 export type BackgroundSyncResult = 'success' | 'skipped' | 'error';
 export type NotificationPermissionState = 'unknown' | 'granted' | 'provisional' | 'denied';
-export type BackgroundTaskApiStatus = 'unknown' | 'available' | 'restricted';
 export type SyncImportBottleneck = 'ble' | 'db' | 'mixed' | 'unknown';
 
 export interface WearableScanResult {
@@ -99,13 +98,6 @@ export interface BackgroundSyncState {
   notificationPermission: NotificationPermissionState;
   notificationBaselineAt: string | null;
   lastSyncImportSummary: SyncImportPerformanceSummary | null;
-}
-
-export interface BackgroundSyncDiagnostics {
-  apiStatus: BackgroundTaskApiStatus;
-  isTaskDefined: boolean;
-  isTaskRegistered: boolean;
-  minimumIntervalMinutes: number;
 }
 
 export function describeBatteryStatus(batteryPercent: number | null) {

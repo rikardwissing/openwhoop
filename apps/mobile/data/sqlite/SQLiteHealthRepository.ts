@@ -2,7 +2,7 @@ import type { SQLiteDatabase } from 'expo-sqlite';
 
 import type { HealthCacheScope, HealthRepository } from '@/data/HealthRepository';
 import { detectActivityArtifacts } from '@/data/sqlite/activityDetector';
-import type { ActivityDetectorImuSample, ActivityDetectorPeriod } from '@/data/sqlite/activityDetector';
+import type { ActivityDetectorPeriod } from '@/data/sqlite/activityDetector';
 import { generateSleepStageRecords, isAwakePpgValue } from '@/data/sqlite/sleepStages';
 import { DERIVED_DATA_SCHEMA_VERSION } from '@/db/schema';
 import type {
@@ -100,7 +100,6 @@ interface HeartRateQueryRow {
   bpm: number;
   time: string;
   rr_intervals: string;
-  imu_data: string | null;
   stress: number | null;
   spo2: number | null;
   skin_temp: number | null;
@@ -113,7 +112,6 @@ interface HeartRateRecord {
   time: string;
   date: Date;
   rr: number[];
-  imuData: ActivityDetectorImuSample[] | null;
   stress: number | null;
   spo2: number | null;
   skinTemp: number | null;
@@ -493,22 +491,8 @@ function parseSensorData(value: string | null): SensorDataRow | null {
   }
 }
 
-function parseImuData(value: string | null): ActivityDetectorImuSample[] | null {
-  if (!value) {
-    return null;
-  }
-
-  try {
-    const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed as ActivityDetectorImuSample[] : null;
-  } catch {
-    return null;
-  }
-}
-
 function toHeartRateRecord(row: HeartRateQueryRow): HeartRateRecord {
   const sensorData = parseSensorData(row.sensor_data);
-  const imuData = parseImuData(row.imu_data);
 
   return {
     id: row.id,
@@ -516,7 +500,6 @@ function toHeartRateRecord(row: HeartRateQueryRow): HeartRateRecord {
     time: row.time,
     date: parseSqliteDateTime(row.time),
     rr: parseRrIntervals(row.rr_intervals),
-    imuData,
     stress: row.stress,
     spo2: row.spo2,
     skinTemp: row.skin_temp,
@@ -2686,7 +2669,7 @@ function axisLabelForMidpoint(start: Date, end: Date): string {
 
 async function loadPreparedData(db: SQLiteDatabase): Promise<PreparedDataBundle> {
   const [heartRows, sleepRows, activityRows, stageRows, deviceRows] = await Promise.all([
-    db.getAllAsync<HeartRateQueryRow>('SELECT id, bpm, time, rr_intervals, imu_data, stress, spo2, skin_temp, sensor_data FROM heart_rate ORDER BY time ASC'),
+    db.getAllAsync<HeartRateQueryRow>('SELECT id, bpm, time, rr_intervals, stress, spo2, skin_temp, sensor_data FROM heart_rate ORDER BY time ASC'),
     db.getAllAsync<SleepCycleRow>('SELECT id, sleep_id, start, end, min_bpm, max_bpm, avg_bpm, min_hrv, max_hrv, avg_hrv, avg_skin_temp, score FROM sleep_cycles ORDER BY start ASC'),
     db.getAllAsync<ActivityRow>('SELECT id, period_id, start, end, activity FROM activities ORDER BY start ASC'),
     db.getAllAsync<SleepStageRow>('SELECT id, sleep_id, start, end, stage, is_estimated FROM sleep_stage_segments ORDER BY start ASC'),
@@ -2730,7 +2713,7 @@ async function loadHeartRowsBetweenRange(db: SQLiteDatabase, start: Date, end: D
   return queryHeartRows(
     db,
     `
-      SELECT id, bpm, time, rr_intervals, imu_data, stress, spo2, skin_temp, sensor_data
+      SELECT id, bpm, time, rr_intervals, stress, spo2, skin_temp, sensor_data
       FROM heart_rate
       WHERE time >= ? AND time <= ?
       ORDER BY time ASC
@@ -2746,7 +2729,7 @@ async function loadHeartRowsForDay(db: SQLiteDatabase, dayKey: string) {
   return queryHeartRows(
     db,
     `
-      SELECT id, bpm, time, rr_intervals, imu_data, stress, spo2, skin_temp, sensor_data
+      SELECT id, bpm, time, rr_intervals, stress, spo2, skin_temp, sensor_data
       FROM heart_rate
       WHERE time >= ? AND time < ?
       ORDER BY time ASC
@@ -4294,7 +4277,7 @@ export async function refreshDerivedData(db: SQLiteDatabase) {
   const queryStartedAt = Date.now();
   const heartRows = await queryHeartRows(
     db,
-    'SELECT id, bpm, time, rr_intervals, imu_data, stress, spo2, skin_temp, sensor_data FROM heart_rate ORDER BY time ASC',
+    'SELECT id, bpm, time, rr_intervals, stress, spo2, skin_temp, sensor_data FROM heart_rate ORDER BY time ASC',
   );
   logMobilePerf('derived.full.queryHeartRows', queryStartedAt, {
     rows: heartRows.length,
@@ -5523,7 +5506,7 @@ export class SQLiteHealthRepository implements HealthRepository {
     return this.readQuery('heart:all-rows', () =>
       queryHeartRows(
         this.db,
-        'SELECT id, bpm, time, rr_intervals, imu_data, stress, spo2, skin_temp, sensor_data FROM heart_rate ORDER BY time ASC',
+        'SELECT id, bpm, time, rr_intervals, stress, spo2, skin_temp, sensor_data FROM heart_rate ORDER BY time ASC',
       ),
     );
   }

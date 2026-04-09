@@ -1,5 +1,5 @@
 import { CommandNumber, EventNumber, MetadataType, PacketType } from '@/services/ble/constants';
-import { PacketAssembler, decodeBatteryEventPayload, decodeBatteryLevelPayload, decodeBodyStatusPayload, decodeDeviceNamePayload, disableAlarmPacket, framePacket, getBatteryLevelPacket, getBodyLocationAndStatusPacket, parseNotification, setAlarmPacket, toggleRealtimeHrPacket } from '@/services/ble/codec';
+import { PacketAssembler, decodeBatteryEventPayload, decodeBatteryLevelPayload, decodeBodyStatusPayload, decodeDeviceNamePayload, disableAlarmPacket, framePacket, getBatteryLevelPacket, getBodyLocationAndStatusPacket, parseNotification, setAlarmPacket, toggleR7DataCollectionPacket, toggleRealtimeHrPacket } from '@/services/ble/codec';
 
 function writeU16LE(bytes: Uint8Array, offset: number, value: number) {
   bytes[offset] = value & 0xff;
@@ -16,11 +16,6 @@ function writeU32LE(bytes: Uint8Array, offset: number, value: number) {
 function writeF32LE(bytes: Uint8Array, offset: number, value: number) {
   const view = new DataView(bytes.buffer);
   view.setFloat32(offset, value, true);
-}
-
-function writeI16BE(bytes: Uint8Array, offset: number, value: number) {
-  const view = new DataView(bytes.buffer);
-  view.setInt16(offset, value, false);
 }
 
 function asciiBytes(value: string) {
@@ -119,25 +114,16 @@ describe('BLE codec', () => {
       skin_contact: 1,
       accel_gravity: [0.10999999940395355, -0.019999999552965164, 0.9800000190734863],
     });
-    expect(parsed.reading.imuData).toBeNull();
+    expect(parsed.reading.imuSampleCount).toBe(0);
   });
 
-  it('parses IMU history packets into accelerometer and gyro samples', () => {
+  it('parses IMU history packets into lightweight IMU metadata', () => {
     const history = new Uint8Array(1288);
     writeU32LE(history, 4, 1_710_000_456);
     history[14] = 88;
     history[15] = 2;
     writeU16LE(history, 16, 720);
     writeU16LE(history, 18, 710);
-
-    for (let index = 0; index < 100; index += 1) {
-      writeI16BE(history, 85 + index * 2, 1875);
-      writeI16BE(history, 285 + index * 2, 0);
-      writeI16BE(history, 485 + index * 2, 0);
-      writeI16BE(history, 688 + index * 2, 300);
-      writeI16BE(history, 888 + index * 2, 450);
-      writeI16BE(history, 1088 + index * 2, 600);
-    }
 
     const parsed = parseNotification({
       packetType: PacketType.HistoricalData,
@@ -153,14 +139,19 @@ describe('BLE codec', () => {
 
     expect(parsed.reading.sensorData).toBeNull();
     expect(parsed.reading.rr).toEqual([720, 710]);
-    expect(parsed.reading.imuData).toHaveLength(100);
-    expect(parsed.reading.imuData?.[0]).toEqual({
-      acc_x_g: 1,
-      acc_y_g: 0,
-      acc_z_g: 0,
-      gyr_x_dps: 20,
-      gyr_y_dps: 30,
-      gyr_z_dps: 40,
+    expect(parsed.reading.imuSampleCount).toBe(100);
+  });
+
+  it('encodes the strap-side R7 data collection disable command', () => {
+    const frame = toggleR7DataCollectionPacket(false);
+    const assembler = new PacketAssembler();
+    const [packet] = assembler.push(frame);
+
+    expect(packet).toEqual({
+      packetType: PacketType.Command,
+      seq: 0,
+      cmd: CommandNumber.ToggleR7DataCollection,
+      data: Uint8Array.from([0x00]),
     });
   });
 

@@ -31,29 +31,40 @@ jest.mock('@/services/background/backgroundSyncState', () => ({
   })),
 }));
 
-jest.mock('@/services/background/backgroundSyncTask', () => ({
-  ensureBackgroundSyncRegistered: jest.fn(async () => {}),
-  enableBackgroundSyncAfterPairing: jest.fn(async () => {}),
-  disableBackgroundSync: jest.fn(async () => {}),
-  getBackgroundSyncDiagnostics: jest.fn(async () => ({
-    apiStatus: 'available',
-    isTaskDefined: true,
-    isTaskRegistered: true,
-    minimumIntervalMinutes: 15,
-  })),
-  triggerBackgroundSyncForTesting: jest.fn(async () => true),
-}));
-
 const mockClearAllLocalData = jest.fn(async () => {});
-const mockUseOptionalAppDatabase = jest.fn(() => null);
+const mockUseOptionalAppDatabase = jest.fn<unknown | null, []>(() => null);
 const mockUseOptionalAppDatabaseControls = jest.fn(() => ({
   loadSeededData: jest.fn(async () => {}),
   clearAllLocalData: mockClearAllLocalData,
+}));
+const mockInspectDatabaseMaintenance = jest.fn(async (_db?: unknown) => ({
+  heartRateHasImuColumn: false,
+  pageCount: 0,
+  pageSizeBytes: 0,
+  freelistCount: 0,
+  sizeBytes: 0,
+  freeBytes: 0,
+  needsMaintenance: false,
+}));
+const mockRunDatabaseMaintenance = jest.fn(async (_db?: unknown) => ({
+  ran: false,
+  migratedLegacyHeartRate: false,
+  vacuumed: false,
+  sizeBytesBefore: 0,
+  sizeBytesAfter: 0,
+  freeBytesBefore: 0,
+  freeBytesAfter: 0,
+  reclaimedBytes: 0,
 }));
 
 jest.mock('@/providers/AppDatabaseProvider', () => ({
   useOptionalAppDatabase: () => mockUseOptionalAppDatabase(),
   useOptionalAppDatabaseControls: () => mockUseOptionalAppDatabaseControls(),
+}));
+
+jest.mock('@/db/maintenance', () => ({
+  inspectDatabaseMaintenance: (db: unknown) => mockInspectDatabaseMaintenance(db),
+  runDatabaseMaintenance: (db: unknown) => mockRunDatabaseMaintenance(db),
 }));
 
 import { SleepStageChart } from '@/components/charts/SleepStageChart';
@@ -74,11 +85,8 @@ import { TrendsScreen } from '@/screens/TrendsScreen';
 import { TodayScreen } from '@/screens/TodayScreen';
 import { HistoryScreen } from '@/screens/HistoryScreen';
 import { WellnessScreen } from '@/screens/WellnessScreen';
-import { disableBackgroundSync } from '@/services/background/backgroundSyncTask';
 import type { HistoryRange } from '@/types/health';
 import type { DeviceState, SyncProgress, SyncResult, WearableLiveEvent, WearableScanResult } from '@/types/device';
-
-const mockDisableBackgroundSync = jest.mocked(disableBackgroundSync);
 
 jest.mock('@/services/databaseExport', () => ({
   exportAndShareDatabaseSnapshot: jest.fn(async () => ({
@@ -91,7 +99,6 @@ jest.mock('@/services/databaseExport', () => ({
 function createWearableContextValue(overrides: Partial<{
   deviceState: DeviceState;
   backgroundSyncState: typeof defaultWearableSyncContextValue.backgroundSyncState;
-  backgroundSyncDiagnostics: typeof defaultWearableSyncContextValue.backgroundSyncDiagnostics;
   liveEvents: WearableLiveEvent[];
   progress: SyncProgress;
   scanResults: WearableScanResult[];
@@ -101,7 +108,6 @@ function createWearableContextValue(overrides: Partial<{
   selectDevice: (device: WearableScanResult) => Promise<void>;
   forgetDevice: () => Promise<void>;
   syncSelected: (options?: { showOverlay?: boolean }) => Promise<SyncResult | null>;
-  triggerBackgroundSyncTest: () => Promise<boolean>;
   restartDevice: () => Promise<void>;
   setAlarm: (unixSeconds: number) => Promise<void>;
   disableAlarm: () => Promise<void>;
@@ -187,8 +193,9 @@ describe('screen rendering', () => {
   beforeEach(() => {
     mockPush.mockClear();
     mockReplace.mockClear();
-    mockDisableBackgroundSync.mockClear();
     mockClearAllLocalData.mockClear();
+    mockInspectDatabaseMaintenance.mockClear();
+    mockRunDatabaseMaintenance.mockClear();
     mockUseOptionalAppDatabase.mockReturnValue(null);
     mockUseOptionalAppDatabaseControls.mockReturnValue({
       loadSeededData: jest.fn(async () => {}),
@@ -558,20 +565,16 @@ describe('screen rendering', () => {
     expect(screen.getByText('Restart wearable')).toBeTruthy();
     expect(screen.getByText('Export for Analysis')).toBeTruthy();
     expect(screen.getByText('Export Snapshot')).toBeTruthy();
+    expect(screen.getByText('Database Maintenance')).toBeTruthy();
+    expect(screen.getByText('Run Database Maintenance')).toBeTruthy();
     expect(screen.getByText('Local Data')).toBeTruthy();
     expect(screen.getByText('Remove all data')).toBeTruthy();
     expect(screen.getByText('Battery')).toBeTruthy();
     expect(screen.getAllByText('Status').length).toBeGreaterThan(0);
     expect(screen.getByText('Charge')).toBeTruthy();
     expect(screen.getByText('Wear')).toBeTruthy();
-    expect(screen.getByText('API')).toBeTruthy();
-    expect(screen.getByText('Registered')).toBeTruthy();
-    expect(screen.getByText('15m')).toBeTruthy();
-    expect(screen.getByText('Last started')).toBeTruthy();
-    expect(screen.getByText('Last finished')).toBeTruthy();
     expect(screen.getByText('Latest Sync Profile')).toBeTruthy();
     expect(screen.getByText('No sync profile has been recorded on this phone yet.')).toBeTruthy();
-    expect(screen.getByText('Trigger test run')).toBeTruthy();
     expect(screen.getAllByText('Unknown').length).toBeGreaterThan(0);
     expect(screen.getAllByText('--').length).toBeGreaterThan(0);
     expect(screen.queryByText('Scan nearby')).toBeNull();
@@ -618,19 +621,44 @@ describe('screen rendering', () => {
     expect(screen.getByText(/Receive throughput 1,064\/s/)).toBeTruthy();
   });
 
-  it('runs the background sync test trigger from settings', () => {
-    const triggerBackgroundSyncTest = jest.fn(async () => true);
-    const screen = renderWithProviders(<SettingsScreen />, {
-      deviceState: {
-        id: 'strap-1',
-        name: 'Neo Strap',
-      },
-      triggerBackgroundSyncTest,
+  it('runs database maintenance from settings when explicitly requested', async () => {
+    const db = {
+      getAllAsync: jest.fn(async () => []),
+    };
+    mockUseOptionalAppDatabase.mockReturnValue(db);
+    mockInspectDatabaseMaintenance.mockImplementationOnce(async () => ({
+      heartRateHasImuColumn: true,
+      pageCount: 100,
+      pageSizeBytes: 4096,
+      freelistCount: 50,
+      sizeBytes: 409600,
+      freeBytes: 204800,
+      needsMaintenance: true,
+    }));
+    mockRunDatabaseMaintenance.mockImplementationOnce(async () => ({
+      ran: true,
+      migratedLegacyHeartRate: true,
+      vacuumed: true,
+      sizeBytesBefore: 409600,
+      sizeBytesAfter: 204800,
+      freeBytesBefore: 204800,
+      freeBytesAfter: 0,
+      reclaimedBytes: 204800,
+    }));
+
+    const screen = renderWithProviders(<SettingsScreen />);
+
+    await act(async () => {
+      fireEvent.press(screen.getByText('Run Database Maintenance'));
+      await Promise.resolve();
+      await Promise.resolve();
     });
 
-    fireEvent.press(screen.getByText('Trigger test run'));
-
-    expect(triggerBackgroundSyncTest).toHaveBeenCalledTimes(1);
+    await waitFor(() => {
+      expect(mockInspectDatabaseMaintenance).toHaveBeenCalledWith(db);
+      expect(mockRunDatabaseMaintenance).toHaveBeenCalledWith(db);
+      expect(screen.getByText(/removed the legacy IMU schema and reclaimed 200.0 KB/)).toBeTruthy();
+    });
   });
 
   it('opens the live events screen from settings', () => {
@@ -670,7 +698,6 @@ describe('screen rendering', () => {
     });
 
     await waitFor(() => {
-      expect(mockDisableBackgroundSync).toHaveBeenCalledTimes(1);
       expect(mockClearAllLocalData).toHaveBeenCalledTimes(1);
       expect(mockReplace).toHaveBeenCalledWith('/');
     });

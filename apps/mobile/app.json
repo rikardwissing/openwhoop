@@ -51,7 +51,6 @@
         }
       ],
       "expo-sharing",
-      "expo-background-task",
       "./plugins/with-local-notifications-only",
       "./plugins/with-force-close-reminder"
     ],

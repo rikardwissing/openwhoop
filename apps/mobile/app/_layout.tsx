@@ -16,8 +16,7 @@ import { navTheme } from '@/constants/theme';
 import { AppDatabaseProvider } from '@/providers/AppDatabaseProvider';
 import { HealthDataProvider } from '@/providers/HealthDataProvider';
 import { WearableSyncProvider } from '@/providers/WearableSyncProvider';
-import { routeFromNotificationData } from '@/services/background/backgroundSyncNotifications';
-import '@/services/background/backgroundSyncTask';
+import { routeFromNotificationData } from '@/services/notifications/notificationRouting';
 
 export {
   ErrorBoundary,

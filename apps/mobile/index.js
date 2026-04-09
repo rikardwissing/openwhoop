@@ -1,3 +1,3 @@
 import 'react-native-gesture-handler';
-import './services/background/backgroundSyncTask';
+import './services/notifications/notificationRouting';
 import 'expo-router/entry';

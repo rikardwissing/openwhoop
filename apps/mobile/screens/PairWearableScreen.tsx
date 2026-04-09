@@ -154,7 +154,7 @@ export function PairWearableScreen() {
       </GlassCard>
 
       <GlassCard accentColor={colors.violet}>
-        <SectionHeader title="Background Sync Notes" trailing="iPhone v1" />
+        <SectionHeader title="Pairing Notes" trailing="iPhone v1" />
         <Text style={styles.emptyState}>
           Keep the official wearable app closed while Unstrap is paired to this strap. If both apps sync the same device, they can compete for the same history and create gaps in your unlocked data.
         </Text>
