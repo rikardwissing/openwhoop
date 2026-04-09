@@ -1,7 +1,9 @@
-import type { HealthRepository } from '@/data/HealthRepository';
+import type { ActivityRescanResult, HealthRepository, ManualActivityKind } from '@/data/HealthRepository';
 import type {
   DerivedRefreshState,
   ActivitySummary,
+  ActivityReviewState,
+  ActivitySource,
   DashboardDayOption,
   DashboardDayState,
   DashboardInsight,
@@ -388,13 +390,41 @@ const metricSeries = (metric: Omit<MetricSeries, 'series'> & { values: number[];
   series: series(metric.labels, metric.values),
 });
 
-const activities: ActivitySummary[] = activitySeeds.map((activity) => ({
+interface MockActivityRecord {
+  id: string;
+  title: string;
+  startMinutes: number;
+  durationMinutes: number;
+  strain: number | null;
+  calories: number | null;
+  source: ActivitySource;
+  reviewState: ActivityReviewState;
+}
+
+const MANUAL_ACTIVITY_KINDS = new Set<ManualActivityKind>(['Activity', 'Walk', 'Workout', 'Nap']);
+
+function toActivitySummary(activity: MockActivityRecord): ActivitySummary {
+  return {
+    id: activity.id,
+    title: activity.title,
+    timeLabel: formatClockMinutes(activity.startMinutes),
+    durationMinutes: activity.durationMinutes,
+    strain: activity.strain,
+    calories: activity.calories,
+    source: activity.source,
+    reviewState: activity.reviewState,
+  };
+}
+
+const activitySeedRecords: MockActivityRecord[] = activitySeeds.map((activity) => ({
   id: activity.id,
   title: activity.title,
-  timeLabel: formatClockMinutes(activity.startMinutes),
+  startMinutes: activity.startMinutes,
   durationMinutes: activity.durationMinutes,
   strain: activity.strain,
   calories: activity.calories,
+  source: 'detected',
+  reviewState: 'none',
 }));
 
 function buildSleepPlanSnapshot(targetWakeMinutes: number, alarmEnabled: boolean): SleepPlanSnapshot {
@@ -442,6 +472,26 @@ function buildMockActivityMarkerDetails(durationMinutes: number): HeartIntradayM
   };
 }
 
+function buildIntradayActivityMarkers(activities: MockActivityRecord[]): HeartIntradayMarker[] {
+  return activities
+    .filter((activity) => activity.reviewState !== 'dismissed')
+    .map((activity) => ({
+      id: activity.id,
+      kind: activity.title === 'Nap' ? 'nap' as const : 'activity' as const,
+      label: activity.title,
+      timeLabel: `${formatClockMinutes(activity.startMinutes)} - ${formatClockMinutes(activity.startMinutes + activity.durationMinutes)}`,
+      startFraction: fractionOfDay(activity.startMinutes),
+      endFraction: fractionOfDay(activity.startMinutes + activity.durationMinutes),
+      details: buildMockActivityMarkerDetails(activity.durationMinutes),
+    }));
+}
+
+function activitiesOverlap(left: MockActivityRecord, right: MockActivityRecord) {
+  const leftEnd = left.startMinutes + left.durationMinutes;
+  const rightEnd = right.startMinutes + right.durationMinutes;
+  return left.startMinutes < rightEnd && leftEnd > right.startMinutes;
+}
+
 const intradayMarkers: HeartIntradayMarker[] = [
   {
     id: 'sleep-latest',
@@ -452,15 +502,6 @@ const intradayMarkers: HeartIntradayMarker[] = [
     endFraction: fractionOfDay(7 * 60 + 45),
     details: buildMockSleepMarkerDetails(sessions[0] ?? sessions.at(-1)!),
   },
-  ...activitySeeds.map((activity) => ({
-    id: activity.id,
-    kind: 'activity' as const,
-    label: activity.title,
-    timeLabel: `${formatClockMinutes(activity.startMinutes)} - ${formatClockMinutes(activity.startMinutes + activity.durationMinutes)}`,
-    startFraction: fractionOfDay(activity.startMinutes),
-    endFraction: fractionOfDay(activity.startMinutes + activity.durationMinutes),
-    details: buildMockActivityMarkerDetails(activity.durationMinutes),
-  })),
 ];
 
 const todayIntradayMarkers: HeartIntradayMarker[] = [
@@ -486,8 +527,64 @@ const todayIntradayMarkers: HeartIntradayMarker[] = [
 export class MockHealthRepository implements HealthRepository {
   private targetWakeMinutes = 7 * 60 + 45;
   private alarmEnabled = true;
+  private manualActivityCount = 0;
+  private activities: MockActivityRecord[] = activitySeedRecords.map((activity) => ({ ...activity }));
 
   constructor(private readonly options: { delayMs?: number } = {}) {}
+
+  private getVisibleActivities() {
+    return [...this.activities]
+      .filter((activity) => activity.reviewState !== 'dismissed')
+      .sort((left, right) => left.startMinutes - right.startMinutes);
+  }
+
+  private getActivitySummaries() {
+    return this.getVisibleActivities().map((activity) => toActivitySummary(activity));
+  }
+
+  private getIntradayMarkers() {
+    return [...intradayMarkers, ...buildIntradayActivityMarkers(this.getVisibleActivities())];
+  }
+
+  private getTodayIntradayMarkers() {
+    const activityMarkers = this.getVisibleActivities().map((activity) => {
+      const startHour = Math.floor(activity.startMinutes / 60);
+      const startMinute = activity.startMinutes % 60;
+      const endMinutes = activity.startMinutes + activity.durationMinutes;
+      const endHour = Math.floor(endMinutes / 60);
+      const endMinute = endMinutes % 60;
+
+      return {
+        id: activity.id,
+        kind: activity.title === 'Nap' ? 'nap' as const : 'activity' as const,
+        label: activity.title,
+        timeLabel: `${formatClockMinutes(activity.startMinutes)} - ${formatClockMinutes(activity.startMinutes + activity.durationMinutes)}`,
+        startFraction: fractionOfWindow(
+          new Date(2026, 3, 23, startHour, startMinute, 0, 0),
+          todayDashboardHeartWindowStart,
+          todayDashboardHeartWindowEnd,
+        ),
+        endFraction: fractionOfWindow(
+          new Date(2026, 3, 23, endHour, endMinute, 0, 0),
+          todayDashboardHeartWindowStart,
+          todayDashboardHeartWindowEnd,
+        ),
+        details: buildMockActivityMarkerDetails(activity.durationMinutes),
+      };
+    });
+
+    return [...todayIntradayMarkers, ...activityMarkers];
+  }
+
+  private getActivityById(activityId: string) {
+    const activity = this.activities.find((entry) => entry.id === activityId);
+
+    if (!activity) {
+      throw new Error(`Activity not found: ${activityId}`);
+    }
+
+    return activity;
+  }
 
   async primeDashboardSnapshot(): Promise<boolean> {
     return false;
@@ -511,6 +608,77 @@ export class MockHealthRepository implements HealthRepository {
 
   async processPendingDerivedRefresh(): Promise<boolean> {
     return false;
+  }
+
+  async rescanActivities(): Promise<ActivityRescanResult> {
+    await this.wait();
+
+    const removedUnconfirmedActivities = this.activities.filter(
+      (activity) => activity.source === 'detected' && activity.reviewState === 'none',
+    ).length;
+    const preservedActivities = this.activities.filter(
+      (activity) => !(activity.source === 'detected' && activity.reviewState === 'none'),
+    );
+    const reviewedActivities = preservedActivities.filter((activity) => activity.reviewState !== 'none');
+    const rescannedActivities = activitySeedRecords
+      .map((activity) => ({ ...activity }))
+      .filter((activity) => !reviewedActivities.some((reviewed) => activitiesOverlap(activity, reviewed)));
+
+    this.activities = [...preservedActivities, ...rescannedActivities];
+
+    return {
+      removedUnconfirmedActivities,
+    };
+  }
+
+  async createManualActivity(activity: ManualActivityKind, start: Date, end: Date): Promise<string> {
+    await this.wait();
+
+    if (!MANUAL_ACTIVITY_KINDS.has(activity)) {
+      throw new Error(`Unsupported manual activity kind: ${activity}`);
+    }
+
+    if (end.getTime() <= start.getTime()) {
+      throw new Error('Manual activity end must be after start.');
+    }
+
+    this.manualActivityCount += 1;
+
+    const manualActivity: MockActivityRecord = {
+      id: `manual-${this.manualActivityCount}`,
+      title: activity,
+      startMinutes: start.getHours() * 60 + start.getMinutes(),
+      durationMinutes: Math.max(1, Math.round((end.getTime() - start.getTime()) / 60000)),
+      strain: null,
+      calories: null,
+      source: 'manual',
+      reviewState: 'confirmed',
+    };
+
+    this.activities = [...this.activities, manualActivity];
+    return manualActivity.id;
+  }
+
+  async confirmActivity(activityId: string): Promise<void> {
+    await this.wait();
+    this.getActivityById(activityId).reviewState = 'confirmed';
+  }
+
+  async dismissActivity(activityId: string): Promise<void> {
+    await this.wait();
+    this.getActivityById(activityId).reviewState = 'dismissed';
+  }
+
+  async relabelActivity(activityId: string, activity: ManualActivityKind): Promise<void> {
+    await this.wait();
+
+    if (!MANUAL_ACTIVITY_KINDS.has(activity)) {
+      throw new Error(`Unsupported manual activity kind: ${activity}`);
+    }
+
+    const entry = this.getActivityById(activityId);
+    entry.title = activity;
+    entry.reviewState = entry.source === 'manual' ? 'confirmed' : 'relabelled';
   }
 
   invalidateCaches(): void {}
@@ -570,7 +738,10 @@ export class MockHealthRepository implements HealthRepository {
     const selectedSession = sessions[Math.max(0, sessions.length - 1 - (dashboardDayKeys.length - 1 - selectedIndex))] ?? sessions[0];
     const strainScore = strainValues[selectedIndex] ?? strainValues.at(-1) ?? null;
     const dayOffset = Math.max(0, dashboardDayKeys.length - 1 - selectedIndex);
-    const selectedActivities = activities.slice(0, selectedIndex >= dashboardDayKeys.length - 2 ? 3 : selectedIndex >= dashboardDayKeys.length - 4 ? 2 : 1);
+    const selectedActivities = this.getActivitySummaries().slice(
+      0,
+      selectedIndex >= dashboardDayKeys.length - 2 ? 3 : selectedIndex >= dashboardDayKeys.length - 4 ? 2 : 1,
+    );
     const tonightPlan = buildSleepPlanSnapshot(this.targetWakeMinutes, this.alarmEnabled);
 
     return {
@@ -595,7 +766,7 @@ export class MockHealthRepository implements HealthRepository {
         averageHr: useRollingTodayHeartWindow ? todayDashboardAverageHr : intradayAverageHr - dayOffset,
         maxHr: useRollingTodayHeartWindow ? todayDashboardMaxHr : intradayMaxHr - dayOffset * 2,
         series: useRollingTodayHeartWindow ? todayDashboardHeartSeries : dashboardHeartSeries,
-        markers: useRollingTodayHeartWindow ? todayIntradayMarkers : intradayMarkers,
+        markers: useRollingTodayHeartWindow ? this.getTodayIntradayMarkers() : this.getIntradayMarkers(),
       },
       sleepCard: {
         score: selectedSession.score,
@@ -648,7 +819,7 @@ export class MockHealthRepository implements HealthRepository {
       averageHr: intradayAverageHr,
       maxHr: intradayMaxHr,
       intraday: intradayHeartSeries,
-      intradayMarkers,
+      intradayMarkers: this.getIntradayMarkers(),
       weeklyResting: takeTail(series(scoreLabels, restingHrTrend), range),
       recoveryShift: -4,
     };
@@ -668,7 +839,7 @@ export class MockHealthRepository implements HealthRepository {
       averageHr: Math.round(mean(values)),
       maxHr: sustainedPeakBpm(values) ?? Math.max(...values),
       series,
-      markers: intradayMarkers,
+      markers: this.getIntradayMarkers(),
       missingReason: series.length === 0 ? 'No local history yet. Sync the wearable from Settings to unlock this view.' : null,
     };
   }
@@ -787,7 +958,7 @@ export class MockHealthRepository implements HealthRepository {
           range
         ),
       },
-      activities,
+      activities: this.getActivitySummaries(),
     };
   }
 

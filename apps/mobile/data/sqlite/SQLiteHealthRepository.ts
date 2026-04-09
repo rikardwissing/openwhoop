@@ -1,11 +1,13 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 
-import type { HealthCacheScope, HealthRepository } from '@/data/HealthRepository';
+import type { ActivityRescanResult, HealthCacheScope, HealthRepository, ManualActivityKind } from '@/data/HealthRepository';
 import { detectActivityArtifacts } from '@/data/sqlite/activityDetector';
 import type { ActivityDetectorPeriod } from '@/data/sqlite/activityDetector';
 import { generateSleepStageRecords, isAwakePpgValue } from '@/data/sqlite/sleepStages';
 import { DERIVED_DATA_SCHEMA_VERSION } from '@/db/schema';
 import type {
+  ActivityReviewState,
+  ActivitySource,
   ActivitySummary,
   DashboardDayOption,
   DashboardDayState,
@@ -220,6 +222,9 @@ interface ActivityRow {
   start: string;
   end: string;
   activity: string;
+  confidence: number | null;
+  source: string | null;
+  review_state: string | null;
 }
 
 interface ActivityRecord {
@@ -228,6 +233,9 @@ interface ActivityRecord {
   start: Date;
   end: Date;
   activity: 'Activity' | 'Walk' | 'Workout' | 'Nap';
+  confidence: number | null;
+  source: ActivitySource;
+  reviewState: ActivityReviewState;
 }
 
 interface SleepStageRow {
@@ -432,6 +440,18 @@ function logMobilePerfError(label: string, error: unknown, details?: Record<stri
 
 const aggregateAccessLocks = new WeakMap<object, Promise<void>>();
 const HEART_METRIC_UPDATE_BATCH_SIZE = 200;
+const ACTIVITY_SELECT_COLUMNS = 'id, period_id, start, end, activity, confidence, source, review_state';
+const MANUAL_ACTIVITY_KINDS = new Set<ManualActivityKind>(['Activity', 'Walk', 'Workout', 'Nap']);
+
+function parseActivityDatabaseId(activityId: string): number | null {
+  const match = /^(?:activity|manual)-(\d+)$/.exec(activityId);
+  if (!match) {
+    return null;
+  }
+
+  const value = Number.parseInt(match[1] ?? '', 10);
+  return Number.isFinite(value) ? value : null;
+}
 
 async function withAggregateAccessLock<T>(db: SQLiteDatabase, callback: () => Promise<T>): Promise<T> {
   const key = db as object;
@@ -539,8 +559,21 @@ function toSleepCycleRecord(row: SleepCycleRow): SleepCycleRecord {
 }
 
 function toActivityRecord(row: ActivityRow): ActivityRecord {
+  const confidence = typeof row.confidence === 'number' && Number.isFinite(row.confidence)
+    ? row.confidence
+    : null;
+  const source: ActivitySource = row.source === 'manual' ? 'manual' : 'detected';
+  const reviewState: ActivityReviewState =
+    row.review_state === 'confirmed'
+      ? 'confirmed'
+      : row.review_state === 'relabelled'
+        ? 'relabelled'
+      : row.review_state === 'dismissed'
+        ? 'dismissed'
+        : 'none';
+
   return {
-    id: `${row.activity}-${row.start}`,
+    id: source === 'manual' ? `manual-${row.id}` : `activity-${row.id}`,
     periodId: row.period_id,
     start: parseSqliteDateTime(row.start),
     end: parseSqliteDateTime(row.end),
@@ -552,6 +585,9 @@ function toActivityRecord(row: ActivityRow): ActivityRecord {
           : row.activity === 'Workout'
             ? 'Workout'
             : 'Activity',
+        confidence,
+        source,
+        reviewState,
   };
 }
 
@@ -1259,6 +1295,9 @@ function buildActivityRecords(periods: ActivityDetectorPeriod[], sleeps: SleepCy
           : period.kind === 'walk'
             ? 'Walk'
             : 'Activity',
+      confidence: period.confidence,
+      source: 'detected',
+      reviewState: 'none',
     }));
 }
 
@@ -1269,6 +1308,9 @@ function buildNapActivities(periods: ActivityDetectorPeriod[]): ActivityRecord[]
     start: period.start,
     end: period.end,
     activity: 'Nap' as const,
+    confidence: period.confidence,
+    source: 'detected',
+    reviewState: 'none',
   }));
 }
 
@@ -1918,13 +1960,47 @@ async function loadActivitiesOverlappingRange(db: SQLiteDatabase, start: Date, e
   return queryActivities(
     db,
     `
-      SELECT id, period_id, start, end, activity
+      SELECT ${ACTIVITY_SELECT_COLUMNS}
       FROM activities
-      WHERE start <= ? AND end >= ?
+      WHERE start <= ? AND end >= ? AND review_state <> 'dismissed'
       ORDER BY start ASC
     `,
     [endSql, startSql],
   );
+}
+
+async function loadReviewedActivityOverlapsRange(db: SQLiteDatabase, start: Date, end: Date) {
+  const startSql = formatSqliteDateTime(start);
+  const endSql = formatSqliteDateTime(end);
+
+  return queryActivities(
+    db,
+    `
+      SELECT ${ACTIVITY_SELECT_COLUMNS}
+      FROM activities
+      WHERE start <= ? AND end >= ? AND review_state <> 'none'
+      ORDER BY start ASC
+    `,
+    [endSql, startSql],
+  );
+}
+
+function activitiesOverlap(
+  left: Pick<ActivityRecord, 'start' | 'end'>,
+  right: Pick<ActivityRecord, 'start' | 'end'>,
+) {
+  return left.start <= right.end && left.end >= right.start;
+}
+
+function applyReviewedActivityGuardrails(
+  detectedActivities: readonly ActivityRecord[],
+  reviewedOverlaps: readonly ActivityRecord[],
+) {
+  if (detectedActivities.length === 0 || reviewedOverlaps.length === 0) {
+    return [...detectedActivities];
+  }
+
+  return detectedActivities.filter((activity) => !reviewedOverlaps.some((reviewed) => activitiesOverlap(activity, reviewed)));
 }
 
 async function loadHeartMarkerSleepDetails(
@@ -2348,6 +2424,9 @@ async function buildDashboardSupplement(options: {
         strain: calculateStrainFromBucketRows(rows, options.maxHr, options.restingHr, durationMinutes),
         calories: estimateCaloriesFromBucketRows(rows, options.maxHr, options.restingHr, durationMinutes),
         isEstimated: true,
+        confidence: activity.confidence,
+        source: activity.source,
+        reviewState: activity.reviewState,
         strainLabel: 'Estimated strain',
         caloriesLabel: 'Estimated calories',
       };
@@ -2671,7 +2750,7 @@ async function loadPreparedData(db: SQLiteDatabase): Promise<PreparedDataBundle>
   const [heartRows, sleepRows, activityRows, stageRows, deviceRows] = await Promise.all([
     db.getAllAsync<HeartRateQueryRow>('SELECT id, bpm, time, rr_intervals, stress, spo2, skin_temp, sensor_data FROM heart_rate ORDER BY time ASC'),
     db.getAllAsync<SleepCycleRow>('SELECT id, sleep_id, start, end, min_bpm, max_bpm, avg_bpm, min_hrv, max_hrv, avg_hrv, avg_skin_temp, score FROM sleep_cycles ORDER BY start ASC'),
-    db.getAllAsync<ActivityRow>('SELECT id, period_id, start, end, activity FROM activities ORDER BY start ASC'),
+    db.getAllAsync<ActivityRow>(`SELECT ${ACTIVITY_SELECT_COLUMNS} FROM activities WHERE review_state <> 'dismissed' ORDER BY start ASC`),
     db.getAllAsync<SleepStageRow>('SELECT id, sleep_id, start, end, stage, is_estimated FROM sleep_stage_segments ORDER BY start ASC'),
     db.getAllAsync<DeviceStateRow>('SELECT id, name, last_seen_at, last_synced_at, firmware, battery_percent, charging_status, body_status, sync_error FROM device_state ORDER BY last_synced_at DESC LIMIT 1'),
   ]);
@@ -3560,13 +3639,14 @@ async function insertDerivedArtifacts(
   for (const activity of artifacts.activities) {
     await tx.runAsync(
       `
-        INSERT INTO activities (period_id, start, end, activity, synced)
-        VALUES (?, ?, ?, ?, 0)
+        INSERT OR IGNORE INTO activities (period_id, start, end, activity, synced, confidence, source, review_state)
+        VALUES (?, ?, ?, ?, 0, ?, 'detected', 'none')
       `,
       activity.periodId,
       formatSqliteDateTime(activity.start),
       formatSqliteDateTime(activity.end),
       activity.activity,
+      activity.confidence,
     );
   }
 
@@ -3613,7 +3693,7 @@ async function replaceDerivedDetectionRange(
   await tx.runAsync(
     `
       DELETE FROM activities
-      WHERE start <= ? AND end >= ?
+      WHERE start <= ? AND end >= ? AND source = 'detected' AND review_state = 'none'
     `,
     rangeEnd,
     rangeStart,
@@ -3624,9 +3704,31 @@ async function replaceDerivedDetectionRange(
 async function clearAllDerivedTables(tx: TransactionWriter) {
   await tx.execAsync(`
     DELETE FROM sleep_cycles;
-    DELETE FROM activities;
+    DELETE FROM activities WHERE source = 'detected' AND review_state = 'none';
     DELETE FROM sleep_stage_segments;
   `);
+}
+
+async function deleteUnconfirmedDetectedActivities(db: SQLiteDatabase) {
+  const row = await db.getFirstAsync<{ count: number }>(
+    `
+      SELECT COUNT(*) AS count
+      FROM activities
+      WHERE source = 'detected' AND review_state = 'none'
+    `,
+  );
+  const removedCount = row?.count ?? 0;
+
+  if (removedCount > 0) {
+    await db.runAsync(
+      `
+        DELETE FROM activities
+        WHERE source = 'detected' AND review_state = 'none'
+      `,
+    );
+  }
+
+  return removedCount;
 }
 
 function startOfSqliteDay(value: string) {
@@ -3760,9 +3862,9 @@ async function loadActivitiesForDay(db: SQLiteDatabase, dayKey: string, limit: n
   return queryActivities(
     db,
     `
-      SELECT id, period_id, start, end, activity
+      SELECT ${ACTIVITY_SELECT_COLUMNS}
       FROM activities
-      WHERE start >= ? AND start < ? AND activity <> 'Nap'
+      WHERE start >= ? AND start < ? AND activity <> 'Nap' AND review_state <> 'dismissed'
       ORDER BY start DESC
       LIMIT ?
     `,
@@ -4223,6 +4325,17 @@ export async function refreshDerivedDataRange(
     stages: artifacts.stages.length,
   });
 
+  const reviewedActivityQueryStartedAt = Date.now();
+  const reviewedActivityOverlaps = await loadReviewedActivityOverlapsRange(db, detectionStart, detectionEnd);
+  const guardedArtifacts = {
+    ...artifacts,
+    activities: applyReviewedActivityGuardrails(artifacts.activities, reviewedActivityOverlaps),
+  };
+  logMobilePerf('derived.range.applyActivityGuardrails', reviewedActivityQueryStartedAt, {
+    reviewedOverlaps: reviewedActivityOverlaps.length,
+    suppressedActivities: artifacts.activities.length - guardedArtifacts.activities.length,
+  });
+
   const overlapQueryStartedAt = Date.now();
   const overlappingSleepRows = await db.getAllAsync<{ sleep_id: string }>(
     `
@@ -4251,12 +4364,12 @@ export async function refreshDerivedDataRange(
       formatSqliteDateTime(detectionStart),
       formatSqliteDateTime(detectionEnd),
       overlappingSleepIds,
-      artifacts,
+      guardedArtifacts,
     );
     logMobilePerf('derived.range.replaceArtifacts', artifactWriteStartedAt, {
-      sleepCycles: artifacts.sleepCycles.length,
-      activities: artifacts.activities.length,
-      stages: artifacts.stages.length,
+      sleepCycles: guardedArtifacts.sleepCycles.length,
+      activities: guardedArtifacts.activities.length,
+      stages: guardedArtifacts.stages.length,
     });
   });
 
@@ -4297,6 +4410,18 @@ export async function refreshDerivedData(db: SQLiteDatabase) {
     activities: artifacts.activities.length,
     stages: artifacts.stages.length,
   });
+  const reviewedActivityQueryStartedAt = Date.now();
+  const reviewedActivityOverlaps = heartRows.length === 0
+    ? []
+    : await loadReviewedActivityOverlapsRange(db, heartRows[0].date, heartRows.at(-1)!.date);
+  const guardedArtifacts = {
+    ...artifacts,
+    activities: applyReviewedActivityGuardrails(artifacts.activities, reviewedActivityOverlaps),
+  };
+  logMobilePerf('derived.full.applyActivityGuardrails', reviewedActivityQueryStartedAt, {
+    reviewedOverlaps: reviewedActivityOverlaps.length,
+    suppressedActivities: artifacts.activities.length - guardedArtifacts.activities.length,
+  });
   const refreshedAt = formatSqliteDateTime(new Date());
 
   await withExclusiveTransaction(db, async (tx) => {
@@ -4308,11 +4433,11 @@ export async function refreshDerivedData(db: SQLiteDatabase) {
 
     const artifactWriteStartedAt = Date.now();
     await clearAllDerivedTables(tx);
-    await insertDerivedArtifacts(tx, artifacts);
+    await insertDerivedArtifacts(tx, guardedArtifacts);
     logMobilePerf('derived.full.replaceArtifacts', artifactWriteStartedAt, {
-      sleepCycles: artifacts.sleepCycles.length,
-      activities: artifacts.activities.length,
-      stages: artifacts.stages.length,
+      sleepCycles: guardedArtifacts.sleepCycles.length,
+      activities: guardedArtifacts.activities.length,
+      stages: guardedArtifacts.stages.length,
     });
   });
 
@@ -4948,9 +5073,9 @@ async function buildFullDashboardSnapshot(db: SQLiteDatabase): Promise<Dashboard
       ? queryActivities(
           db,
           `
-            SELECT id, period_id, start, end, activity
+            SELECT ${ACTIVITY_SELECT_COLUMNS}
             FROM activities
-            WHERE activity = 'Nap' AND start >= ?
+            WHERE activity = 'Nap' AND start >= ? AND review_state <> 'dismissed'
             ORDER BY start ASC
           `,
           [formatSqliteDateTime(latestSleep.end)],
@@ -5495,6 +5620,151 @@ export class SQLiteHealthRepository implements HealthRepository {
     });
   }
 
+  async rescanActivities(): Promise<ActivityRescanResult> {
+    return this.runRepositoryMutation(async () => {
+      const removedUnconfirmedActivities = await deleteUnconfirmedDetectedActivities(this.db);
+
+      await refreshDerivedData(this.db);
+      await refreshDashboardSnapshot(this.db, 'full');
+      this.invalidateCaches(['dashboard', 'sleep', 'heart', 'wellness', 'trends', 'derived']);
+
+      return {
+        removedUnconfirmedActivities,
+      };
+    });
+  }
+
+  async createManualActivity(activity: ManualActivityKind, start: Date, end: Date): Promise<string> {
+    if (!MANUAL_ACTIVITY_KINDS.has(activity)) {
+      throw new Error(`Unsupported manual activity kind: ${activity}`);
+    }
+
+    if (end.getTime() <= start.getTime()) {
+      throw new Error('Manual activity end must be after start.');
+    }
+
+    return this.runRepositoryMutation(async () => {
+      const startSql = formatSqliteDateTime(start);
+      const endSql = formatSqliteDateTime(end);
+
+      await this.db.runAsync(
+        `
+          INSERT INTO activities (period_id, start, end, activity, synced, source, review_state)
+          VALUES (?, ?, ?, ?, 0, 'manual', 'confirmed')
+          ON CONFLICT(start) DO UPDATE SET
+            period_id = excluded.period_id,
+            end = excluded.end,
+            activity = excluded.activity,
+            synced = 0,
+            source = 'manual',
+            review_state = 'confirmed'
+        `,
+        dateKey(end),
+        startSql,
+        endSql,
+        activity,
+      );
+
+      const row = await this.db.getFirstAsync<{ id: number }>(
+        `
+          SELECT id
+          FROM activities
+          WHERE start = ?
+          LIMIT 1
+        `,
+        startSql,
+      );
+
+      await refreshDashboardSnapshot(this.db, 'full');
+      this.invalidateCaches(['dashboard', 'sleep', 'wellness', 'trends']);
+
+      return row ? `manual-${row.id}` : `manual-${startSql}`;
+    });
+  }
+
+  async confirmActivity(activityId: string): Promise<void> {
+    const databaseId = parseActivityDatabaseId(activityId);
+    if (databaseId === null) {
+      throw new Error(`Unknown activity id: ${activityId}`);
+    }
+
+    await this.runRepositoryMutation(async () => {
+      await this.db.runAsync(
+        `
+          UPDATE activities
+          SET review_state = 'confirmed', synced = 0
+          WHERE id = ?
+        `,
+        databaseId,
+      );
+
+      await refreshDashboardSnapshot(this.db, 'full');
+      this.invalidateCaches(['dashboard', 'sleep', 'wellness', 'trends']);
+    });
+  }
+
+  async dismissActivity(activityId: string): Promise<void> {
+    const databaseId = parseActivityDatabaseId(activityId);
+    if (databaseId === null) {
+      throw new Error(`Unknown activity id: ${activityId}`);
+    }
+
+    await this.runRepositoryMutation(async () => {
+      await this.db.runAsync(
+        `
+          UPDATE activities
+          SET review_state = 'dismissed', synced = 0
+          WHERE id = ?
+        `,
+        databaseId,
+      );
+
+      await refreshDashboardSnapshot(this.db, 'full');
+      this.invalidateCaches(['dashboard', 'sleep', 'wellness', 'trends']);
+    });
+  }
+
+  async relabelActivity(activityId: string, activity: ManualActivityKind): Promise<void> {
+    if (!MANUAL_ACTIVITY_KINDS.has(activity)) {
+      throw new Error(`Unsupported manual activity kind: ${activity}`);
+    }
+
+    const databaseId = parseActivityDatabaseId(activityId);
+    if (databaseId === null) {
+      throw new Error(`Unknown activity id: ${activityId}`);
+    }
+
+    await this.runRepositoryMutation(async () => {
+      const row = await this.db.getFirstAsync<{ source: string | null }>(
+        `
+          SELECT source
+          FROM activities
+          WHERE id = ?
+          LIMIT 1
+        `,
+        databaseId,
+      );
+
+      if (!row) {
+        throw new Error(`Activity not found: ${activityId}`);
+      }
+
+      await this.db.runAsync(
+        `
+          UPDATE activities
+          SET activity = ?, review_state = ?, synced = 0
+          WHERE id = ?
+        `,
+        activity,
+        row.source === 'manual' ? 'confirmed' : 'relabelled',
+        databaseId,
+      );
+
+      await refreshDashboardSnapshot(this.db, 'full');
+      this.invalidateCaches(['dashboard', 'sleep', 'wellness', 'trends']);
+    });
+  }
+
   private async loadLatestHeartDate() {
     const row = await this.readQuery<TimeRow | null>('heart:latest-time', () =>
       this.db.getFirstAsync<TimeRow>('SELECT time FROM heart_rate ORDER BY time DESC LIMIT 1'),
@@ -5750,9 +6020,9 @@ export class SQLiteHealthRepository implements HealthRepository {
     return queryActivities(
       this.db,
       `
-        SELECT id, period_id, start, end, activity
+        SELECT ${ACTIVITY_SELECT_COLUMNS}
         FROM activities
-        WHERE activity = 'Nap' AND start >= ?
+        WHERE activity = 'Nap' AND start >= ? AND review_state <> 'dismissed'
         ORDER BY start ASC
       `,
       [formatSqliteDateTime(start)],
@@ -5764,8 +6034,9 @@ export class SQLiteHealthRepository implements HealthRepository {
       queryActivities(
         this.db,
         `
-          SELECT id, period_id, start, end, activity
+          SELECT ${ACTIVITY_SELECT_COLUMNS}
           FROM activities
+          WHERE review_state <> 'dismissed'
           ORDER BY start DESC
           LIMIT ?
         `,
@@ -6499,6 +6770,9 @@ export class SQLiteHealthRepository implements HealthRepository {
             strain: calculateStrainFromBucketRows(rows, maxHr, restingHr, durationMinutes),
             calories: estimateCaloriesFromBucketRows(rows, maxHr, restingHr, durationMinutes),
             isEstimated: true,
+            confidence: activity.confidence,
+            source: activity.source,
+            reviewState: activity.reviewState,
             strainLabel: 'Estimated strain',
             caloriesLabel: 'Estimated calories',
           };

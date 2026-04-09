@@ -2,6 +2,8 @@ export type HistoryRange = '24h' | '7d' | '14d' | '30d';
 export type AccentTone = 'green' | 'cyan' | 'alert' | 'heart' | 'violet';
 export type MetricTone = 'good' | 'caution' | 'alert' | 'neutral';
 export type SleepStage = 'awake' | 'rem' | 'deep' | 'light';
+export type ActivitySource = 'detected' | 'manual';
+export type ActivityReviewState = 'none' | 'confirmed' | 'relabelled' | 'dismissed';
 export type PartialDataReason = string;
 export type DerivedRefreshStatus = 'idle' | 'pending' | 'processing' | 'error';
 
@@ -195,6 +197,9 @@ export interface ActivitySummary extends EstimatedValueMeta {
   durationMinutes: number;
   strain: number | null;
   calories: number | null;
+  confidence?: number | null;
+  source?: ActivitySource;
+  reviewState?: ActivityReviewState;
   strainLabel?: string;
   caloriesLabel?: string;
 }

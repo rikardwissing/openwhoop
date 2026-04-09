@@ -21,6 +21,7 @@ const mockHealthRepository = {
     isFirstSync: false,
   })),
   processPendingDerivedRefresh: jest.fn(async () => false),
+  rescanActivities: jest.fn(async () => ({ removedUnconfirmedActivities: 0 })),
 };
 const mockUseSQLiteContext = jest.fn(() => ({}));
 const mockFreshBackgroundDb = {

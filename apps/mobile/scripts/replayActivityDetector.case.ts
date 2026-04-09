@@ -55,6 +55,9 @@ interface ActivityRow {
   start: string;
   end: string;
   activity: string;
+  confidence: number | null;
+  source: string | null;
+  review_state: string | null;
 }
 
 interface LatestHeartRow {
@@ -136,7 +139,7 @@ describe('activity replay script', () => {
 
       const activities = await adapter.getAllAsync<ActivityRow>(
         `
-          SELECT period_id, start, end, activity
+          SELECT period_id, start, end, activity, confidence, source, review_state
           FROM activities
           WHERE end >= ?
           ORDER BY start DESC

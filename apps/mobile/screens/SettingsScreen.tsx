@@ -320,22 +320,39 @@ export function SettingsScreen() {
     status: 'idle',
     message: 'Run manual cleanup to drop the legacy IMU column if needed and vacuum free SQLite pages.',
   });
+  const [activityRescanState, setActivityRescanState] = useState<{
+    status: 'idle' | 'running' | 'success' | 'error';
+    message: string;
+  }>({
+    status: 'idle',
+    message: 'Delete pending detected activities and rerun local activity detection across the history already on this phone.',
+  });
   const deviceBusy = isBlockingSyncStatus(progress.status);
   const maintenanceBusy = maintenanceState.status === 'running';
+  const activityRescanBusy = activityRescanState.status === 'running';
   const batteryChipAccent = batteryAccent(deviceState.batteryPercent);
   const chargingChipAccent = chargingAccent(deviceState.chargingStatus);
   const wearChipAccent = wearAccent(deviceState.bodyStatus);
-  const exportDisabled = deviceBusy || maintenanceBusy || exportState.status === 'running' || !db;
+  const exportDisabled = deviceBusy || maintenanceBusy || activityRescanBusy || exportState.status === 'running' || !db;
   const clearDataDisabled =
     progress.status === 'scanning' ||
     deviceBusy ||
     maintenanceBusy ||
+    activityRescanBusy ||
     clearDataState.status === 'running' ||
     !databaseControls;
   const performanceSweepDisabled =
-    progress.status === 'scanning' || deviceBusy || maintenanceBusy || performanceSweepState.status === 'running' || !db;
+    progress.status === 'scanning' || deviceBusy || maintenanceBusy || activityRescanBusy || performanceSweepState.status === 'running' || !db;
   const maintenanceDisabled =
-    progress.status === 'scanning' || deviceBusy || exportState.status === 'running' || performanceSweepState.status === 'running' || clearDataState.status === 'running' || maintenanceBusy || !db;
+    progress.status === 'scanning' || deviceBusy || exportState.status === 'running' || performanceSweepState.status === 'running' || clearDataState.status === 'running' || maintenanceBusy || activityRescanBusy || !db;
+  const activityRescanDisabled =
+    progress.status === 'scanning' ||
+    deviceBusy ||
+    exportState.status === 'running' ||
+    performanceSweepState.status === 'running' ||
+    clearDataState.status === 'running' ||
+    maintenanceBusy ||
+    activityRescanBusy;
   const latestSyncImportSummary = backgroundSyncState.lastSyncImportSummary;
   const latestPerformanceRun = performanceRuns[0] ?? null;
 
@@ -489,6 +506,32 @@ export function SettingsScreen() {
       setMaintenanceState({
         status: 'error',
         message: error instanceof Error ? error.message : 'Unable to run local database maintenance.',
+      });
+    }
+  }
+
+  async function handleRescanActivities() {
+    setActivityRescanState({
+      status: 'running',
+      message: 'Removing unconfirmed detected activities and rescanning the local activity history...',
+    });
+
+    try {
+      const result = await repository.rescanActivities();
+      refreshHealthData(['dashboard', 'sleep', 'heart', 'wellness', 'trends', 'derived']);
+      const noun = result.removedUnconfirmedActivities === 1 ? 'activity' : 'activities';
+
+      setActivityRescanState({
+        status: 'success',
+        message:
+          result.removedUnconfirmedActivities > 0
+            ? `Removed ${result.removedUnconfirmedActivities} unconfirmed detected ${noun} and rescanned local activity history.`
+            : 'No unconfirmed detected activities were found. Rescanned local activity history anyway.',
+      });
+    } catch (error) {
+      setActivityRescanState({
+        status: 'error',
+        message: error instanceof Error ? error.message : 'Unable to rescan local activity history.',
       });
     }
   }
@@ -923,6 +966,32 @@ export function SettingsScreen() {
       <GlassCard accentColor={colors.primary}>
         <SectionHeader title="Database Maintenance" trailing="Manual" />
         <View style={styles.settingColumn}>
+          <View>
+            <Text style={styles.settingTitle}>Rescan local activity detection</Text>
+            <Text style={styles.settingSubtitle}>
+              Deletes unconfirmed detected activities first, then reruns activity detection against the history already stored on this phone. Manual and reviewed activities stay in place.
+            </Text>
+          </View>
+
+          <View style={styles.buttonRow}>
+            <ActionButton
+              label={activityRescanState.status === 'running' ? 'Rescanning Activities...' : 'Rescan Activities'}
+              onPress={() => {
+                void handleRescanActivities();
+              }}
+              disabled={activityRescanDisabled}
+              tone="secondary"
+            />
+          </View>
+
+          <Text
+            style={[
+              styles.roadmapText,
+              activityRescanState.status === 'error' ? styles.errorText : null,
+            ]}>
+            {activityRescanState.message}
+          </Text>
+
           <View>
             <Text style={styles.settingTitle}>Compact and repair local database</Text>
             <Text style={styles.settingSubtitle}>

@@ -80,4 +80,26 @@ describe('MockHealthRepository', () => {
     expect(sleep.sleepPlan.alarmEnabled).toBe(true);
     expect(sleep.sleepPlan.targetWakeTime).toBe('6:30 AM');
   });
+
+  it('rescans activities by clearing pending detections while preserving reviewed history', async () => {
+    const repository = new MockHealthRepository({ delayMs: 0 });
+
+    await repository.dismissActivity('activity-tempo-run');
+    const manualId = await repository.createManualActivity(
+      'Nap',
+      new Date(2026, 3, 23, 14, 0, 0),
+      new Date(2026, 3, 23, 14, 35, 0),
+    );
+
+    const result = await repository.rescanActivities();
+    const wellness = await repository.getWellnessSnapshot('14d');
+
+    expect(result).toEqual({
+      removedUnconfirmedActivities: 2,
+    });
+    expect(wellness.activities.some((activity) => activity.id === 'activity-tempo-run')).toBe(false);
+    expect(wellness.activities.map((activity) => activity.id)).toEqual(
+      expect.arrayContaining([manualId, 'activity-mobility-reset', 'activity-evening-walk']),
+    );
+  });
 });

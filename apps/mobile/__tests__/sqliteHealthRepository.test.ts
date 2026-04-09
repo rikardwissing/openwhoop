@@ -268,6 +268,49 @@ async function insertSyntheticHeartSeries(
   });
 }
 
+async function insertSingleWorkoutBoutDay(adapter: NodeSqliteAdapter) {
+  const heartInsert = `
+    INSERT INTO heart_rate (id, bpm, time, rr_intervals, sensor_data, synced)
+    VALUES (?, ?, ?, ?, ?, 0)
+  `;
+  const start = new Date(2026, 3, 2, 7, 0, 0);
+  const restGravityA: [number, number, number] = [0.15, -0.02, 0.97];
+  const restGravityB: [number, number, number] = [0.162, -0.018, 0.968];
+  const activityGravityA: [number, number, number] = [0.35, -0.42, 0.84];
+  const activityGravityB: [number, number, number] = [-0.28, -0.81, 0.51];
+
+  for (let minute = 0; minute < 12 * 60; minute += 1) {
+    const sampleDate = new Date(start.getTime() + minute * 60000);
+    const isWorkout = minute >= 180 && minute < 220;
+    const gravity = isWorkout
+      ? minute % 2 === 0
+        ? activityGravityA
+        : activityGravityB
+      : minute % 2 === 0
+        ? restGravityA
+        : restGravityB;
+
+    await adapter.runAsync(
+      heartInsert,
+      minute + 1,
+      isWorkout ? 112 : 66,
+      formatTestSqliteDateTime(sampleDate),
+      isWorkout ? '620,615,610' : '920,930,925',
+      JSON.stringify({
+        ppg_green: isWorkout ? 19_900 : 18_000,
+        skin_contact: 1,
+        signal_quality: 3074,
+        accel_gravity: gravity,
+      }),
+    );
+  }
+
+  return {
+    overlapStart: new Date(2026, 3, 2, 10, 5, 0),
+    overlapEnd: new Date(2026, 3, 2, 10, 35, 0),
+  };
+}
+
 function calculateExpectedStressValues(samples: Array<{ bpm: number; rr: number[] }>) {
   const stressWindow = 120;
 
@@ -400,6 +443,322 @@ describe('SQLiteHealthRepository', () => {
     expect(maintenance.ran).toBe(true);
     expect(maintenance.migratedLegacyHeartRate).toBe(true);
     expect(indexes.map((index) => index.name)).toContain('idx_heart_rate_time');
+
+    adapter.close();
+  });
+
+  it('creates manual activities that survive derived refreshes and appear in wellness snapshots', async () => {
+    const { adapter, repository } = await createRepositoryFixture();
+
+    const manualId = await repository.createManualActivity(
+      'Nap',
+      new Date('2026-03-19T12:30:00'),
+      new Date('2026-03-19T13:00:00'),
+    );
+
+    const beforeRefresh = await repository.getWellnessSnapshot('14d');
+    expect(beforeRefresh.activities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: manualId,
+          title: 'Nap',
+          source: 'manual',
+          reviewState: 'confirmed',
+        }),
+      ]),
+    );
+
+    await refreshDerivedData(adapter as never);
+    repository.invalidateCaches(['dashboard', 'sleep', 'wellness', 'trends']);
+
+    const storedManualRows = await adapter.getAllAsync<{
+      start: string;
+      end: string;
+      activity: string;
+      confidence: number | null;
+      source: string;
+      review_state: string;
+    }>(
+      `
+        SELECT start, end, activity, confidence, source, review_state
+        FROM activities
+        WHERE source = 'manual'
+        ORDER BY start ASC
+      `,
+    );
+
+    expect(storedManualRows).toEqual([
+      {
+        start: '2026-03-19 12:30:00',
+        end: '2026-03-19 13:00:00',
+        activity: 'Nap',
+        confidence: null,
+        source: 'manual',
+        review_state: 'confirmed',
+      },
+    ]);
+
+    const afterRefresh = await repository.getWellnessSnapshot('14d');
+    expect(afterRefresh.activities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: manualId,
+          title: 'Nap',
+          confidence: null,
+          source: 'manual',
+          reviewState: 'confirmed',
+        }),
+      ]),
+    );
+
+    adapter.close();
+  });
+
+  it('confirms and relabels detected activities while preserving them across derived refreshes', async () => {
+    const { adapter, repository } = await createRepositoryFixture();
+
+    await adapter.runAsync(
+      `
+        INSERT INTO activities (period_id, start, end, activity, synced, confidence, source, review_state)
+        VALUES (?, ?, ?, ?, 0, ?, 'detected', 'none')
+      `,
+      'activity-1',
+      '2026-03-19 06:50:00',
+      '2026-03-19 07:00:00',
+      'Activity',
+      0.72,
+    );
+
+    await repository.confirmActivity('activity-1');
+    await repository.relabelActivity('activity-1', 'Workout');
+
+    const beforeRefresh = await repository.getWellnessSnapshot('14d');
+    expect(beforeRefresh.activities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'activity-1',
+          title: 'Workout',
+          confidence: 0.72,
+          source: 'detected',
+          reviewState: 'relabelled',
+        }),
+      ]),
+    );
+
+    await refreshDerivedData(adapter as never);
+    repository.invalidateCaches(['dashboard', 'sleep', 'wellness', 'trends']);
+
+    const storedRows = await adapter.getAllAsync<{
+      activity: string;
+      confidence: number | null;
+      source: string;
+      review_state: string;
+    }>(
+      `
+        SELECT activity, confidence, source, review_state
+        FROM activities
+        WHERE id = 1
+      `,
+    );
+
+    expect(storedRows).toEqual([
+      {
+        activity: 'Workout',
+        confidence: 0.72,
+        source: 'detected',
+        review_state: 'relabelled',
+      },
+    ]);
+
+    const afterRefresh = await repository.getWellnessSnapshot('14d');
+    expect(afterRefresh.activities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'activity-1',
+          title: 'Workout',
+          confidence: 0.72,
+          source: 'detected',
+          reviewState: 'relabelled',
+        }),
+      ]),
+    );
+
+    adapter.close();
+  });
+
+  it('dismisses activities so they stay hidden from wellness snapshots across derived refreshes', async () => {
+    const { adapter, repository } = await createRepositoryFixture();
+
+    await adapter.runAsync(
+      `
+        INSERT INTO activities (period_id, start, end, activity, synced, source, review_state)
+        VALUES (?, ?, ?, ?, 0, 'detected', 'none')
+      `,
+      'activity-1',
+      '2026-03-19 06:50:00',
+      '2026-03-19 07:00:00',
+      'Activity',
+    );
+
+    await repository.dismissActivity('activity-1');
+
+    const beforeRefresh = await repository.getWellnessSnapshot('14d');
+    expect(beforeRefresh.activities.some((activity) => activity.id === 'activity-1')).toBe(false);
+
+    await refreshDerivedData(adapter as never);
+    repository.invalidateCaches(['dashboard', 'sleep', 'wellness', 'trends']);
+
+    const storedRows = await adapter.getAllAsync<{
+      review_state: string;
+    }>(
+      `
+        SELECT review_state
+        FROM activities
+        WHERE id = 1
+      `,
+    );
+
+    expect(storedRows).toEqual([
+      {
+        review_state: 'dismissed',
+      },
+    ]);
+
+    const afterRefresh = await repository.getWellnessSnapshot('14d');
+    expect(afterRefresh.activities.some((activity) => activity.id === 'activity-1')).toBe(false);
+
+    adapter.close();
+  });
+
+  it('rescans activities after clearing unconfirmed detected rows first', async () => {
+    const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
+    await initializeDatabase(adapter as never);
+    await insertSingleWorkoutBoutDay(adapter);
+    await refreshDerivedData(adapter as never);
+
+    const repository = new SQLiteHealthRepository(adapter as never);
+    const beforeRescan = await adapter.getAllAsync<{
+      source: string;
+      review_state: string;
+    }>(
+      `
+        SELECT source, review_state
+        FROM activities
+        ORDER BY start ASC
+      `,
+    );
+
+    const result = await repository.rescanActivities();
+
+    const afterRescan = await adapter.getAllAsync<{
+      source: string;
+      review_state: string;
+    }>(
+      `
+        SELECT source, review_state
+        FROM activities
+        ORDER BY start ASC
+      `,
+    );
+
+    expect(beforeRescan).toHaveLength(1);
+    expect(beforeRescan[0]).toEqual({
+      source: 'detected',
+      review_state: 'none',
+    });
+    expect(result).toEqual({
+      removedUnconfirmedActivities: 1,
+    });
+    expect(afterRescan).toHaveLength(1);
+    expect(afterRescan[0]).toEqual({
+      source: 'detected',
+      review_state: 'none',
+    });
+
+    adapter.close();
+  });
+
+  it('suppresses freshly detected activities when a reviewed overlap already exists', async () => {
+    const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
+    await initializeDatabase(adapter as never);
+
+    const repository = new SQLiteHealthRepository(adapter as never);
+    const { overlapStart, overlapEnd } = await insertSingleWorkoutBoutDay(adapter);
+
+    await repository.createManualActivity('Workout', overlapStart, overlapEnd);
+    await refreshDerivedData(adapter as never);
+
+    const activities = await adapter.getAllAsync<{
+      start: string;
+      end: string;
+      activity: string;
+      source: string;
+      review_state: string;
+    }>(
+      `
+        SELECT start, end, activity, source, review_state
+        FROM activities
+        ORDER BY start ASC
+      `,
+    );
+
+    expect(activities).toEqual([
+      {
+        start: '2026-04-02 10:05:00',
+        end: '2026-04-02 10:35:00',
+        activity: 'Workout',
+        source: 'manual',
+        review_state: 'confirmed',
+      },
+    ]);
+
+    adapter.close();
+  });
+
+  it('suppresses freshly detected activities when a dismissed overlap already exists', async () => {
+    const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
+    await initializeDatabase(adapter as never);
+
+    const repository = new SQLiteHealthRepository(adapter as never);
+    const { overlapStart, overlapEnd } = await insertSingleWorkoutBoutDay(adapter);
+
+    await adapter.runAsync(
+      `
+        INSERT INTO activities (period_id, start, end, activity, synced, confidence, source, review_state)
+        VALUES (?, ?, ?, ?, 0, ?, 'detected', 'none')
+      `,
+      'dismissed-seed',
+      formatTestSqliteDateTime(overlapStart),
+      formatTestSqliteDateTime(overlapEnd),
+      'Workout',
+      0.2,
+    );
+    await repository.dismissActivity('activity-1');
+    await refreshDerivedData(adapter as never);
+
+    const activities = await adapter.getAllAsync<{
+      start: string;
+      end: string;
+      activity: string;
+      source: string;
+      review_state: string;
+    }>(
+      `
+        SELECT start, end, activity, source, review_state
+        FROM activities
+        ORDER BY start ASC
+      `,
+    );
+
+    expect(activities).toEqual([
+      {
+        start: '2026-04-02 10:05:00',
+        end: '2026-04-02 10:35:00',
+        activity: 'Workout',
+        source: 'detected',
+        review_state: 'dismissed',
+      },
+    ]);
 
     adapter.close();
   });
@@ -645,41 +1004,7 @@ describe('SQLiteHealthRepository', () => {
     const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
     await initializeDatabase(adapter as never);
 
-    const heartInsert = `
-      INSERT INTO heart_rate (id, bpm, time, rr_intervals, sensor_data, synced)
-      VALUES (?, ?, ?, ?, ?, 0)
-    `;
-    const start = new Date(2026, 3, 2, 7, 0, 0);
-    const restGravityA: [number, number, number] = [0.15, -0.02, 0.97];
-    const restGravityB: [number, number, number] = [0.162, -0.018, 0.968];
-    const activityGravityA: [number, number, number] = [0.35, -0.42, 0.84];
-    const activityGravityB: [number, number, number] = [-0.28, -0.81, 0.51];
-
-    for (let minute = 0; minute < 12 * 60; minute += 1) {
-      const sampleDate = new Date(start.getTime() + minute * 60000);
-      const isWorkout = minute >= 180 && minute < 220;
-      const gravity = isWorkout
-        ? minute % 2 === 0
-          ? activityGravityA
-          : activityGravityB
-        : minute % 2 === 0
-          ? restGravityA
-          : restGravityB;
-
-      await adapter.runAsync(
-        heartInsert,
-        minute + 1,
-        isWorkout ? 112 : 66,
-        formatTestSqliteDateTime(sampleDate),
-        isWorkout ? '620,615,610' : '920,930,925',
-        JSON.stringify({
-          ppg_green: isWorkout ? 19_900 : 18_000,
-          skin_contact: 1,
-          signal_quality: 3074,
-          accel_gravity: gravity,
-        }),
-      );
-    }
+    await insertSingleWorkoutBoutDay(adapter);
 
     await refreshDerivedData(adapter as never);
 
@@ -687,9 +1012,12 @@ describe('SQLiteHealthRepository', () => {
       start: string;
       end: string;
       activity: string;
+      confidence: number | null;
+      source: string;
+      review_state: string;
     }>(
       `
-        SELECT start, end, activity
+        SELECT start, end, activity, confidence, source, review_state
         FROM activities
         ORDER BY start ASC
       `,
@@ -697,6 +1025,10 @@ describe('SQLiteHealthRepository', () => {
 
     expect(activities).toHaveLength(1);
     expect(['Activity', 'Walk', 'Workout']).toContain(activities[0]?.activity);
+    expect(activities[0]?.confidence).toBeGreaterThan(0);
+    expect(activities[0]?.confidence).toBeLessThanOrEqual(1);
+    expect(activities[0]?.source).toBe('detected');
+    expect(activities[0]?.review_state).toBe('none');
 
     const durationMinutes =
       (new Date(activities[0]!.end.replace(' ', 'T')).getTime() - new Date(activities[0]!.start.replace(' ', 'T')).getTime()) /
@@ -1633,6 +1965,52 @@ describe('SQLiteHealthRepository', () => {
       adapter.close();
       fs.rmSync(tempDir, { recursive: true, force: true });
       jest.useRealTimers();
+    }
+  });
+
+  it('keeps the seeded April 8 rebuild from exploding into many short low-confidence daytime activities', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'btwearable-seeded-activity-'));
+    const source = path.resolve(process.cwd(), 'assets/databases/btwearable.db');
+    const databaseCopy = path.join(tempDir, 'btwearable.db');
+    fs.copyFileSync(source, databaseCopy);
+
+    const adapter = new NodeSqliteAdapter(new DatabaseSync(databaseCopy));
+
+    try {
+      await initializeDatabase(adapter as never);
+      await refreshDerivedData(adapter as never);
+
+      const activities = await adapter.getAllAsync<{
+        start: string;
+        end: string;
+        activity: string;
+        confidence: number | null;
+      }>(
+        `
+          SELECT start, end, activity, confidence
+          FROM activities
+          WHERE substr(start, 1, 10) = '2026-04-08'
+          ORDER BY start ASC
+        `,
+      );
+
+      expect(activities.length).toBeLessThanOrEqual(4);
+      expect(activities.every((activity) => {
+        const durationMinutes = Number((
+          (new Date(activity.end.replace(' ', 'T')).getTime() - new Date(activity.start.replace(' ', 'T')).getTime()) /
+          60000
+        ).toFixed(1));
+        const confidence = activity.confidence ?? 0;
+
+        if (activity.activity === 'Workout') {
+          return durationMinutes >= 15 && confidence >= 0.75;
+        }
+
+        return durationMinutes >= 20 && confidence >= 0.7;
+      })).toBe(true);
+    } finally {
+      adapter.close();
+      fs.rmSync(tempDir, { recursive: true, force: true });
     }
   });
 

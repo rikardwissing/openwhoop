@@ -16,15 +16,22 @@ const EPOCH_300S_MS = 300_000;
 
 const SLEEP_STILLNESS_BUCKET_MS = 30_000;
 
-const MIN_ACTIVITY_DURATION_MINUTES = 10;
-const MAX_ACTIVITY_REST_BRIDGE_MINUTES = 5;
+const MIN_ACTIVITY_DURATION_MINUTES = 20;
+const MIN_WORKOUT_DURATION_MINUTES = 15;
+const MAX_ACTIVITY_REST_BRIDGE_MINUTES = 3;
 const ACTIVE_MOTION_FLOOR = 0.006;
 const ACTIVE_STRONG_MOTION_FLOOR = 0.015;
 const ACTIVE_POSTURE_SHIFT_FLOOR = 0.12;
 const ACTIVE_HEART_RATE_FLOOR = 88;
 const ACTIVE_HEART_RATE_DELTA = 15;
+const ACTIVE_HEART_RATE_RISE_FLOOR = 4;
 const WALK_HEART_RATE_FLOOR = 74;
 const WORKOUT_HEART_RATE_FLOOR = 104;
+const MIN_ACTIVITY_CONFIDENCE = 0.75;
+const MIN_WALK_CONFIDENCE = 0.75;
+const MIN_WORKOUT_CONFIDENCE = 0.75;
+const MIN_RR_CONSISTENCY_SAMPLE_COUNT = 20;
+const MAX_RR_BPM_DISAGREEMENT = 20;
 const MIN_CONTACT_RATIO = 0.5;
 const MIN_SIGNAL_RATIO = 0.5;
 
@@ -73,6 +80,9 @@ interface ActivityEpoch {
   start: Date;
   end: Date;
   avgBpm: number;
+  heartRateRise: number;
+  rrDerivedBpm: number | null;
+  rrSampleCount: number;
   motionScore: number;
   postureCentroid: [number, number, number] | null;
   postureShift: number;
@@ -403,6 +413,7 @@ function buildActivityEpochs(
   const epochs = bucketIndexes.map((bucketIndex) => {
     const bucketRows = buckets.get(bucketIndex)!;
     const gravityRows = bucketRows.filter((row) => row.gravity !== null);
+    const rrValues = bucketRows.flatMap((row) => row.rr).filter((value) => Number.isFinite(value) && value > 0);
     const postureCentroid = gravityRows.length === 0
       ? null
       : [
@@ -426,6 +437,9 @@ function buildActivityEpochs(
       start: bucketRows[0].date,
       end: bucketRows[bucketRows.length - 1].date,
       avgBpm: mean(bucketRows.map((row) => row.bpm)),
+      heartRateRise: 0,
+      rrDerivedBpm: rrValues.length === 0 ? null : 60000 / Math.max(mean(rrValues), 1),
+      rrSampleCount: rrValues.length,
       motionScore: motionValues.length === 0 ? 0 : mean(motionValues),
       postureCentroid,
       postureShift: 0,
@@ -441,6 +455,7 @@ function buildActivityEpochs(
   });
 
   for (let index = 0; index < epochs.length; index += 1) {
+    epochs[index].heartRateRise = index === 0 ? 0 : epochs[index].avgBpm - epochs[index - 1]!.avgBpm;
     epochs[index].postureShift = postureShiftDelta(
       epochs[index - 1]?.postureCentroid ?? null,
       epochs[index].postureCentroid,
@@ -486,16 +501,21 @@ function classifyActivityEpochs(epochs: ActivityEpoch[], context: ActivityContex
     const postureChange = epoch.postureShift >= ACTIVE_POSTURE_SHIFT_FLOOR;
     const elevatedHeartRate = epoch.avgBpm >= Math.max(context.bpmQ90, ACTIVE_HEART_RATE_FLOOR);
     const aboveBaselineHeartRate = epoch.avgBpm >= Math.max(context.bpmQ75 + 8, context.bpmQ50 + ACTIVE_HEART_RATE_DELTA, 78);
+    const risingHeartRate = epoch.heartRateRise >= ACTIVE_HEART_RATE_RISE_FLOOR;
     const gravityMotionSupported =
       hasQualitySignals &&
       postureChange &&
       aboveBaselineHeartRate &&
-      (strongMotion || (mediumMotion && elevatedHeartRate));
+      (strongMotion || (mediumMotion && (elevatedHeartRate || risingHeartRate)));
     const motionDriven: boolean =
       gravityMotionSupported &&
-      (postureChange || previousState === 'activity' || epoch.avgBpm >= Math.max(context.bpmQ50 + 6, 72));
+      (strongMotion || elevatedHeartRate || risingHeartRate || previousState === 'activity');
     const heartDriven: boolean =
-      elevatedHeartRate && ((hasQualitySignals && mediumMotion && postureChange) || previousState === 'activity');
+      elevatedHeartRate &&
+      hasQualitySignals &&
+      mediumMotion &&
+      postureChange &&
+      (risingHeartRate || previousState === 'activity');
     const sustainedActivity: boolean =
       previousState === 'activity' &&
       aboveBaselineHeartRate &&
@@ -503,7 +523,7 @@ function classifyActivityEpochs(epochs: ActivityEpoch[], context: ActivityContex
       mediumMotion &&
       postureChange;
     const isActivity: boolean = motionDriven || heartDriven || sustainedActivity;
-    const evidenceCount = [strongMotion || mediumMotion, postureChange, elevatedHeartRate || aboveBaselineHeartRate]
+    const evidenceCount = [strongMotion || mediumMotion, postureChange, elevatedHeartRate || aboveBaselineHeartRate || risingHeartRate]
       .filter(Boolean)
       .length;
 
@@ -538,6 +558,47 @@ function classifyActivityKind(period: ActivityDetectorPeriod, epochs: readonly A
   }
 
   return 'activity';
+}
+
+function hasRrBpmDisagreement(period: ActivityDetectorPeriod, epochs: readonly ActivityEpoch[]) {
+  const overlapping = epochs.filter((epoch) => epoch.end >= period.start && epoch.start <= period.end);
+  let weightedRrDerivedBpm = 0;
+  let weightedObservedBpm = 0;
+  let sampleCount = 0;
+
+  for (const epoch of overlapping) {
+    if (epoch.rrDerivedBpm === null || epoch.rrSampleCount <= 0) {
+      continue;
+    }
+
+    weightedRrDerivedBpm += epoch.rrDerivedBpm * epoch.rrSampleCount;
+    weightedObservedBpm += epoch.avgBpm * epoch.rrSampleCount;
+    sampleCount += epoch.rrSampleCount;
+  }
+
+  if (sampleCount < MIN_RR_CONSISTENCY_SAMPLE_COUNT) {
+    return false;
+  }
+
+  const rrDerivedBpm = weightedRrDerivedBpm / sampleCount;
+  const observedBpm = weightedObservedBpm / sampleCount;
+  return Math.abs(observedBpm - rrDerivedBpm) > MAX_RR_BPM_DISAGREEMENT;
+}
+
+function passesActivityRetentionThreshold(period: ActivityDetectorPeriod, epochs: readonly ActivityEpoch[]) {
+  if (hasRrBpmDisagreement(period, epochs)) {
+    return false;
+  }
+
+  if (period.kind === 'workout') {
+    return period.durationMinutes >= MIN_WORKOUT_DURATION_MINUTES && period.confidence >= MIN_WORKOUT_CONFIDENCE;
+  }
+
+  if (period.kind === 'walk') {
+    return period.durationMinutes >= MIN_ACTIVITY_DURATION_MINUTES && period.confidence >= MIN_WALK_CONFIDENCE;
+  }
+
+  return period.durationMinutes >= MIN_ACTIVITY_DURATION_MINUTES && period.confidence >= MIN_ACTIVITY_CONFIDENCE;
 }
 
 function collectActivityCandidates(epochs: readonly ActivityEpoch[], context: ActivityContext) {
@@ -622,11 +683,11 @@ function collectActivityCandidates(epochs: readonly ActivityEpoch[], context: Ac
   }
 
   return mergeAdjacentPeriods(bridged)
-    .filter((period) => period.durationMinutes >= MIN_ACTIVITY_DURATION_MINUTES)
     .map((period) => ({
       ...period,
       kind: classifyActivityKind(period, epochs, context),
-    }));
+    }))
+    .filter((period) => passesActivityRetentionThreshold(period, epochs));
 }
 
 export function detectActivityArtifacts(rows: readonly ActivityDetectorInputRow[]): ActivityDetectionArtifacts {

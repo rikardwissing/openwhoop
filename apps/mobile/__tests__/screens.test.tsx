@@ -149,6 +149,17 @@ class TrackingMockHealthRepository extends MockHealthRepository {
   }
 }
 
+class RescanTrackingMockHealthRepository extends MockHealthRepository {
+  rescanActivitiesCalls = 0;
+
+  async rescanActivities() {
+    this.rescanActivitiesCalls += 1;
+    return {
+      removedUnconfirmedActivities: 3,
+    };
+  }
+}
+
 function getChartInstance(screen: ReturnType<typeof renderWithProviders>, component: any, testID: string) {
   const chart = screen.UNSAFE_getAllByType(component).find((node) => node.props.testID === testID);
   expect(chart).toBeTruthy();
@@ -300,9 +311,12 @@ describe('screen rendering', () => {
       expect(repository.dashboardHeartTimelineCalls).toEqual(['7d', '7d']);
     });
 
-    await waitFor(() => {
-      expect(screen.queryByTestId('today-heart-chart-refresh-indicator')).toBeNull();
-    });
+    await waitFor(
+      () => {
+        expect(screen.queryByTestId('today-heart-chart-refresh-indicator')).toBeNull();
+      },
+      { timeout: 2000 },
+    );
   }, 10000);
 
   it('opens settings from the shared header and shows the wearable battery badge', async () => {
@@ -553,6 +567,71 @@ describe('screen rendering', () => {
     expect(await screen.findByText('Recent Activity')).toBeTruthy();
   });
 
+  it('reviews activity suggestions from the wellness screen', async () => {
+    const screen = renderWithProviders(<WellnessScreen />);
+
+    expect(await screen.findByText('Tempo Run')).toBeTruthy();
+    expect(screen.getByTestId('wellness-activity-status-label-activity-tempo-run').props.children).toBe('Needs review');
+
+    fireEvent.press(screen.getByTestId('wellness-activity-confirm-activity-tempo-run'));
+
+    await waitFor(
+      () => {
+        expect(screen.queryByTestId('wellness-activity-confirm-activity-tempo-run')).toBeNull();
+        expect(screen.getByTestId('wellness-activity-status-label-activity-tempo-run').props.children).toBe('Confirmed');
+      },
+      { timeout: 3000 },
+    );
+
+    fireEvent.press(screen.getByTestId('wellness-activity-relabel-activity-mobility-reset'));
+
+    expect(await screen.findByTestId('wellness-relabel-modal')).toBeTruthy();
+
+    fireEvent.press(screen.getByTestId('wellness-relabel-option-walk'));
+
+    await waitFor(
+      () => {
+        expect(screen.queryByText('Mobility Reset')).toBeNull();
+        expect(screen.getByText('Walk')).toBeTruthy();
+        expect(screen.getByTestId('wellness-activity-status-label-activity-mobility-reset').props.children).toBe('Relabelled');
+      },
+      { timeout: 3000 },
+    );
+
+    fireEvent.press(screen.getByTestId('wellness-activity-dismiss-activity-evening-walk'));
+
+    await waitFor(
+      () => {
+        expect(screen.queryByText('Evening Walk')).toBeNull();
+      },
+      { timeout: 3000 },
+    );
+  });
+
+  it('adds manual activities from the wellness screen', async () => {
+    const screen = renderWithProviders(<WellnessScreen />);
+
+    expect(await screen.findByText('Recent Activity')).toBeTruthy();
+
+    fireEvent.press(screen.getByTestId('wellness-add-manual-button'));
+
+    expect(await screen.findByTestId('wellness-manual-modal')).toBeTruthy();
+
+    fireEvent.press(screen.getByTestId('wellness-manual-type-nap'));
+    fireEvent.changeText(screen.getByTestId('wellness-manual-start-input'), '2026-04-23 14:00');
+    fireEvent.changeText(screen.getByTestId('wellness-manual-end-input'), '2026-04-23 14:35');
+    fireEvent.press(screen.getByTestId('wellness-manual-save-button'));
+
+    await waitFor(
+      () => {
+        expect(screen.queryByTestId('wellness-manual-modal')).toBeNull();
+        expect(screen.getByText('Nap')).toBeTruthy();
+        expect(screen.getByTestId('wellness-activity-status-label-manual-1').props.children).toBe('Manual');
+      },
+      { timeout: 3000 },
+    );
+  });
+
   it('renders the settings screen device controls', () => {
     const screen = renderWithProviders(<SettingsScreen />);
 
@@ -566,6 +645,7 @@ describe('screen rendering', () => {
     expect(screen.getByText('Export for Analysis')).toBeTruthy();
     expect(screen.getByText('Export Snapshot')).toBeTruthy();
     expect(screen.getByText('Database Maintenance')).toBeTruthy();
+    expect(screen.getByText('Rescan Activities')).toBeTruthy();
     expect(screen.getByText('Run Database Maintenance')).toBeTruthy();
     expect(screen.getByText('Local Data')).toBeTruthy();
     expect(screen.getByText('Remove all data')).toBeTruthy();
@@ -658,6 +738,22 @@ describe('screen rendering', () => {
       expect(mockInspectDatabaseMaintenance).toHaveBeenCalledWith(db);
       expect(mockRunDatabaseMaintenance).toHaveBeenCalledWith(db);
       expect(screen.getByText(/removed the legacy IMU schema and reclaimed 200.0 KB/)).toBeTruthy();
+    });
+  });
+
+  it('rescans activities from settings when explicitly requested', async () => {
+    const repository = new RescanTrackingMockHealthRepository({ delayMs: 0 });
+    const screen = renderWithRepository(repository, <SettingsScreen />);
+
+    await act(async () => {
+      fireEvent.press(screen.getByText('Rescan Activities'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(repository.rescanActivitiesCalls).toBe(1);
+      expect(screen.getByText(/Removed 3 unconfirmed detected activities and rescanned local activity history/)).toBeTruthy();
     });
   });
 

@@ -99,7 +99,10 @@ export async function initializeDatabase(db: SQLiteDatabase) {
       start TEXT NOT NULL UNIQUE,
       end TEXT NOT NULL,
       activity TEXT NOT NULL,
-      synced INTEGER NOT NULL DEFAULT 0
+      synced INTEGER NOT NULL DEFAULT 0,
+      confidence REAL,
+      source TEXT NOT NULL DEFAULT 'detected',
+      review_state TEXT NOT NULL DEFAULT 'none'
     );
 
     CREATE INDEX IF NOT EXISTS idx_activities_start ON activities(start);
@@ -290,6 +293,29 @@ export async function initializeDatabase(db: SQLiteDatabase) {
     await db.execAsync('ALTER TABLE sleep_cycles ADD COLUMN avg_skin_temp REAL;');
   }
 
+  const activityColumns = await db.getAllAsync<{ name: string }>('PRAGMA table_info(activities)');
+  const activityColumnNames = new Set(activityColumns.map((column) => column.name));
+
+  if (!activityColumnNames.has('source')) {
+    await db.execAsync("ALTER TABLE activities ADD COLUMN source TEXT NOT NULL DEFAULT 'detected';");
+    activityColumnNames.add('source');
+  }
+
+  if (!activityColumnNames.has('review_state')) {
+    await db.execAsync("ALTER TABLE activities ADD COLUMN review_state TEXT NOT NULL DEFAULT 'none';");
+    activityColumnNames.add('review_state');
+  }
+
+  if (!activityColumnNames.has('confidence')) {
+    await db.execAsync('ALTER TABLE activities ADD COLUMN confidence REAL;');
+    activityColumnNames.add('confidence');
+  }
+
+  await db.execAsync(`
+    CREATE INDEX IF NOT EXISTS idx_activities_source ON activities(source);
+    CREATE INDEX IF NOT EXISTS idx_activities_review_state ON activities(review_state);
+  `);
+
   const derivedDataStateColumns = await db.getAllAsync<{ name: string }>('PRAGMA table_info(derived_data_state)');
   const derivedDataStateColumnNames = new Set(derivedDataStateColumns.map((column) => column.name));
 
@@ -376,6 +402,10 @@ export async function initializeDatabase(db: SQLiteDatabase) {
 
   const activityForeignKeys = await db.getAllAsync<{ table: string }>('PRAGMA foreign_key_list(activities)');
   if (activityForeignKeys.length > 0) {
+    const activitySourceSelect = activityColumnNames.has('source') ? 'source' : "'detected'";
+    const activityReviewStateSelect = activityColumnNames.has('review_state') ? 'review_state' : "'none'";
+    const activityConfidenceSelect = activityColumnNames.has('confidence') ? 'confidence' : 'NULL';
+
     await db.execAsync(`
       PRAGMA foreign_keys = OFF;
 
@@ -385,11 +415,23 @@ export async function initializeDatabase(db: SQLiteDatabase) {
         start TEXT NOT NULL UNIQUE,
         end TEXT NOT NULL,
         activity TEXT NOT NULL,
-        synced INTEGER NOT NULL DEFAULT 0
+        synced INTEGER NOT NULL DEFAULT 0,
+        confidence REAL,
+        source TEXT NOT NULL DEFAULT 'detected',
+        review_state TEXT NOT NULL DEFAULT 'none'
       );
 
-      INSERT INTO activities_next (id, period_id, start, end, activity, synced)
-      SELECT id, period_id, start, end, activity, synced
+      INSERT INTO activities_next (id, period_id, start, end, activity, synced, confidence, source, review_state)
+      SELECT
+        id,
+        period_id,
+        start,
+        end,
+        activity,
+        synced,
+        ${activityConfidenceSelect},
+        COALESCE(${activitySourceSelect}, 'detected'),
+        COALESCE(${activityReviewStateSelect}, 'none')
       FROM activities;
 
       DROP TABLE activities;
@@ -397,6 +439,8 @@ export async function initializeDatabase(db: SQLiteDatabase) {
 
       CREATE INDEX idx_activities_start ON activities(start);
       CREATE INDEX idx_activities_end ON activities(end);
+      CREATE INDEX idx_activities_source ON activities(source);
+      CREATE INDEX idx_activities_review_state ON activities(review_state);
 
       PRAGMA foreign_keys = ON;
     `);
