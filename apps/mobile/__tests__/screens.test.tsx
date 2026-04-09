@@ -440,7 +440,9 @@ describe('screen rendering', () => {
 
     await waitFor(() => {
       expect(screen.getByTestId('history-heart-chart-activity-detail-panel')).toBeTruthy();
-      expect(screen.getByText('Suggested')).toBeTruthy();
+      expect(screen.queryByText('Suggested')).toBeNull();
+      expect(screen.queryByText('Status')).toBeNull();
+      expect(screen.queryByText('Confidence')).toBeNull();
       expect(screen.getByTestId('history-heart-chart-activity-confirm')).toBeTruthy();
       expect(screen.getByTestId('history-heart-chart-activity-relabel')).toBeTruthy();
       expect(screen.getByTestId('history-heart-chart-activity-dismiss')).toBeTruthy();
@@ -450,11 +452,124 @@ describe('screen rendering', () => {
 
     await waitFor(
       () => {
-        expect(screen.getByText('Confirmed')).toBeTruthy();
         expect(screen.queryByTestId('history-heart-chart-activity-confirm')).toBeNull();
+        expect(screen.queryByText('Confirmed')).toBeNull();
+        expect(screen.getByTestId('history-heart-chart-activity-detail-panel')).toBeTruthy();
+        expect(screen.getByTestId('history-heart-chart-return-button')).toBeTruthy();
+        expect(screen.queryByTestId('history-heart-chart-add-activity-button')).toBeNull();
       },
       { timeout: 3000 },
     );
+  });
+
+  it('adds a manual activity from the history heart graph', async () => {
+    const repository = new MockHealthRepository({ delayMs: 0 });
+    const createManualActivitySpy = jest.spyOn(repository, 'createManualActivity');
+    const screen = renderWithRepository(repository, <HistoryScreen />);
+
+    await screen.findByTestId('history-heart-chart');
+    await waitFor(() => {
+      expect(screen.getByTestId('history-heart-chart-add-activity-button')).toBeTruthy();
+      expect(screen.getByText('Add New Activity')).toBeTruthy();
+    });
+
+    fireEvent.press(screen.getByTestId('history-heart-chart-add-activity-button'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('history-heart-chart-draft-type-activity')).toBeTruthy();
+      expect(screen.getByTestId('history-heart-chart-draft-type-workout')).toBeTruthy();
+      expect(screen.getByTestId('history-heart-chart-draft-save')).toBeTruthy();
+      expect(screen.getByTestId('history-heart-chart-draft-cancel')).toBeTruthy();
+    });
+
+    expect(screen.queryByTestId('history-heart-chart-create-activity-modal')).toBeNull();
+
+    fireEvent.press(screen.getByTestId('history-heart-chart-draft-type-workout'));
+
+    fireEvent.press(screen.getByTestId('history-heart-chart-draft-save'));
+
+    await waitFor(() => {
+      expect(createManualActivitySpy).toHaveBeenCalledTimes(1);
+    });
+
+    await act(async () => {
+      await createManualActivitySpy.mock.results[0]?.value;
+    });
+
+    const [activity, start, end] = createManualActivitySpy.mock.calls[0] ?? [];
+
+    expect(activity).toBe('Workout');
+    expect(start).toBeInstanceOf(Date);
+    expect(end).toBeInstanceOf(Date);
+    expect((start as Date).getTime()).toBeLessThan((end as Date).getTime());
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('history-heart-chart-draft-save')).toBeNull();
+      expect(screen.queryByTestId('history-heart-chart-add-activity-button')).toBeNull();
+      expect(screen.getByTestId('history-heart-chart-return-button')).toBeTruthy();
+      expect(screen.getByTestId('history-heart-chart-title').props.children).toBe('Workout');
+      expect(screen.getByTestId('history-heart-chart-activity-edit')).toBeTruthy();
+      expect(screen.getByTestId('history-heart-chart-activity-remove')).toBeTruthy();
+    });
+
+    fireEvent.press(screen.getByTestId('history-heart-chart-activity-edit'));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('history-heart-chart-return-button')).toBeNull();
+      expect(screen.queryByTestId('history-heart-chart-marker-manual-1')).toBeNull();
+      expect(screen.getByTestId('history-heart-chart-draft-type-activity')).toBeTruthy();
+      expect(screen.getByTestId('history-heart-chart-draft-type-workout')).toBeTruthy();
+      expect(screen.getByTestId('history-heart-chart-draft-save')).toBeTruthy();
+      expect(screen.getByTestId('history-heart-chart-draft-cancel')).toBeTruthy();
+      expect(screen.queryByTestId('history-heart-chart-activity-edit')).toBeNull();
+    });
+  });
+
+  it('restores the idle add activity action when changing days after focusing a saved history activity', async () => {
+    const repository = new MockHealthRepository({ delayMs: 0 });
+    const createManualActivitySpy = jest.spyOn(repository, 'createManualActivity');
+    const screen = renderWithRepository(repository, <HistoryScreen />);
+
+    await screen.findByTestId('history-heart-chart');
+    await waitFor(() => {
+      expect(screen.getByTestId('history-heart-chart-add-activity-button')).toBeTruthy();
+    });
+
+    fireEvent.press(screen.getByTestId('history-heart-chart-add-activity-button'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('history-heart-chart-draft-type-workout')).toBeTruthy();
+      expect(screen.getByTestId('history-heart-chart-draft-save')).toBeTruthy();
+    });
+
+    fireEvent.press(screen.getByTestId('history-heart-chart-draft-type-workout'));
+    fireEvent.press(screen.getByTestId('history-heart-chart-draft-save'));
+
+    await waitFor(() => {
+      expect(createManualActivitySpy).toHaveBeenCalledTimes(1);
+    });
+
+    await act(async () => {
+      await createManualActivitySpy.mock.results[0]?.value;
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('history-heart-chart-return-button')).toBeTruthy();
+      expect(screen.queryByTestId('history-heart-chart-add-activity-button')).toBeNull();
+    });
+
+    const initialDayLabel = String(screen.getByTestId('history-selected-day-label').props.children);
+    const newerButton = screen.getByTestId('history-day-forward-button');
+    const olderButton = screen.getByTestId('history-day-backward-button');
+    const dayNavigationButton = newerButton.props.disabled ? olderButton : newerButton;
+
+    fireEvent.press(dayNavigationButton);
+
+    await waitFor(() => {
+      expect(String(screen.getByTestId('history-selected-day-label').props.children)).not.toBe(initialDayLabel);
+      expect(screen.getByTestId('history-heart-chart-add-activity-button')).toBeTruthy();
+      expect(screen.queryByTestId('history-heart-chart-return-button')).toBeNull();
+    });
   });
 
   it('runs sync from pull-to-refresh on dashboard screens when a wearable is selected', async () => {

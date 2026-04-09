@@ -662,6 +662,25 @@ export class MockHealthRepository implements HealthRepository {
     return manualActivity.id;
   }
 
+  async updateActivity(activityId: string, activity: ManualActivityKind, start: Date, end: Date): Promise<void> {
+    await this.wait();
+
+    if (!MANUAL_ACTIVITY_KINDS.has(activity)) {
+      throw new Error(`Unsupported manual activity kind: ${activity}`);
+    }
+
+    if (end.getTime() <= start.getTime()) {
+      throw new Error('Manual activity end must be after start.');
+    }
+
+    const entry = this.getActivityById(activityId);
+    entry.title = activity;
+    entry.startMinutes = start.getHours() * 60 + start.getMinutes();
+    entry.durationMinutes = Math.max(1, Math.round((end.getTime() - start.getTime()) / 60000));
+    entry.source = 'manual';
+    entry.reviewState = 'confirmed';
+  }
+
   async confirmActivity(activityId: string): Promise<void> {
     await this.wait();
     this.getActivityById(activityId).reviewState = 'confirmed';

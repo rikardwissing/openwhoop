@@ -2,6 +2,7 @@ import { startTransition, useCallback, useEffect, useMemo, useRef, useState } fr
 import { Ionicons } from '@expo/vector-icons';
 import {
   ActivityIndicator,
+  type LayoutChangeEvent,
   Modal,
   Pressable,
   StyleSheet,
@@ -35,12 +36,11 @@ import type {
   SleepCardSnapshot,
   StrainCardSnapshot,
 } from '@/types/health';
+import { addMinutes, formatClock } from '@/utils/dateTime';
 import { formatCompactDuration, formatMetricValue, formatShortDuration } from '@/utils/formatters';
 import {
   canManageHeartIntradayMarker,
   getHeartIntradayMarkerPresentation,
-  getHeartIntradayMarkerReviewLabel,
-  getHeartIntradayMarkerTrustState,
 } from '@/utils/heartChartMarkers';
 
 interface HeartMetricColumn {
@@ -75,15 +75,37 @@ const SLEEP_STAGE_PANEL_ANIMATION_DURATION_MS = 220;
 const SLEEP_STAGE_PANEL_MAX_HEIGHT = 120;
 const SLEEP_STAGE_PANEL_STAGE_DELAY_MS = HEART_CARD_CHROME_STAGE_DELAY_MS * 3;
 const SLEEP_STAGE_CHIP_STAGE_DELAY_MS = SLEEP_STAGE_PANEL_STAGE_DELAY_MS + 20;
-const ACTIVITY_DETAIL_PANEL_MAX_HEIGHT = 220;
+const ACTIVITY_DETAIL_IDLE_PANEL_MAX_HEIGHT = 52;
+const ACTIVITY_DETAIL_MANAGE_PANEL_MAX_HEIGHT = 72;
+const ACTIVITY_DETAIL_DRAFT_PANEL_MAX_HEIGHT = 120;
+const ACTIVITY_DETAIL_DRAFT_ERROR_PANEL_MAX_HEIGHT = 148;
+const ACTIVITY_DETAIL_MANAGE_ERROR_PANEL_MAX_HEIGHT = 100;
 const ACTIVITY_DETAIL_PANEL_STAGE_DELAY_MS = HEART_CARD_CHROME_STAGE_DELAY_MS * 3;
 const ACTIVITY_DETAIL_CHIP_STAGE_DELAY_MS = ACTIVITY_DETAIL_PANEL_STAGE_DELAY_MS + 20;
+const ACTIVITY_DRAFT_ACTION_STAGE_DELAY_MS = ACTIVITY_DETAIL_CHIP_STAGE_DELAY_MS + 50;
+const HEART_CARD_CHROME_SWAP_DELAY_MS = HEART_CARD_CHROME_OUT_DURATION_MS + HEART_CARD_CHROME_STAGE_DELAY_MS * 2;
+const HEART_CARD_CHROME_REVEAL_DELAY_AFTER_SWAP_MS = 40;
+const HEART_CHART_POINT_INTERVAL_MINUTES = 5;
+const DEFAULT_NEW_ACTIVITY_DURATION_MINUTES = 60;
 const REVIEW_ACTIVITY_OPTIONS: ManualActivityKind[] = ['Activity', 'Walk', 'Workout', 'Nap'];
 
 interface HeartActivityReviewActions {
+  createManualActivity: (activity: ManualActivityKind, start: Date, end: Date) => Promise<string>;
+  updateActivity: (activityId: string, activity: ManualActivityKind, start: Date, end: Date) => Promise<void>;
   confirmActivity: (activityId: string) => Promise<void>;
   dismissActivity: (activityId: string) => Promise<void>;
   relabelActivity: (activityId: string, activity: ManualActivityKind) => Promise<void>;
+}
+
+interface HeartActivityDraft {
+  activity: ManualActivityKind;
+  endMinuteOffset: number;
+  startMinuteOffset: number;
+}
+
+interface HeartChartViewportState {
+  windowPointCount: number;
+  windowStart: number;
 }
 
 function accentColorForInsight(accent: DashboardInsight['accent']) {
@@ -193,6 +215,41 @@ function summarizeMarkerHeartValues(snapshot: HeartCardSnapshot, marker: HeartIn
   };
 }
 
+function summarizeViewportHeartValues(snapshot: HeartCardSnapshot, viewportState: HeartChartViewportState) {
+  if (snapshot.series.length === 0) {
+    return {
+      averageHr: null,
+      minHr: null,
+      maxHr: null,
+    };
+  }
+
+  const safeWindowPointCount = Math.min(
+    Math.max(viewportState.windowPointCount, 2),
+    Math.max(snapshot.series.length, 1),
+  );
+  const maxWindowStart = Math.max(0, snapshot.series.length - safeWindowPointCount);
+  const safeWindowStart = clampIndex(viewportState.windowStart, 0, maxWindowStart);
+  const values = snapshot.series
+    .slice(safeWindowStart, safeWindowStart + safeWindowPointCount)
+    .map((point) => point.value)
+    .filter((value): value is number => value !== null);
+
+  if (values.length === 0) {
+    return {
+      averageHr: null,
+      minHr: null,
+      maxHr: null,
+    };
+  }
+
+  return {
+    averageHr: Math.round(values.reduce((sum, value) => sum + value, 0) / values.length),
+    minHr: Math.min(...values),
+    maxHr: Math.max(...values),
+  };
+}
+
 function buildSleepStageTotals(stages: NonNullable<HeartIntradayMarker['details']>['stages']) {
   const totals = new Map<SleepStage, number>();
 
@@ -216,42 +273,145 @@ function formatSleepStageName(stage: SleepStage) {
   return `${stage[0]?.toUpperCase() ?? ''}${stage.slice(1)}`;
 }
 
-function activityReviewAccentColor(marker: HeartIntradayMarker) {
-  if (marker.details?.source === 'manual') {
-    return colors.primaryBright;
+function parseHeartPointLabelMinutes(label: string) {
+  const trimmed = label.trim();
+  const match = /^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)$/i.exec(trimmed);
+
+  if (!match) {
+    return null;
   }
 
-  switch (marker.details?.reviewState) {
-    case 'confirmed':
-      return colors.success;
-    case 'relabelled':
-      return colors.aqua;
-    default:
-      return getHeartIntradayMarkerTrustState(marker) === 'suggested' ? colors.heart : colors.success;
+  const rawHours = Number(match[1]);
+  const minutes = Number(match[2] ?? '0');
+  const meridiem = match[3]?.toUpperCase();
+
+  if (!Number.isFinite(rawHours) || !Number.isFinite(minutes)) {
+    return null;
   }
+
+  return (rawHours % 12 + (meridiem === 'PM' ? 12 : 0)) * 60 + minutes;
 }
 
-function buildActivityMarkerChips(marker: HeartIntradayMarker): HeartMetricChip[] {
-  const chips: HeartMetricChip[] = [];
-  const reviewLabel = getHeartIntradayMarkerReviewLabel(marker);
-
-  if (reviewLabel) {
-    chips.push({
-      accentColor: activityReviewAccentColor(marker),
-      label: 'Status',
-      value: reviewLabel,
-    });
+function resolveHeartPointDate(points: readonly { label: string }[], anchorDayKey: string | undefined, minuteOffset: number) {
+  if (!anchorDayKey || points.length === 0) {
+    return null;
   }
 
-  if (marker.details?.source === 'detected' && typeof marker.details.confidence === 'number') {
-    chips.push({
-      accentColor: getHeartIntradayMarkerTrustState(marker) === 'suggested' ? colors.heart : colors.cyan,
-      label: 'Confidence',
-      value: `${Math.round(marker.details.confidence * 100)}%`,
-    });
+  const latestLabel = points.at(-1)?.label;
+  if (!latestLabel) {
+    return null;
   }
 
-  return chips;
+  const latestPointMinutes = parseHeartPointLabelMinutes(latestLabel);
+  if (latestPointMinutes === null) {
+    return null;
+  }
+
+  const anchorDate = new Date(`${anchorDayKey}T00:00:00`);
+  const latestPointDate = addMinutes(anchorDate, latestPointMinutes);
+  const totalSeriesMinutes = Math.max(points.length - 1, 0) * HEART_CHART_POINT_INTERVAL_MINUTES;
+
+  return addMinutes(latestPointDate, Math.round(minuteOffset) - totalSeriesMinutes);
+}
+
+function buildInitialHeartActivityDraft(
+  activity: ManualActivityKind,
+  viewportState: HeartChartViewportState,
+  pointCount: number,
+): HeartActivityDraft {
+  const safePointCount = Math.max(pointCount, 2);
+  const visibleWindowStartMinuteOffset = viewportState.windowStart * HEART_CHART_POINT_INTERVAL_MINUTES;
+  const visibleWindowEndMinuteOffset = Math.min(
+    Math.max(safePointCount - 1, 0) * HEART_CHART_POINT_INTERVAL_MINUTES,
+    (viewportState.windowStart + Math.max(viewportState.windowPointCount - 1, 1)) * HEART_CHART_POINT_INTERVAL_MINUTES,
+  );
+  const visibleWindowDurationMinutes = Math.max(
+    visibleWindowEndMinuteOffset - visibleWindowStartMinuteOffset,
+    HEART_CHART_POINT_INTERVAL_MINUTES,
+  );
+  const spanMinutes = Math.max(
+    1,
+    Math.min(DEFAULT_NEW_ACTIVITY_DURATION_MINUTES, visibleWindowDurationMinutes),
+  );
+  const centeredStartMinuteOffset = Math.round(
+    visibleWindowStartMinuteOffset + (visibleWindowDurationMinutes - spanMinutes) / 2,
+  );
+  const startMinuteOffset = Math.max(
+    visibleWindowStartMinuteOffset,
+    Math.min(centeredStartMinuteOffset, visibleWindowEndMinuteOffset - spanMinutes),
+  );
+
+  return {
+    activity,
+    endMinuteOffset: startMinuteOffset + spanMinutes,
+    startMinuteOffset,
+  };
+}
+
+function resolveManualActivityKind(marker: HeartIntradayMarker): ManualActivityKind {
+  const exactMatch = REVIEW_ACTIVITY_OPTIONS.find((option) => option.toLowerCase() === marker.label.toLowerCase());
+
+  if (exactMatch) {
+    return exactMatch;
+  }
+
+  return marker.kind === 'nap' ? 'Nap' : 'Activity';
+}
+
+function buildHeartActivityDraftFromMarker(marker: HeartIntradayMarker, pointCount: number): HeartActivityDraft | null {
+  if (marker.kind === 'sleep' || pointCount < 2) {
+    return null;
+  }
+
+  const totalSeriesMinutes = Math.max((pointCount - 1) * HEART_CHART_POINT_INTERVAL_MINUTES, 1);
+  const startMinuteOffset = clampIndex(
+    Math.round(Math.max(0, Math.min(1, marker.startFraction)) * totalSeriesMinutes),
+    0,
+    totalSeriesMinutes,
+  );
+  const endMinuteOffset = clampIndex(
+    Math.round(Math.max(0, Math.min(1, marker.endFraction)) * totalSeriesMinutes),
+    startMinuteOffset + 1,
+    totalSeriesMinutes,
+  );
+
+  return {
+    activity: resolveManualActivityKind(marker),
+    endMinuteOffset,
+    startMinuteOffset,
+  };
+}
+
+function buildHeartActivityDraftMarker(
+  draft: HeartActivityDraft | null,
+  points: HeartCardSnapshot['series'],
+  anchorDayKey: string | undefined,
+): HeartIntradayMarker | null {
+  if (!draft || points.length < 2) {
+    return null;
+  }
+
+  const start = resolveHeartPointDate(points, anchorDayKey, draft.startMinuteOffset);
+  const end = resolveHeartPointDate(points, anchorDayKey, draft.endMinuteOffset);
+  if (!start || !end || end.getTime() <= start.getTime()) {
+    return null;
+  }
+
+  const totalSeriesMinutes = Math.max((points.length - 1) * HEART_CHART_POINT_INTERVAL_MINUTES, 1);
+
+  return {
+    id: 'draft-activity',
+    kind: draft.activity === 'Nap' ? 'nap' : 'activity',
+    label: draft.activity,
+    timeLabel: `${formatClock(start)} - ${formatClock(end)}`,
+    startFraction: draft.startMinuteOffset / totalSeriesMinutes,
+    endFraction: draft.endMinuteOffset / totalSeriesMinutes,
+    details: {
+      durationMinutes: Math.max(1, Math.round((end.getTime() - start.getTime()) / 60000)),
+      reviewState: 'confirmed',
+      source: 'manual',
+    },
+  } satisfies HeartIntradayMarker;
 }
 
 function buildUpdatedActivityMarker(
@@ -286,6 +446,28 @@ function applyHeartMarkerOverrides(
 
     return [override ?? marker];
   });
+}
+
+function resolveActiveHeartMarker(
+  marker: HeartIntradayMarker | null,
+  markers: readonly HeartIntradayMarker[],
+  optimisticMarker: HeartIntradayMarker | null,
+) {
+  if (!marker) {
+    return null;
+  }
+
+  const resolvedMarker = markers.find((candidate) => candidate.id === marker.id);
+
+  if (resolvedMarker) {
+    return resolvedMarker;
+  }
+
+  if (optimisticMarker?.id === marker.id) {
+    return optimisticMarker;
+  }
+
+  return null;
 }
 
 function buildFocusedHeartCardContent(
@@ -370,7 +552,7 @@ function buildFocusedHeartCardContent(
             valueColor: colors.heart,
           },
     ],
-      chips: buildActivityMarkerChips(marker),
+    chips: [],
     stageChips: [],
   };
 }
@@ -407,34 +589,107 @@ export function HeartSnapshotCard({
   windowPointCount?: number;
 }) {
   const resolvedWindowPointCount = windowPointCount ?? snapshot.series.length;
+  const [chartViewportState, setChartViewportState] = useState<HeartChartViewportState>(() => ({
+    windowPointCount: resolvedWindowPointCount,
+    windowStart: Math.max(snapshot.series.length - resolvedWindowPointCount, 0),
+  }));
   const [isViewingLatestWindow, setIsViewingLatestWindow] = useState(true);
   const [latestJumpVersion, setLatestJumpVersion] = useState(0);
   const [activityMarkerOverrides, setActivityMarkerOverrides] = useState<Record<string, HeartIntradayMarker | null>>({});
+  const [activityDraft, setActivityDraft] = useState<HeartActivityDraft | null>(null);
+  const [presentedActivityDraft, setPresentedActivityDraft] = useState<HeartActivityDraft | null>(null);
+  const [pendingEditActivityDraft, setPendingEditActivityDraft] = useState<HeartActivityDraft | null>(null);
+  const [editingActivityMarker, setEditingActivityMarker] = useState<HeartIntradayMarker | null>(null);
+  const [requestedSavedFocusMarker, setRequestedSavedFocusMarker] = useState<HeartIntradayMarker | null>(null);
+  const [requestedFocusMarkerId, setRequestedFocusMarkerId] = useState<string | null>(null);
   const [pendingActivityActionKey, setPendingActivityActionKey] = useState<string | null>(null);
   const [activityActionError, setActivityActionError] = useState<string | null>(null);
   const [relabelModalVisible, setRelabelModalVisible] = useState(false);
-  const resolvedMarkers = useMemo(
-    () => applyHeartMarkerOverrides(snapshot.markers, activityMarkerOverrides),
-    [activityMarkerOverrides, snapshot.markers],
-  );
   const [focusedMarkerTarget, setFocusedMarkerTarget] = useState<HeartIntradayMarker | null>(null);
   const [focusedMarker, setFocusedMarker] = useState<HeartIntradayMarker | null>(null);
   const [selectedSleepStage, setSelectedSleepStage] = useState<SleepStage | null>(null);
   const [isSleepStagePanelMounted, setIsSleepStagePanelMounted] = useState(false);
   const [isActivityDetailPanelMounted, setIsActivityDetailPanelMounted] = useState(false);
+  const [activityDetailMeasuredHeight, setActivityDetailMeasuredHeight] = useState(0);
   const [renderedSleepStageChips, setRenderedSleepStageChips] = useState<HeartMetricChip[]>([]);
+  const previousActivityDetailPanelVisibleRef = useRef(false);
   const isFocusTransitioningRef = useRef(false);
   const pendingFocusedMarkerRef = useRef<HeartIntradayMarker | null>(null);
   const sleepStagePanelUnmountTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activityDetailPanelUnmountTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const showsLatestWindowButton = trailingLabel === 'Last 12h';
-  const focusedCardTargetContent = buildFocusedHeartCardContent(snapshot, focusedMarkerTarget);
-  const focusedCardContent = buildFocusedHeartCardContent(snapshot, focusedMarker);
+  const isDraftEditing = activityDraft !== null;
+  const [isDraftPresentationActive, setIsDraftPresentationActive] = useState(false);
+  const hiddenEditingMarkerId =
+    editingActivityMarker && (isDraftEditing || isDraftPresentationActive) ? editingActivityMarker.id : null;
+  const resolvedMarkers = useMemo(
+    () => {
+      const nextMarkers = applyHeartMarkerOverrides(snapshot.markers, activityMarkerOverrides);
+
+      if (!hiddenEditingMarkerId) {
+        return nextMarkers;
+      }
+
+      return nextMarkers.filter((marker) => marker.id !== hiddenEditingMarkerId);
+    },
+    [activityMarkerOverrides, hiddenEditingMarkerId, snapshot.markers],
+  );
+  const previousDraftEditingRef = useRef(isDraftEditing);
+  const draftChromeTransitionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const displayedActivityDraft = isDraftEditing ? activityDraft : presentedActivityDraft;
+  const displayedActivityDraftMarker = useMemo(
+    () => buildHeartActivityDraftMarker(displayedActivityDraft, snapshot.series, viewportKey),
+    [displayedActivityDraft, snapshot.series, viewportKey],
+  );
+  const isPresentedDraftEditing = isDraftPresentationActive && displayedActivityDraft !== null;
+  const resolvedFocusedMarkerTarget = useMemo(
+    () => resolveActiveHeartMarker(focusedMarkerTarget, resolvedMarkers, requestedSavedFocusMarker),
+    [focusedMarkerTarget, requestedSavedFocusMarker, resolvedMarkers],
+  );
+  const resolvedFocusedMarker = useMemo(
+    () => resolveActiveHeartMarker(focusedMarker, resolvedMarkers, requestedSavedFocusMarker),
+    [focusedMarker, requestedSavedFocusMarker, resolvedMarkers],
+  );
+  const presentedMarkerTarget = isPresentedDraftEditing
+    ? displayedActivityDraftMarker ?? resolvedFocusedMarkerTarget
+    : resolvedFocusedMarkerTarget;
+  const presentedMarker = isPresentedDraftEditing
+    ? displayedActivityDraftMarker ?? resolvedFocusedMarker
+    : resolvedFocusedMarker;
+  const focusedCardTargetContent = buildFocusedHeartCardContent(snapshot, presentedMarkerTarget);
+  const focusedChartTargetContent = buildFocusedHeartCardContent(snapshot, resolvedFocusedMarkerTarget);
+  const focusedCardContent = buildFocusedHeartCardContent(snapshot, presentedMarker);
   const cardAccentColor = focusedCardTargetContent?.accentColor ?? colors.success;
-  const chartAccentColor = focusedCardTargetContent?.chartAccentColor ?? colors.primary;
-  const isSleepFocused = focusedMarker?.kind === 'sleep';
-  const isActivityFocused = focusedMarker?.kind === 'activity' || focusedMarker?.kind === 'nap';
-  const canManageFocusedActivity = Boolean(activityReviewActions && focusedMarker && canManageHeartIntradayMarker(focusedMarker));
+  const chartAccentColor = focusedChartTargetContent?.chartAccentColor ?? colors.primary;
+  const isSleepFocused = presentedMarker?.kind === 'sleep';
+  const isActivityFocused = presentedMarker?.kind === 'activity' || presentedMarker?.kind === 'nap';
+  const canManageFocusedActivity = Boolean(
+    !isPresentedDraftEditing &&
+      activityReviewActions &&
+      resolvedFocusedMarker &&
+      canManageHeartIntradayMarker(resolvedFocusedMarker),
+  );
+  const canEditFocusedActivity = Boolean(
+    !isPresentedDraftEditing &&
+      activityReviewActions &&
+      resolvedFocusedMarker &&
+      resolvedFocusedMarker.kind !== 'sleep' &&
+      !canManageHeartIntradayMarker(resolvedFocusedMarker) &&
+      resolvedFocusedMarker.id !== 'draft-activity' &&
+      pendingActivityActionKey !== 'draft:save' &&
+      pendingEditActivityDraft === null,
+  );
+  const canCreateGraphActivity = Boolean(activityReviewActions?.createManualActivity) && !isPresentedDraftEditing;
+  const isAwaitingSavedActivityFocus = requestedFocusMarkerId !== null;
+  const viewportSeriesSummary = useMemo(
+    () => summarizeViewportHeartValues(snapshot, chartViewportState),
+    [chartViewportState, snapshot],
+  );
+  const showIdleCreateGraphActivity =
+    canCreateGraphActivity &&
+    presentedMarker === null &&
+    pendingEditActivityDraft === null &&
+    !isAwaitingSavedActivityFocus;
   const activityDetailChips = isActivityFocused ? focusedCardContent?.chips ?? [] : [];
   const sleepStageChips = focusedCardContent?.stageChips ?? [];
   const sleepStageChipSignature = sleepStageChips
@@ -442,8 +697,23 @@ export function HeartSnapshotCard({
     .join('|');
   const sleepStagePanelVisible = isSleepFocused && sleepStageChips.length > 0;
   const activityDetailPanelVisible =
-    isActivityFocused &&
-    (activityDetailChips.length > 0 || canManageFocusedActivity || activityActionError !== null);
+    showIdleCreateGraphActivity ||
+    isDraftEditing ||
+    (isActivityFocused && (activityDetailChips.length > 0 || canManageFocusedActivity || canEditFocusedActivity || activityActionError !== null));
+  const activityDetailPanelFallbackMaxHeight = !activityDetailPanelVisible
+    ? 0
+    : isPresentedDraftEditing
+      ? activityActionError
+        ? ACTIVITY_DETAIL_DRAFT_ERROR_PANEL_MAX_HEIGHT
+        : ACTIVITY_DETAIL_DRAFT_PANEL_MAX_HEIGHT
+      : showIdleCreateGraphActivity
+        ? ACTIVITY_DETAIL_IDLE_PANEL_MAX_HEIGHT
+        : activityActionError
+          ? ACTIVITY_DETAIL_MANAGE_ERROR_PANEL_MAX_HEIGHT
+          : ACTIVITY_DETAIL_MANAGE_PANEL_MAX_HEIGHT;
+  const activityDetailPanelTargetMaxHeight = activityDetailPanelVisible
+    ? Math.max(activityDetailMeasuredHeight, activityDetailPanelFallbackMaxHeight)
+    : 0;
   const cardHeaderTransitionProgress = useSharedValue(1);
   const cardMetricsTransitionProgress = useSharedValue(1);
   const cardChipsTransitionProgress = useSharedValue(1);
@@ -462,18 +732,19 @@ export function HeartSnapshotCard({
   const cardSubtitle = focusedCardContent?.subtitle ?? defaultCardSubtitle;
   const metricColumns: HeartMetricColumn[] = focusedCardContent?.metrics ?? [
     {
-      label: 'Resting HR',
-      value: formatMetricValue(snapshot.restingHr, 0),
+      label: 'Low',
+      value: formatMetricValue(viewportSeriesSummary.minHr, 0),
       unit: 'BPM',
+      valueColor: colors.aqua,
     },
     {
       label: 'Average',
-      value: formatMetricValue(snapshot.averageHr, 0),
+      value: formatMetricValue(viewportSeriesSummary.averageHr, 0),
       unit: 'BPM',
     },
     {
       label: 'Max',
-      value: formatMetricValue(snapshot.maxHr, 0),
+      value: formatMetricValue(viewportSeriesSummary.maxHr, 0),
       unit: 'BPM',
       valueColor: colors.heart,
     },
@@ -513,9 +784,33 @@ export function HeartSnapshotCard({
     [cardChipsTransitionProgress, cardHeaderTransitionProgress, cardMetricsTransitionProgress],
   );
 
+  const animateActivityDetailStage = useCallback(
+    (target: 0 | 1) => {
+      const duration =
+        target === 0 ? HEART_CARD_CHROME_OUT_DURATION_MS : HEART_CARD_CHROME_IN_DURATION_MS;
+
+      cancelAnimation(activityDetailTransitionProgress);
+      activityDetailTransitionProgress.value = withDelay(
+        HEART_CARD_CHROME_STAGE_DELAY_MS * 2,
+        withTiming(target, {
+          duration,
+          easing: Easing.out(Easing.cubic),
+        }),
+      );
+    },
+    [activityDetailTransitionProgress],
+  );
+
+  const isSavedActivityFocusPending = requestedSavedFocusMarker !== null || requestedFocusMarkerId !== null;
+
   const handleFocusedMarkerChange = useCallback((nextMarker: HeartIntradayMarker | null) => {
     pendingFocusedMarkerRef.current = nextMarker;
     setFocusedMarkerTarget((current) => (current === nextMarker ? current : nextMarker));
+
+    if (nextMarker === null) {
+      setRequestedSavedFocusMarker(null);
+      setRequestedFocusMarkerId(null);
+    }
 
     if (isFocusTransitioningRef.current) {
       return;
@@ -528,16 +823,35 @@ export function HeartSnapshotCard({
 
   const handleFocusTransitionStateChange = useCallback((isTransitioning: boolean) => {
     isFocusTransitioningRef.current = isTransitioning;
+    const nextFocusedMarker = pendingFocusedMarkerRef.current;
 
     if (isTransitioning) {
+      if (isSavedActivityFocusPending) {
+        animateCardChromeStages(1);
+        animateActivityDetailStage(1);
+        return;
+      }
+
       animateCardChromeStages(0);
+      animateActivityDetailStage(0);
       return;
     }
 
     startTransition(() => {
-      setFocusedMarker(pendingFocusedMarkerRef.current);
+      setFocusedMarker(nextFocusedMarker);
     });
-  }, [animateCardChromeStages]);
+
+    if (nextFocusedMarker === null) {
+      if (canCreateGraphActivity) {
+        animateActivityDetailStage(1);
+      }
+      return;
+    }
+
+    if (nextFocusedMarker.kind === 'activity' || nextFocusedMarker.kind === 'nap') {
+      animateActivityDetailStage(1);
+    }
+  }, [animateActivityDetailStage, animateCardChromeStages, canCreateGraphActivity, isSavedActivityFocusPending]);
 
   const clearActivityMarkerOverride = useCallback((activityId: string) => {
     setActivityMarkerOverrides((current) => {
@@ -570,7 +884,7 @@ export function HeartSnapshotCard({
   }, [activityReviewActions, clearActivityMarkerOverride, focusedMarker]);
 
   const handleDismissFocusedActivity = useCallback(async () => {
-    if (!activityReviewActions || !focusedMarker || !canManageHeartIntradayMarker(focusedMarker)) {
+    if (!activityReviewActions || !focusedMarker || focusedMarker.kind === 'sleep') {
       return;
     }
 
@@ -618,20 +932,162 @@ export function HeartSnapshotCard({
     }
   }, [activityReviewActions, clearActivityMarkerOverride, focusedMarker]);
 
+  const handleStartDraftActivity = useCallback(() => {
+    setActivityActionError(null);
+    setPendingActivityActionKey(null);
+    setEditingActivityMarker(null);
+    setPendingEditActivityDraft(null);
+    setRequestedSavedFocusMarker(null);
+    setRequestedFocusMarkerId(null);
+
+    const nextViewportState = chartViewportState ?? {
+      windowPointCount: resolvedWindowPointCount,
+      windowStart: Math.max(snapshot.series.length - resolvedWindowPointCount, 0),
+    };
+
+    setActivityDraft(buildInitialHeartActivityDraft('Activity', nextViewportState, snapshot.series.length));
+  }, [chartViewportState, resolvedWindowPointCount, snapshot.series.length]);
+
+  const handleEditFocusedActivity = useCallback(() => {
+    if (!focusedMarker) {
+      return;
+    }
+
+    const nextDraft = buildHeartActivityDraftFromMarker(focusedMarker, snapshot.series.length);
+    if (!nextDraft) {
+      setActivityActionError('Unable to edit this activity from the chart right now.');
+      return;
+    }
+
+    setActivityActionError(null);
+    setPendingActivityActionKey(null);
+    setRequestedSavedFocusMarker(null);
+    setRequestedFocusMarkerId(null);
+    setEditingActivityMarker(focusedMarker);
+    setPendingEditActivityDraft(nextDraft);
+    setLatestJumpVersion((current) => current + 1);
+  }, [focusedMarker, snapshot.series.length]);
+
+  const handleSelectDraftActivityType = useCallback((activity: ManualActivityKind) => {
+    setActivityActionError(null);
+    setActivityDraft((current) => (current ? { ...current, activity } : current));
+  }, []);
+
+  const handleCancelDraftActivity = useCallback(() => {
+    setActivityActionError(null);
+    setPendingActivityActionKey(null);
+    setEditingActivityMarker(null);
+    setPendingEditActivityDraft(null);
+    setRequestedSavedFocusMarker(null);
+    setRequestedFocusMarkerId(null);
+    setActivityDraft(null);
+  }, []);
+
+  const handleSaveDraftActivity = useCallback(async () => {
+    const draftToSave = activityDraft;
+    const activityToEdit = editingActivityMarker;
+    const reviewActions = activityReviewActions;
+
+    if (!draftToSave || !reviewActions) {
+      return;
+    }
+
+    const start = resolveHeartPointDate(snapshot.series, viewportKey, draftToSave.startMinuteOffset);
+    const end = resolveHeartPointDate(snapshot.series, viewportKey, draftToSave.endMinuteOffset);
+
+    if (!start || !end || end.getTime() <= start.getTime()) {
+      setActivityActionError('Unable to resolve the draft activity time range from the chart.');
+      return;
+    }
+
+    setActivityActionError(null);
+    setPendingActivityActionKey('draft:save');
+
+    const optimisticFocusMarker = buildHeartActivityDraftMarker(draftToSave, snapshot.series, viewportKey);
+    if (!optimisticFocusMarker) {
+      setActivityActionError('Unable to resolve the draft activity time range from the chart.');
+      setPendingActivityActionKey(null);
+      return;
+    }
+
+    const nextOptimisticFocusMarker = activityToEdit
+      ? {
+          ...optimisticFocusMarker,
+          id: activityToEdit.id,
+        }
+      : optimisticFocusMarker;
+
+    if (draftChromeTransitionTimeoutRef.current !== null) {
+      clearTimeout(draftChromeTransitionTimeoutRef.current);
+      draftChromeTransitionTimeoutRef.current = null;
+    }
+
+    previousDraftEditingRef.current = false;
+    setIsDraftPresentationActive(false);
+    setPresentedActivityDraft(null);
+    setPendingEditActivityDraft(null);
+    setRequestedSavedFocusMarker(nextOptimisticFocusMarker);
+    setFocusedMarkerTarget(nextOptimisticFocusMarker);
+    setFocusedMarker(nextOptimisticFocusMarker);
+    setActivityDraft(null);
+
+    try {
+      if (activityToEdit) {
+        await reviewActions.updateActivity(activityToEdit.id, draftToSave.activity, start, end);
+        setEditingActivityMarker(null);
+      } else {
+        const activityId = await reviewActions.createManualActivity(draftToSave.activity, start, end);
+        setRequestedFocusMarkerId(activityId);
+      }
+    } catch (error) {
+      previousDraftEditingRef.current = true;
+      setIsDraftPresentationActive(true);
+      setPresentedActivityDraft(draftToSave);
+      setActivityDraft(draftToSave);
+      setEditingActivityMarker(activityToEdit);
+      setPendingEditActivityDraft(null);
+      setRequestedSavedFocusMarker(null);
+      setRequestedFocusMarkerId(null);
+      if (activityToEdit) {
+        setFocusedMarkerTarget(activityToEdit);
+        setFocusedMarker(activityToEdit);
+      }
+      setActivityActionError(error instanceof Error ? error.message : 'Unable to save this activity right now.');
+    } finally {
+      setPendingActivityActionKey(null);
+    }
+  }, [activityDraft, activityReviewActions, editingActivityMarker, snapshot.series, viewportKey]);
+
   useEffect(() => {
+    const shouldShowIdleActivityPanelAfterReset = Boolean(activityReviewActions?.createManualActivity);
+
+    setChartViewportState({
+      windowPointCount: resolvedWindowPointCount,
+      windowStart: Math.max(snapshot.series.length - resolvedWindowPointCount, 0),
+    });
     setIsViewingLatestWindow(true);
     setLatestJumpVersion(0);
     setActivityMarkerOverrides({});
+    setActivityDraft(null);
+    setPresentedActivityDraft(null);
+    setPendingEditActivityDraft(null);
+    setEditingActivityMarker(null);
+    setRequestedSavedFocusMarker(null);
+    setRequestedFocusMarkerId(null);
     setPendingActivityActionKey(null);
     setActivityActionError(null);
     setRelabelModalVisible(false);
     isFocusTransitioningRef.current = false;
     pendingFocusedMarkerRef.current = null;
+    previousDraftEditingRef.current = false;
     cardHeaderTransitionProgress.value = 1;
     cardMetricsTransitionProgress.value = 1;
     cardChipsTransitionProgress.value = 1;
     sleepStageChipTransitionProgress.value = 0;
-    activityDetailTransitionProgress.value = 0;
+    activityDetailPanelMaxHeight.value = shouldShowIdleActivityPanelAfterReset ? ACTIVITY_DETAIL_IDLE_PANEL_MAX_HEIGHT : 0;
+    activityDetailPanelOpacity.value = shouldShowIdleActivityPanelAfterReset ? 1 : 0;
+    activityDetailPanelMarginTop.value = shouldShowIdleActivityPanelAfterReset ? 12 : 0;
+    activityDetailTransitionProgress.value = shouldShowIdleActivityPanelAfterReset ? 1 : 0;
     if (sleepStagePanelUnmountTimeoutRef.current !== null) {
       clearTimeout(sleepStagePanelUnmountTimeoutRef.current);
       sleepStagePanelUnmountTimeoutRef.current = null;
@@ -640,13 +1096,24 @@ export function HeartSnapshotCard({
       clearTimeout(activityDetailPanelUnmountTimeoutRef.current);
       activityDetailPanelUnmountTimeoutRef.current = null;
     }
+    if (draftChromeTransitionTimeoutRef.current !== null) {
+      clearTimeout(draftChromeTransitionTimeoutRef.current);
+      draftChromeTransitionTimeoutRef.current = null;
+    }
     setIsSleepStagePanelMounted(false);
-    setIsActivityDetailPanelMounted(false);
+    setIsActivityDetailPanelMounted(shouldShowIdleActivityPanelAfterReset);
+    setActivityDetailMeasuredHeight(0);
+    previousActivityDetailPanelVisibleRef.current = shouldShowIdleActivityPanelAfterReset;
+    setIsDraftPresentationActive(false);
     setRenderedSleepStageChips([]);
     setFocusedMarkerTarget(null);
     setFocusedMarker(null);
     setSelectedSleepStage(null);
   }, [
+    activityReviewActions?.createManualActivity,
+    activityDetailPanelMarginTop,
+    activityDetailPanelMaxHeight,
+    activityDetailPanelOpacity,
     cardChipsTransitionProgress,
     cardHeaderTransitionProgress,
     cardMetricsTransitionProgress,
@@ -654,6 +1121,82 @@ export function HeartSnapshotCard({
     sleepStageChipTransitionProgress,
     viewportKey,
   ]);
+
+  useEffect(() => {
+    if (activityDraft && isDraftPresentationActive) {
+      setPresentedActivityDraft(activityDraft);
+      return;
+    }
+
+    if (!isDraftPresentationActive) {
+      setPresentedActivityDraft(null);
+    }
+  }, [activityDraft, isDraftPresentationActive]);
+
+  useEffect(() => {
+    if (!pendingEditActivityDraft) {
+      return;
+    }
+
+    if (isFocusTransitioningRef.current) {
+      return;
+    }
+
+    if (focusedMarkerTarget !== null || focusedMarker !== null) {
+      return;
+    }
+
+    setActivityDraft(pendingEditActivityDraft);
+    setPendingEditActivityDraft(null);
+  }, [focusedMarker, focusedMarkerTarget, pendingEditActivityDraft]);
+
+  useEffect(() => {
+    if (!requestedFocusMarkerId) {
+      return;
+    }
+
+    if (focusedMarker?.id !== requestedFocusMarkerId) {
+      return;
+    }
+
+    setRequestedFocusMarkerId(null);
+  }, [focusedMarker?.id, requestedFocusMarkerId]);
+
+  useEffect(() => {
+    if (previousDraftEditingRef.current === isDraftEditing) {
+      return;
+    }
+
+    previousDraftEditingRef.current = isDraftEditing;
+
+    if (draftChromeTransitionTimeoutRef.current !== null) {
+      clearTimeout(draftChromeTransitionTimeoutRef.current);
+      draftChromeTransitionTimeoutRef.current = null;
+    }
+
+    animateCardChromeStages(0);
+    animateActivityDetailStage(0);
+    draftChromeTransitionTimeoutRef.current = setTimeout(() => {
+      setIsDraftPresentationActive(isDraftEditing);
+      draftChromeTransitionTimeoutRef.current = setTimeout(() => {
+        draftChromeTransitionTimeoutRef.current = null;
+        animateCardChromeStages(1);
+        animateActivityDetailStage(1);
+      }, HEART_CARD_CHROME_REVEAL_DELAY_AFTER_SWAP_MS);
+    }, HEART_CARD_CHROME_SWAP_DELAY_MS);
+  }, [
+    animateActivityDetailStage,
+    animateCardChromeStages,
+    isDraftEditing,
+  ]);
+
+  useEffect(() => {
+    return () => {
+      if (draftChromeTransitionTimeoutRef.current !== null) {
+        clearTimeout(draftChromeTransitionTimeoutRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (isFocusTransitioningRef.current) {
@@ -666,6 +1209,12 @@ export function HeartSnapshotCard({
   useEffect(() => {
     setSelectedSleepStage(null);
   }, [focusedMarker?.id]);
+
+  const handleActivityDetailContentLayout = useCallback((event: LayoutChangeEvent) => {
+    const nextHeight = Math.ceil(event.nativeEvent.layout.height);
+
+    setActivityDetailMeasuredHeight((current) => (current === nextHeight ? current : nextHeight));
+  }, []);
 
   useEffect(() => {
     setActivityActionError(null);
@@ -781,11 +1330,14 @@ export function HeartSnapshotCard({
   ]);
 
   useEffect(() => {
-    const nextMaxHeight = activityDetailPanelVisible ? ACTIVITY_DETAIL_PANEL_MAX_HEIGHT : 0;
+    const wasVisible = previousActivityDetailPanelVisibleRef.current;
+    previousActivityDetailPanelVisibleRef.current = activityDetailPanelVisible;
+
+    const nextMaxHeight = activityDetailPanelVisible ? activityDetailPanelTargetMaxHeight : 0;
     const nextOpacity = activityDetailPanelVisible ? 1 : 0;
     const nextMarginTop = activityDetailPanelVisible ? 12 : 0;
-    const panelDelay = activityDetailPanelVisible ? ACTIVITY_DETAIL_PANEL_STAGE_DELAY_MS : 0;
-    const contentDelay = activityDetailPanelVisible ? ACTIVITY_DETAIL_CHIP_STAGE_DELAY_MS : 0;
+    const panelDelay = activityDetailPanelVisible && !wasVisible ? ACTIVITY_DETAIL_PANEL_STAGE_DELAY_MS : 0;
+    const contentDelay = activityDetailPanelVisible && !wasVisible ? ACTIVITY_DETAIL_CHIP_STAGE_DELAY_MS : 0;
 
     cancelAnimation(activityDetailPanelMaxHeight);
     cancelAnimation(activityDetailPanelOpacity);
@@ -825,6 +1377,7 @@ export function HeartSnapshotCard({
     activityDetailPanelMarginTop,
     activityDetailPanelMaxHeight,
     activityDetailPanelOpacity,
+    activityDetailPanelTargetMaxHeight,
     activityDetailPanelVisible,
     activityDetailTransitionProgress,
   ]);
@@ -932,21 +1485,13 @@ export function HeartSnapshotCard({
                 <Ionicons color={cardAccentColor} name={focusedCardContent.iconName} size={16} />
               </View>
             ) : (
-              <View
-                style={[
-                  styles.cardIconWrap,
-                  {
-                    backgroundColor: `${colors.success}18`,
-                    borderColor: `${colors.success}33`,
-                  },
-                ]}>
-                <PulsingHeartIcon
-                  bpm={showLiveHeartRate ? Number(liveHeartRateLabel?.replace(' bpm', '') ?? 0) : null}
-                  color={colors.success}
-                  name="heart-circle-outline"
-                  size={16}
-                />
-              </View>
+              <PulsingHeartIcon
+                bpm={showLiveHeartRate ? Number(liveHeartRateLabel?.replace(' bpm', '') ?? 0) : null}
+                color={colors.success}
+                name="heart-outline"
+                size={20}
+                style={styles.cardTitleIcon}
+              />
             )}
             <View style={styles.cardHeaderTextStack}>
               <Text style={styles.cardTitle} testID={chartTestID ? `${chartTestID}-title` : undefined}>
@@ -955,7 +1500,9 @@ export function HeartSnapshotCard({
               <Text style={styles.cardSubtitle}>{cardSubtitle}</Text>
             </View>
           </View>
-          {focusedCardContent ? (
+          {isPresentedDraftEditing ? (
+            <Text style={styles.actionMeta}>Draft activity</Text>
+          ) : focusedCardContent ? (
             <View style={styles.actionWrap}>
               <View style={styles.actionButtonRow}>
                 <Pressable
@@ -987,48 +1534,51 @@ export function HeartSnapshotCard({
                 ) : null}
               </View>
             </View>
-          ) : showsLatestWindowButton ? (
+          ) : showsLatestWindowButton || onOpen ? (
             <View style={styles.actionWrap}>
+              {!showsLatestWindowButton && !onOpen ? <Text style={styles.actionMeta}>{trailingLabel}</Text> : null}
               <View style={styles.actionButtonRow}>
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityState={{ disabled: isViewingLatestWindow }}
-                  disabled={isViewingLatestWindow}
-                  onPress={() => {
-                    setIsViewingLatestWindow(true);
-                    setLatestJumpVersion((current) => current + 1);
-                  }}
-                  style={({ pressed }) => [
-                    styles.latestButton,
-                    isViewingLatestWindow ? styles.latestButtonIdle : styles.latestButtonActive,
-                    pressed && !isViewingLatestWindow ? styles.actionPressed : null,
-                  ]}
-                  testID={chartTestID ? `${chartTestID}-latest-button` : undefined}>
-                  <View style={styles.latestButtonIconSlot}>
-                    {isRefreshing ? (
-                      <View testID={chartTestID ? `${chartTestID}-refresh-indicator` : undefined}>
-                        <ActivityIndicator
+                {showsLatestWindowButton ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityState={{ disabled: isViewingLatestWindow }}
+                    disabled={isViewingLatestWindow}
+                    onPress={() => {
+                      setIsViewingLatestWindow(true);
+                      setLatestJumpVersion((current) => current + 1);
+                    }}
+                    style={({ pressed }) => [
+                      styles.latestButton,
+                      isViewingLatestWindow ? styles.latestButtonIdle : styles.latestButtonActive,
+                      pressed && !isViewingLatestWindow ? styles.actionPressed : null,
+                    ]}
+                    testID={chartTestID ? `${chartTestID}-latest-button` : undefined}>
+                    <View style={styles.latestButtonIconSlot}>
+                      {isRefreshing ? (
+                        <View testID={chartTestID ? `${chartTestID}-refresh-indicator` : undefined}>
+                          <ActivityIndicator
+                            color={isViewingLatestWindow ? colors.subtle : colors.primaryBright}
+                            size="small"
+                            style={styles.latestButtonSpinner}
+                          />
+                        </View>
+                      ) : (
+                        <Ionicons
                           color={isViewingLatestWindow ? colors.subtle : colors.primaryBright}
-                          size="small"
-                          style={styles.latestButtonSpinner}
+                          name="refresh-outline"
+                          size={12}
                         />
-                      </View>
-                    ) : (
-                      <Ionicons
-                        color={isViewingLatestWindow ? colors.subtle : colors.primaryBright}
-                        name="refresh-outline"
-                        size={12}
-                      />
-                    )}
-                  </View>
-                  <Text
-                    style={[
-                      styles.latestButtonText,
-                      isViewingLatestWindow ? styles.latestButtonTextIdle : null,
-                    ]}>
-                    Last 12h
-                  </Text>
-                </Pressable>
+                      )}
+                    </View>
+                    <Text
+                      style={[
+                        styles.latestButtonText,
+                        isViewingLatestWindow ? styles.latestButtonTextIdle : null,
+                      ]}>
+                      Last 12h
+                    </Text>
+                  </Pressable>
+                ) : null}
                 {onOpen ? (
                   <Pressable
                     accessibilityRole="button"
@@ -1071,6 +1621,7 @@ export function HeartSnapshotCard({
 
       <PannableHeartChart
         accentColor={chartAccentColor}
+        activityDraft={activityDraft}
         anchorDayKey={viewportKey}
         axisTestID={chartTestID ? `${chartTestID}-axis` : undefined}
         canLoadMore={canLoadMore}
@@ -1079,10 +1630,14 @@ export function HeartSnapshotCard({
         highlightedSleepStage={isSleepFocused ? selectedSleepStage : null}
         isLoadingMore={isLoadingMore}
         markers={resolvedMarkers}
+        onActivityDraftChange={setActivityDraft}
         jumpToLatestSignal={latestJumpVersion}
+        requestedFocusedMarker={requestedSavedFocusMarker}
+        requestedFocusedMarkerId={requestedFocusMarkerId}
         onFocusedMarkerChange={handleFocusedMarkerChange}
         onFocusTransitionStateChange={handleFocusTransitionStateChange}
         onLoadMore={onLoadMore}
+        onViewportWindowChange={setChartViewportState}
         onViewingLatestWindowChange={setIsViewingLatestWindow}
         points={snapshot.series}
         resetKey={viewportKey}
@@ -1137,6 +1692,7 @@ export function HeartSnapshotCard({
         <View style={styles.sleepStagePanel}>
           {isActivityDetailPanelMounted ? (
             <Animated.View
+              onLayout={handleActivityDetailContentLayout}
               style={[styles.activityDetailContent, animatedActivityDetailStageStyle]}
               testID={chartTestID ? `${chartTestID}-activity-detail-panel` : undefined}>
               {activityDetailChips.length ? (
@@ -1151,8 +1707,77 @@ export function HeartSnapshotCard({
                   ))}
                 </View>
               ) : null}
+              {showIdleCreateGraphActivity ? (
+                <View style={styles.reviewActionRow}>
+                  <ReviewActionButton
+                    accentColor={colors.heart}
+                    disabled={isDraftEditing || pendingActivityActionKey !== null}
+                    label="Add New Activity"
+                    onPress={handleStartDraftActivity}
+                    testID={chartTestID ? `${chartTestID}-add-activity-button` : undefined}
+                  />
+                </View>
+              ) : null}
+              {isPresentedDraftEditing && displayedActivityDraft && !isAwaitingSavedActivityFocus ? (
+                <View>
+                  <View style={styles.draftTypeChipRow}>
+                    {REVIEW_ACTIVITY_OPTIONS.map((option) => {
+                      const accentColor = option === 'Nap' ? colors.aqua : colors.heart;
+                      const selected = displayedActivityDraft.activity === option;
+
+                      return (
+                        <Pressable
+                          accessibilityRole="button"
+                          disabled={!isDraftEditing || pendingActivityActionKey !== null}
+                          key={option}
+                          onPress={() => handleSelectDraftActivityType(option)}
+                          style={({ pressed }) => [
+                            styles.draftTypeChipButton,
+                            {
+                              borderColor: selected ? `${accentColor}55` : colors.border,
+                              backgroundColor: selected ? `${accentColor}16` : colors.surfaceMuted,
+                            },
+                            pendingActivityActionKey !== null ? styles.reviewActionButtonDisabled : null,
+                            pressed ? styles.actionPressed : null,
+                          ]}
+                          testID={chartTestID ? `${chartTestID}-draft-type-${option.toLowerCase()}` : undefined}>
+                          <View style={[styles.draftTypeChipDot, { backgroundColor: accentColor }]} />
+                          <Text
+                            style={[
+                              styles.draftTypeChipText,
+                              { color: selected ? accentColor : colors.text },
+                            ]}>
+                            {option}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                </View>
+              ) : null}
               {activityActionError ? <Text style={styles.reviewActionError}>{activityActionError}</Text> : null}
-              {canManageFocusedActivity ? (
+              {isPresentedDraftEditing && !isAwaitingSavedActivityFocus ? (
+                <View>
+                  <View style={styles.reviewActionRow}>
+                    <ReviewActionButton
+                      accentColor={colors.muted}
+                      disabled={!isDraftEditing || pendingActivityActionKey !== null}
+                      label="Cancel"
+                      onPress={handleCancelDraftActivity}
+                      testID={chartTestID ? `${chartTestID}-draft-cancel` : undefined}
+                    />
+                    <ReviewActionButton
+                      accentColor={colors.success}
+                      disabled={!isDraftEditing || pendingActivityActionKey !== null}
+                      label={pendingActivityActionKey === 'draft:save' ? 'Saving...' : 'Save'}
+                      onPress={() => {
+                        void handleSaveDraftActivity();
+                      }}
+                      testID={chartTestID ? `${chartTestID}-draft-save` : undefined}
+                    />
+                  </View>
+                </View>
+              ) : canManageFocusedActivity ? (
                 <View style={styles.reviewActionRow}>
                   <ReviewActionButton
                     accentColor={colors.success}
@@ -1178,6 +1803,25 @@ export function HeartSnapshotCard({
                       void handleDismissFocusedActivity();
                     }}
                     testID={chartTestID ? `${chartTestID}-activity-dismiss` : undefined}
+                  />
+                </View>
+              ) : canEditFocusedActivity ? (
+                <View style={styles.reviewActionRow}>
+                  <ReviewActionButton
+                    accentColor={colors.heart}
+                    disabled={pendingActivityActionKey !== null}
+                    label="Edit"
+                    onPress={handleEditFocusedActivity}
+                    testID={chartTestID ? `${chartTestID}-activity-edit` : undefined}
+                  />
+                  <ReviewActionButton
+                    accentColor={colors.alert}
+                    disabled={pendingActivityActionKey !== null}
+                    label={pendingActivityActionKey === `dismiss:${focusedMarker?.id}` ? 'Removing...' : 'Remove'}
+                    onPress={() => {
+                      void handleDismissFocusedActivity();
+                    }}
+                    testID={chartTestID ? `${chartTestID}-activity-remove` : undefined}
                   />
                 </View>
               ) : null}
@@ -1269,7 +1913,13 @@ export function HeartSnapshotStatusCard({
     <GlassCard accentColor={colors.success}>
       <View style={styles.cardHeader}>
         <View style={styles.cardHeaderLeft}>
-          <PulsingHeartIcon bpm={null} color={colors.success} name="heart-circle-outline" size={22} />
+          <PulsingHeartIcon
+            bpm={null}
+            color={colors.success}
+            name="heart-outline"
+            size={20}
+            style={styles.cardTitleIcon}
+          />
           <Text style={styles.cardTitle}>Heart Rate</Text>
         </View>
         {showsLatestWindowButton ? (
@@ -1579,6 +2229,9 @@ const styles = StyleSheet.create({
     marginTop: 1,
     width: 28,
   },
+  cardTitleIcon: {
+    marginTop: 2,
+  },
   metricRow: {
     flexDirection: 'row',
     gap: 12,
@@ -1634,6 +2287,30 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 10,
+  },
+  draftTypeChipRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  draftTypeChipButton: {
+    alignItems: 'center',
+    borderRadius: 999,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 8,
+    minHeight: 36,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  draftTypeChipDot: {
+    borderRadius: 999,
+    height: 8,
+    width: 8,
+  },
+  draftTypeChipText: {
+    fontFamily: typography.bodySemiBold,
+    fontSize: 12,
   },
   reviewActionError: {
     color: colors.alert,

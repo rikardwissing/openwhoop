@@ -18,6 +18,7 @@ import { useDashboardSnapshot, useDerivedRefreshState } from '@/hooks/useHealthD
 import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
 import { useHealthDataVersion, useHealthRepository, useRefreshHealthData } from '@/providers/HealthDataProvider';
 import { useWearableSyncState } from '@/providers/WearableSyncProvider';
+import type { ManualActivityKind } from '@/data/HealthRepository';
 import type { HeartCardSnapshot } from '@/types/health';
 import { hasFreshLiveHeartRate } from '@/types/device';
 import { getRecoveryMetricTone, getSleepMetricTone, getStrainMetricTone } from '@/utils/metricTone';
@@ -125,6 +126,15 @@ export function TodayScreen() {
     await repository.relabelActivity(activityId, activity);
     refreshAfterActivityMutation();
   }, [refreshAfterActivityMutation, repository]);
+  const handleCreateManualHeartActivity = useCallback(async (activity: ManualActivityKind, start: Date, end: Date) => {
+    const activityId = await repository.createManualActivity(activity, start, end);
+    refreshAfterActivityMutation();
+    return activityId;
+  }, [refreshAfterActivityMutation, repository]);
+  const handleUpdateHeartActivity = useCallback(async (activityId: string, activity: ManualActivityKind, start: Date, end: Date) => {
+    await repository.updateActivity(activityId, activity, start, end);
+    refreshAfterActivityMutation();
+  }, [refreshAfterActivityMutation, repository]);
 
   if (!data && state.status === 'loading') {
     return (
@@ -213,8 +223,10 @@ export function TodayScreen() {
         <HeartSnapshotCard
           activityReviewActions={{
             confirmActivity: handleConfirmHeartActivity,
+            createManualActivity: handleCreateManualHeartActivity,
             dismissActivity: handleDismissHeartActivity,
             relabelActivity: handleRelabelHeartActivity,
+            updateActivity: handleUpdateHeartActivity,
           }}
           chartTestID="today-heart-chart"
           isRefreshing={isHeartCardRefreshing}

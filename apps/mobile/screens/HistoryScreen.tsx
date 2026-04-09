@@ -13,6 +13,7 @@ import {
 import { ScreenShell } from '@/components/layout/ScreenShell';
 import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
 import { colors, typography } from '@/constants/theme';
+import type { ManualActivityKind } from '@/data/HealthRepository';
 import { useDashboardSnapshot } from '@/hooks/useHealthData';
 import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
 import { useHealthRepository, useRefreshHealthData } from '@/providers/HealthDataProvider';
@@ -110,6 +111,15 @@ export function HistoryScreen() {
     await repository.relabelActivity(activityId, activity);
     refreshAfterActivityMutation();
   }, [refreshAfterActivityMutation, repository]);
+  const handleCreateManualHeartActivity = useCallback(async (activity: ManualActivityKind, start: Date, end: Date) => {
+    const activityId = await repository.createManualActivity(activity, start, end);
+    refreshAfterActivityMutation();
+    return activityId;
+  }, [refreshAfterActivityMutation, repository]);
+  const handleUpdateHeartActivity = useCallback(async (activityId: string, activity: ManualActivityKind, start: Date, end: Date) => {
+    await repository.updateActivity(activityId, activity, start, end);
+    refreshAfterActivityMutation();
+  }, [refreshAfterActivityMutation, repository]);
 
   if (!data && state.status === 'loading') {
     return (
@@ -195,8 +205,10 @@ export function HistoryScreen() {
         <HeartSnapshotCard
           activityReviewActions={{
             confirmActivity: handleConfirmHeartActivity,
+            createManualActivity: handleCreateManualHeartActivity,
             dismissActivity: handleDismissHeartActivity,
             relabelActivity: handleRelabelHeartActivity,
+            updateActivity: handleUpdateHeartActivity,
           }}
           chartTestID="history-heart-chart"
           snapshot={data.heartCard}

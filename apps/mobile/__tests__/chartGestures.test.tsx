@@ -49,7 +49,7 @@ function normalizeSvgColor(value: unknown) {
     : value;
 }
 
-function createResponderEvent(locationX: number, isActive: boolean) {
+function createResponderEvent(locationX: number, isActive: boolean, startPageX = locationX) {
   return {
     nativeEvent: {
       changedTouches: [],
@@ -74,7 +74,7 @@ function createResponderEvent(locationX: number, isActive: boolean) {
           previousPageX: locationX,
           previousPageY: 0,
           previousTimeStamp: 0,
-          startPageX: locationX,
+          startPageX,
           startPageY: 0,
           startTimeStamp: 0,
           touchActive: isActive,
@@ -490,6 +490,532 @@ describe('chart gesture ownership', () => {
     await waitFor(() => expect(screen.queryByText('Return')).toBeNull(), { timeout: 2500 });
     expect(screen.getByText('Heart Rate')).toBeTruthy();
     expect(screen.getByTestId('heart-card-marker-sleep-focus')).toBeTruthy();
+  });
+
+  it('keeps the focused activity gradient warm without the green primary stop', async () => {
+    const screen = render(
+      <HeartSnapshotCard
+        chartTestID="heart-activity-card"
+        snapshot={{
+          restingHr: 49,
+          averageHr: 71,
+          maxHr: 133,
+          series: Array.from({ length: 120 }, (_, index) => ({
+            label: `${index}`,
+            value: 57 + (index % 26),
+          })),
+          markers: [
+            {
+              id: 'workout-session',
+              kind: 'activity',
+              label: 'Workout',
+              timeLabel: '12:10 - 1:10',
+              startFraction: 0.42,
+              endFraction: 0.55,
+              details: {
+                durationMinutes: 60,
+                reviewState: 'confirmed',
+                source: 'manual',
+              },
+            },
+          ],
+        }}
+        trailingLabel="Last 12h"
+        windowPointCount={60}
+      />,
+    );
+
+    const viewport = screen.getByTestId('heart-activity-card-viewport');
+
+    act(() => {
+      viewport.props.onLayout?.({ nativeEvent: { layout: { width: 240, height: 150 } } });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('heart-activity-card-marker-workout-session')).toBeTruthy();
+    });
+
+    act(() => {
+      fireEvent.press(screen.getByTestId('heart-activity-card-marker-workout-session'));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('Workout')).toBeTruthy();
+      expect(screen.getByText('Return')).toBeTruthy();
+      expect(screen.UNSAFE_getAllByType(Stop).some((stop) => stop.props.stopColor === colors.primary)).toBe(false);
+    });
+  });
+
+  it('renders activity draft editing affordances and suppresses chart scrubbing while a draft is active', async () => {
+    const points = Array.from({ length: 120 }, (_, index) => ({
+      label: formatAxisTime(new Date(2026, 3, 23, 12, index * 5)),
+      value: 60 + (index % 24),
+    }));
+    const expectedAxisLabels = buildHeartAxisLabels(points, 60, '2026-04-23');
+    const screen = render(
+      <PannableHeartChart
+        accentColor={colors.heart}
+        activityDraft={{
+          activity: 'Workout',
+          endMinuteOffset: 104 * 5,
+          startMinuteOffset: 92 * 5,
+        }}
+        anchorDayKey="2026-04-23"
+        axisTestID="heart-draft-axis"
+        chartTestID="heart-draft"
+        height={150}
+        markers={[]}
+        points={points}
+        resetKey="2026-04-23"
+        windowPointCount={60}
+      />,
+    );
+
+    const viewport = screen.getByTestId('heart-draft-viewport');
+
+    act(() => {
+      viewport.props.onLayout?.({ nativeEvent: { layout: { width: 240, height: 150 } } });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('heart-draft-draft-band')).toBeTruthy();
+      expect(screen.getByTestId('heart-draft-draft-body')).toBeTruthy();
+      expect(screen.getByTestId('heart-draft-draft-marker')).toBeTruthy();
+      expect(screen.getByTestId('heart-draft-draft-start-handle')).toBeTruthy();
+      expect(screen.getByTestId('heart-draft-draft-end-handle')).toBeTruthy();
+      expect(screen.getByText(expectedAxisLabels[0] ?? '')).toBeTruthy();
+      expect(screen.getByText(expectedAxisLabels[1] ?? '')).toBeTruthy();
+      expect(screen.getByText(expectedAxisLabels[2] ?? '')).toBeTruthy();
+    });
+
+    const overlay = screen.getByTestId('heart-draft');
+    const axis = screen.getByTestId('heart-draft-axis');
+    const body = screen.getByTestId('heart-draft-draft-body');
+
+    expect(overlay.props.onMoveShouldSetResponderCapture?.(createResponderEvent(60, true), createGestureState(60))).toBe(
+      false,
+    );
+    expect(axis.props.onStartShouldSetResponderCapture?.(createResponderEvent(20, true))).toBeFalsy();
+    expect(body.props.onStartShouldSetResponder?.(createResponderEvent(0, true))).toBe(true);
+    expect(body.props.onResponderTerminationRequest?.()).toBe(false);
+  });
+
+  it('keeps the add new activity action visible after a same-length heart snapshot refresh', async () => {
+    const activityReviewActions = {
+      confirmActivity: jest.fn(async () => undefined),
+      createManualActivity: jest.fn(async () => 'manual-1'),
+      dismissActivity: jest.fn(async () => undefined),
+      relabelActivity: jest.fn(async () => undefined),
+      updateActivity: jest.fn(async () => undefined),
+    };
+    const firstSnapshot = {
+      restingHr: 48,
+      averageHr: 69,
+      maxHr: 131,
+      series: Array.from({ length: 120 }, (_, index) => ({
+        label: `${index}`,
+        value: 58 + (index % 24),
+      })),
+      markers: [],
+    };
+    const secondSnapshot = {
+      restingHr: 47,
+      averageHr: 68,
+      maxHr: 129,
+      series: Array.from({ length: 120 }, (_, index) => ({
+        label: `${index}`,
+        value: 56 + (index % 20),
+      })),
+      markers: [],
+    };
+    const screen = render(
+      <HeartSnapshotCard
+        activityReviewActions={activityReviewActions}
+        chartTestID="heart-add-action"
+        snapshot={firstSnapshot}
+        trailingLabel="Last 12h"
+        viewportKey="2026-04-23"
+        windowPointCount={60}
+      />,
+    );
+
+    const viewport = screen.getByTestId('heart-add-action-viewport');
+
+    act(() => {
+      viewport.props.onLayout?.({ nativeEvent: { layout: { width: 240, height: 150 } } });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('heart-add-action-add-activity-button')).toBeTruthy();
+      expect(screen.getByText('Add New Activity')).toBeTruthy();
+    });
+
+    act(() => {
+      screen.rerender(
+        <HeartSnapshotCard
+          activityReviewActions={activityReviewActions}
+          chartTestID="heart-add-action"
+          snapshot={secondSnapshot}
+          trailingLabel="Last 12h"
+          viewportKey="2026-04-23"
+          windowPointCount={60}
+        />,
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('heart-add-action-add-activity-button')).toBeTruthy();
+      expect(screen.getByText('Add New Activity')).toBeTruthy();
+    });
+  });
+
+  it('restores the idle add action when a focused marker is no longer present in the current snapshot', async () => {
+    const activityReviewActions = {
+      confirmActivity: jest.fn(async () => undefined),
+      createManualActivity: jest.fn(async () => 'manual-1'),
+      dismissActivity: jest.fn(async () => undefined),
+      relabelActivity: jest.fn(async () => undefined),
+      updateActivity: jest.fn(async () => undefined),
+    };
+    const firstSnapshot = {
+      restingHr: 48,
+      averageHr: 69,
+      maxHr: 131,
+      series: Array.from({ length: 120 }, (_, index) => ({
+        label: `${index}`,
+        value: 58 + (index % 24),
+      })),
+      markers: [
+        {
+          id: 'stale-workout',
+          kind: 'activity' as const,
+          label: 'Workout',
+          timeLabel: '12:10 - 1:10',
+          startFraction: 0.42,
+          endFraction: 0.55,
+          details: {
+            durationMinutes: 60,
+            reviewState: 'confirmed' as const,
+            source: 'manual' as const,
+          },
+        },
+      ],
+    };
+    const secondSnapshot = {
+      restingHr: 47,
+      averageHr: 68,
+      maxHr: 129,
+      series: Array.from({ length: 120 }, (_, index) => ({
+        label: `${index}`,
+        value: 56 + (index % 20),
+      })),
+      markers: [],
+    };
+    const screen = render(
+      <HeartSnapshotCard
+        activityReviewActions={activityReviewActions}
+        chartTestID="heart-stale-focus"
+        snapshot={firstSnapshot}
+        trailingLabel="Apr 23"
+        viewportKey="history-heart-card"
+        windowPointCount={60}
+      />,
+    );
+
+    const viewport = screen.getByTestId('heart-stale-focus-viewport');
+
+    act(() => {
+      viewport.props.onLayout?.({ nativeEvent: { layout: { width: 240, height: 150 } } });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('heart-stale-focus-marker-stale-workout')).toBeTruthy();
+    });
+
+    fireEvent.press(screen.getByTestId('heart-stale-focus-marker-stale-workout'));
+
+    await waitFor(() => {
+      expect(screen.getByText('Workout')).toBeTruthy();
+      expect(screen.queryByTestId('heart-stale-focus-add-activity-button')).toBeNull();
+      expect(screen.getByTestId('heart-stale-focus-return-button')).toBeTruthy();
+    });
+
+    act(() => {
+      screen.rerender(
+        <HeartSnapshotCard
+          activityReviewActions={activityReviewActions}
+          chartTestID="heart-stale-focus"
+          snapshot={secondSnapshot}
+          trailingLabel="Apr 24"
+          viewportKey="history-heart-card"
+          windowPointCount={60}
+        />,
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('heart-stale-focus-add-activity-button')).toBeTruthy();
+      expect(screen.getByText('Add New Activity')).toBeTruthy();
+      expect(screen.queryByTestId('heart-stale-focus-return-button')).toBeNull();
+    });
+  });
+
+  it('derives heart metrics from the current visible window', async () => {
+    const screen = render(
+      <HeartSnapshotCard
+        chartTestID="heart-window-metrics"
+        snapshot={{
+          restingHr: 40,
+          averageHr: 75,
+          maxHr: 140,
+          series: [
+            { label: '1', value: 50 },
+            { label: '2', value: 60 },
+            { label: '3', value: 70 },
+            { label: '4', value: 80 },
+            { label: '5', value: 90 },
+            { label: '6', value: 100 },
+          ],
+          markers: [],
+        }}
+        trailingLabel="Last 12h"
+        viewportKey="2026-04-23"
+        windowPointCount={4}
+      />,
+    );
+
+    const viewport = screen.getByTestId('heart-window-metrics-viewport');
+
+    act(() => {
+      viewport.props.onLayout?.({ nativeEvent: { layout: { width: 240, height: 150 } } });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('Low')).toBeTruthy();
+      expect(screen.getByText('70 BPM')).toBeTruthy();
+      expect(screen.getByText('85 BPM')).toBeTruthy();
+      expect(screen.getByText('100 BPM')).toBeTruthy();
+      expect(screen.queryByText('40 BPM')).toBeNull();
+    });
+
+    const chart = screen.UNSAFE_getByType(PannableHeartChart);
+
+    act(() => {
+      chart.props.onViewportWindowChange?.({
+        windowPointCount: 3,
+        windowStart: 0,
+      });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('50 BPM')).toBeTruthy();
+      expect(screen.getByText('60 BPM')).toBeTruthy();
+      expect(screen.getByText('70 BPM')).toBeTruthy();
+      expect(screen.queryByText('100 BPM')).toBeNull();
+    });
+  });
+
+  it('keeps the idle add activity panel mounted when new heart data increases the base window size', async () => {
+    const activityReviewActions = {
+      confirmActivity: jest.fn(async () => undefined),
+      createManualActivity: jest.fn(async () => 'manual-1'),
+      dismissActivity: jest.fn(async () => undefined),
+      relabelActivity: jest.fn(async () => undefined),
+      updateActivity: jest.fn(async () => undefined),
+    };
+    const firstSnapshot = {
+      restingHr: 48,
+      averageHr: 69,
+      maxHr: 131,
+      series: Array.from({ length: 120 }, (_, index) => ({
+        label: `${index}`,
+        value: 58 + (index % 24),
+      })),
+      markers: [],
+    };
+    const secondSnapshot = {
+      restingHr: 48,
+      averageHr: 69,
+      maxHr: 131,
+      series: Array.from({ length: 121 }, (_, index) => ({
+        label: `${index}`,
+        value: 58 + (index % 24),
+      })),
+      markers: [],
+    };
+    const screen = render(
+      <HeartSnapshotCard
+        activityReviewActions={activityReviewActions}
+        chartTestID="heart-add-visible"
+        snapshot={firstSnapshot}
+        trailingLabel="Last 12h"
+        viewportKey="2026-04-23"
+        windowPointCount={60}
+      />,
+    );
+
+    const viewport = screen.getByTestId('heart-add-visible-viewport');
+
+    act(() => {
+      viewport.props.onLayout?.({ nativeEvent: { layout: { width: 240, height: 150 } } });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('heart-add-visible-add-activity-button')).toBeTruthy();
+      expect(screen.getByTestId('heart-add-visible-activity-detail-panel')).toBeTruthy();
+    });
+
+    act(() => {
+      screen.rerender(
+        <HeartSnapshotCard
+          activityReviewActions={activityReviewActions}
+          chartTestID="heart-add-visible"
+          snapshot={secondSnapshot}
+          trailingLabel="Last 12h"
+          viewportKey="2026-04-23"
+          windowPointCount={61}
+        />,
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('heart-add-visible-add-activity-button')).toBeTruthy();
+      expect(screen.getByTestId('heart-add-visible-activity-detail-panel')).toBeTruthy();
+    });
+  });
+
+  it('keeps the idle add activity panel visible across history viewport key changes', async () => {
+    const activityReviewActions = {
+      confirmActivity: jest.fn(async () => undefined),
+      createManualActivity: jest.fn(async () => 'manual-1'),
+      dismissActivity: jest.fn(async () => undefined),
+      relabelActivity: jest.fn(async () => undefined),
+      updateActivity: jest.fn(async () => undefined),
+    };
+    const snapshot = {
+      restingHr: 48,
+      averageHr: 69,
+      maxHr: 131,
+      series: Array.from({ length: 120 }, (_, index) => ({
+        label: `${index}`,
+        value: 58 + (index % 24),
+      })),
+      markers: [],
+    };
+    const screen = render(
+      <HeartSnapshotCard
+        activityReviewActions={activityReviewActions}
+        chartTestID="heart-history-idle"
+        snapshot={snapshot}
+        trailingLabel="Apr 23"
+        viewportKey="2026-04-23"
+        windowPointCount={60}
+      />,
+    );
+
+    const viewport = screen.getByTestId('heart-history-idle-viewport');
+
+    act(() => {
+      viewport.props.onLayout?.({ nativeEvent: { layout: { width: 240, height: 150 } } });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('heart-history-idle-add-activity-button')).toBeTruthy();
+      expect(screen.getByTestId('heart-history-idle-activity-detail-panel')).toBeTruthy();
+      expect(StyleSheet.flatten(screen.getByTestId('heart-history-idle-activity-detail-panel').props.style)?.opacity).toBe(1);
+    });
+
+    act(() => {
+      screen.rerender(
+        <HeartSnapshotCard
+          activityReviewActions={activityReviewActions}
+          chartTestID="heart-history-idle"
+          snapshot={snapshot}
+          trailingLabel="Apr 22"
+          viewportKey="2026-04-22"
+          windowPointCount={60}
+        />,
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('heart-history-idle-add-activity-button')).toBeTruthy();
+      expect(screen.getByTestId('heart-history-idle-activity-detail-panel')).toBeTruthy();
+      expect(StyleSheet.flatten(screen.getByTestId('heart-history-idle-activity-detail-panel').props.style)?.opacity).toBe(1);
+    });
+  });
+
+  it('stages heart card chrome changes when entering and leaving draft mode', async () => {
+    const activityReviewActions = {
+      confirmActivity: jest.fn(async () => undefined),
+      createManualActivity: jest.fn(async () => 'manual-1'),
+      dismissActivity: jest.fn(async () => undefined),
+      relabelActivity: jest.fn(async () => undefined),
+      updateActivity: jest.fn(async () => undefined),
+    };
+    const screen = render(
+      <HeartSnapshotCard
+        activityReviewActions={activityReviewActions}
+        chartTestID="heart-draft-card"
+        snapshot={{
+          restingHr: 48,
+          averageHr: 69,
+          maxHr: 131,
+          series: Array.from({ length: 120 }, (_, index) => ({
+            label: formatAxisTime(new Date(2026, 3, 23, 12, index * 5)),
+            value: 58 + (index % 24),
+          })),
+          markers: [],
+        }}
+        trailingLabel="Last 12h"
+        viewportKey="2026-04-23"
+        windowPointCount={60}
+      />,
+    );
+
+    const viewport = screen.getByTestId('heart-draft-card-viewport');
+
+    act(() => {
+      viewport.props.onLayout?.({ nativeEvent: { layout: { width: 240, height: 150 } } });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('heart-draft-card-add-activity-button')).toBeTruthy();
+      expect(screen.getByTestId('heart-draft-card-title').props.children).toBe('Heart Rate');
+    });
+
+    expect(screen.getByTestId('heart-draft-card-latest-button')).toBeTruthy();
+    expect(screen.queryByTestId('heart-draft-card-draft-cancel')).toBeNull();
+
+    fireEvent.press(screen.getByTestId('heart-draft-card-add-activity-button'));
+
+    expect(screen.getByTestId('heart-draft-card-title').props.children).toBe('Heart Rate');
+    expect(screen.getByTestId('heart-draft-card-latest-button')).toBeTruthy();
+    expect(screen.queryByTestId('heart-draft-card-draft-cancel')).toBeNull();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('heart-draft-card-title').props.children).toBe('Activity');
+      expect(screen.getByTestId('heart-draft-card-draft-cancel')).toBeTruthy();
+      expect(screen.getByText('Draft activity')).toBeTruthy();
+    });
+
+    expect(screen.UNSAFE_getAllByType(Stop).some((stop) => stop.props.stopColor === colors.heart)).toBe(false);
+
+    expect(screen.queryByTestId('heart-draft-card-latest-button')).toBeNull();
+
+    fireEvent.press(screen.getByTestId('heart-draft-card-draft-cancel'));
+
+    expect(screen.UNSAFE_getAllByType(Stop).some((stop) => stop.props.stopColor === colors.heart)).toBe(false);
+
+    expect(screen.getByTestId('heart-draft-card-title').props.children).toBe('Activity');
+    expect(screen.getByTestId('heart-draft-card-draft-cancel')).toBeTruthy();
+    expect(screen.queryByTestId('heart-draft-card-latest-button')).toBeNull();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('heart-draft-card-title').props.children).toBe('Heart Rate');
+      expect(screen.getByTestId('heart-draft-card-latest-button')).toBeTruthy();
+      expect(screen.getByTestId('heart-draft-card-add-activity-button')).toBeTruthy();
+    });
   });
 
   it('renders interval markers on trend charts', () => {

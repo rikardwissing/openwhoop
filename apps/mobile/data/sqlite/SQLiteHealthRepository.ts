@@ -5964,6 +5964,41 @@ export class SQLiteHealthRepository implements HealthRepository {
     });
   }
 
+  async updateActivity(activityId: string, activity: ManualActivityKind, start: Date, end: Date): Promise<void> {
+    if (!MANUAL_ACTIVITY_KINDS.has(activity)) {
+      throw new Error(`Unsupported manual activity kind: ${activity}`);
+    }
+
+    if (end.getTime() <= start.getTime()) {
+      throw new Error('Manual activity end must be after start.');
+    }
+
+    const databaseId = parseActivityDatabaseId(activityId);
+    if (databaseId === null) {
+      throw new Error(`Unknown activity id: ${activityId}`);
+    }
+
+    await this.runRepositoryMutation(async () => {
+      await this.db.runAsync(
+        `
+          UPDATE activities
+          SET period_id = ?, start = ?, end = ?, activity = ?, source = 'manual', review_state = 'confirmed', synced = 0
+          WHERE id = ?
+        `,
+        dateKey(end),
+        formatSqliteDateTime(start),
+        formatSqliteDateTime(end),
+        activity,
+        databaseId,
+      );
+
+      await rebuildActivityDetectorPersonalization(this.db);
+
+      await refreshDashboardSnapshot(this.db, 'full');
+      this.invalidateCaches(['dashboard', 'sleep', 'heart', 'wellness', 'trends']);
+    });
+  }
+
   async confirmActivity(activityId: string): Promise<void> {
     const databaseId = parseActivityDatabaseId(activityId);
     if (databaseId === null) {
