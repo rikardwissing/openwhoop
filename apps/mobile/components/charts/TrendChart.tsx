@@ -330,7 +330,7 @@ export function TrendChart({
         }}
         testID={testID ? `${testID}-viewport` : undefined}
         style={[styles.chartArea, { height }]}>
-        <Svg height="100%" viewBox="0 0 100 40" width="100%">
+        <Svg height="100%" preserveAspectRatio="none" viewBox="0 0 100 40" width="100%">
           <Defs>
             <SvgLinearGradient id={`${chartId}-stroke`} x1="0%" x2="100%" y1="100%" y2="0%">
               <Stop offset="0%" stopColor={start} />

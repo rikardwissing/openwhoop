@@ -1051,9 +1051,11 @@ describe('chart gesture ownership', () => {
 
     const sleepMarker = screen.getByTestId('trend-chart-marker-sleep-session');
     const activityMarker = screen.getByTestId('trend-chart-marker-tempo-run');
+    const svg = screen.UNSAFE_getByType(Svg);
 
     expect(sleepMarker).toBeTruthy();
     expect(activityMarker).toBeTruthy();
+    expect(svg.props.preserveAspectRatio).toBe('none');
     expect(StyleSheet.flatten(sleepMarker.props.style)?.top).toBe(
       StyleSheet.flatten(activityMarker.props.style)?.top,
     );
