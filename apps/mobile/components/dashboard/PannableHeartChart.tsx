@@ -1126,6 +1126,9 @@ export function PannableHeartChart({
       timeLabel: draftMarker.timeLabel,
     } satisfies HeartMarkerVisual;
   }, [activityDraft, activityDraftVisual, chartTestID]);
+  const markerBandTop = viewportHeight * (ACTIVITY_DRAFT_BAND_TOP / HEART_CHART_VIEWBOX_HEIGHT);
+  const markerBandHeight = viewportHeight * (ACTIVITY_DRAFT_BAND_HEIGHT / HEART_CHART_VIEWBOX_HEIGHT);
+  const markerBandRadius = viewportHeight * (3 / HEART_CHART_VIEWBOX_HEIGHT);
   const isFocusedWindow = focusedMarkerId !== null || safeWindowPointCount !== baseWindowPointCount;
   const hasTopMarkers = markerVisuals.length > 0 || activityDraftBadgeMarker !== null;
   const isViewingLatestWindow = windowStart >= maxWindowStart && safeWindowPointCount === baseWindowPointCount;
@@ -1943,13 +1946,6 @@ export function PannableHeartChart({
     [chartPointSpacingValue, viewportZoomAnchorIndex, viewportZoomAnchorScreenX, viewportZoomScale],
   );
 
-  const animatedMarkerFadeProps = useAnimatedProps(
-    () => ({
-      opacity: 1 - focusTransitionProgress.value,
-    }),
-    [focusTransitionProgress],
-  );
-
   const animatedMarkerLayerStyle = useAnimatedStyle(
     () => ({
       opacity: 1 - focusTransitionProgress.value,
@@ -2022,6 +2018,40 @@ export function PannableHeartChart({
         style={[styles.chartArea, { height }]}
         testID={chartTestID ? `${chartTestID}-viewport` : undefined}>
         <View style={styles.chartViewport}>
+          {markerVisuals.length > 0 ? (
+            <View pointerEvents="none" style={styles.markerBandViewport}>
+              <Animated.View pointerEvents="none" style={[styles.chartCameraLayer, animatedViewportCameraStyle]}>
+                <Animated.View pointerEvents="none" style={[styles.chartZoomLayer, animatedViewportZoomStyle]}>
+                  <Animated.View
+                    pointerEvents="none"
+                    style={[
+                      styles.chartContent,
+                      animatedChartContentStyle,
+                      { width: chartContentWidth },
+                    ]}>
+                    <Animated.View pointerEvents="none" style={[styles.markerBandLayer, animatedMarkerLayerStyle]}>
+                      {markerVisuals.map((marker) => (
+                        <View
+                          key={`marker-band-${marker.id}`}
+                          style={[
+                            styles.markerBand,
+                            {
+                              backgroundColor: marker.backgroundColor,
+                              borderRadius: markerBandRadius,
+                              height: markerBandHeight,
+                              left: marker.startX,
+                              top: markerBandTop,
+                              width: marker.bandWidth,
+                            },
+                          ]}
+                        />
+                      ))}
+                    </Animated.View>
+                  </Animated.View>
+                </Animated.View>
+              </Animated.View>
+            </View>
+          ) : null}
           <Animated.View pointerEvents="none" style={styles.chartCanvas}>
             <Svg
               height="100%"
@@ -2096,20 +2126,6 @@ export function PannableHeartChart({
                 ) : null}
               </Defs>
               <AnimatedSvgGroup animatedProps={animatedChartCameraProps}>
-                <AnimatedSvgGroup animatedProps={animatedMarkerFadeProps}>
-                  {markerVisuals.map((marker) => (
-                    <Rect
-                      fill={marker.backgroundColor}
-                      height={ACTIVITY_DRAFT_BAND_HEIGHT}
-                      key={`marker-band-${marker.id}`}
-                      rx="3"
-                      ry="3"
-                      width={marker.bandWidth}
-                      x={marker.startX}
-                      y={ACTIVITY_DRAFT_BAND_TOP}
-                    />
-                  ))}
-                </AnimatedSvgGroup>
                 <G clipPath={`url(#${chartPlotClipId})`}>
                   {lineGeometry.segments
                     .filter((segment) => segment.length >= 2)
@@ -2408,6 +2424,9 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     position: 'relative',
   },
+  markerBandViewport: {
+    ...StyleSheet.absoluteFillObject,
+  },
   markerViewport: {
     ...StyleSheet.absoluteFillObject,
   },
@@ -2493,6 +2512,12 @@ const styles = StyleSheet.create({
   },
   markerLayer: {
     ...StyleSheet.absoluteFillObject,
+  },
+  markerBandLayer: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  markerBand: {
+    position: 'absolute',
   },
   markerBadgeWrap: {
     height: MARKER_BADGE_SIZE,
