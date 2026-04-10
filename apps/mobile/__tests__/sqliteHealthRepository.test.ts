@@ -561,6 +561,245 @@ describe('SQLiteHealthRepository', () => {
     adapter.close();
   });
 
+  it('creates manual sleeps that survive derived refreshes and appear in dashboard heart markers', async () => {
+    const { adapter, repository } = await createRepositoryFixture();
+
+    const manualSleepId = await repository.createManualSleep(
+      new Date('2026-03-18T04:55:00'),
+      new Date('2026-03-18T05:10:00'),
+    );
+
+    const beforeRefresh = await repository.getDashboardSnapshot('2026-03-18');
+    expect(beforeRefresh.heartCard.markers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: manualSleepId,
+          kind: 'sleep',
+          label: 'Sleep',
+        }),
+      ]),
+    );
+
+    await refreshDerivedData(adapter as never);
+    repository.invalidateCaches(['dashboard', 'sleep', 'wellness', 'trends']);
+
+    const storedManualRows = await adapter.getAllAsync<{
+      sleep_id: string;
+      start: string;
+      end: string;
+      source: string;
+      review_state: string;
+    }>(
+      `
+        SELECT sleep_id, start, end, source, review_state
+        FROM sleep_cycles
+        WHERE sleep_id = '2026-03-18'
+      `,
+    );
+
+    expect(storedManualRows).toEqual([
+      {
+        sleep_id: '2026-03-18',
+        start: '2026-03-18 04:55:00',
+        end: '2026-03-18 05:10:00',
+        source: 'manual',
+        review_state: 'confirmed',
+      },
+    ]);
+
+    const afterRefresh = await repository.getDashboardSnapshot('2026-03-18');
+    expect(afterRefresh.heartCard.markers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: manualSleepId,
+          kind: 'sleep',
+          label: 'Sleep',
+        }),
+      ]),
+    );
+
+    adapter.close();
+  });
+
+  it('updates detected sleeps into manual sleeps that survive derived refreshes', async () => {
+    const { adapter, repository } = await createRepositoryFixture();
+
+    await repository.updateSleep(
+      'sleep-2026-03-19',
+      new Date('2026-03-18T23:05:00'),
+      new Date('2026-03-19T06:55:00'),
+    );
+
+    const beforeRefresh = await repository.getDashboardSnapshot('2026-03-19');
+    expect(beforeRefresh.heartCard.markers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'sleep-2026-03-19',
+          kind: 'sleep',
+          label: 'Sleep',
+        }),
+      ]),
+    );
+
+    await refreshDerivedData(adapter as never);
+    repository.invalidateCaches(['dashboard', 'sleep', 'wellness', 'trends']);
+
+    const storedRows = await adapter.getAllAsync<{
+      start: string;
+      end: string;
+      source: string;
+      review_state: string;
+    }>(
+      `
+        SELECT start, end, source, review_state
+        FROM sleep_cycles
+        WHERE sleep_id = '2026-03-19'
+      `,
+    );
+
+    expect(storedRows).toEqual([
+      {
+        start: '2026-03-18 23:05:00',
+        end: '2026-03-19 06:55:00',
+        source: 'manual',
+        review_state: 'confirmed',
+      },
+    ]);
+
+    const afterRefresh = await repository.getDashboardSnapshot('2026-03-19');
+    expect(afterRefresh.heartCard.markers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'sleep-2026-03-19',
+          kind: 'sleep',
+          label: 'Sleep',
+        }),
+      ]),
+    );
+
+    adapter.close();
+  });
+
+  it('rescored dashboard sleep sections include unstaged gaps inside the sleep span', async () => {
+    const { adapter, repository } = await createRepositoryFixture();
+
+    await adapter.runAsync(
+      `
+        UPDATE sleep_cycles
+        SET score = 92
+        WHERE sleep_id = '2026-03-19'
+      `,
+    );
+    await adapter.runAsync(
+      `
+        DELETE FROM sleep_stage_segments
+        WHERE sleep_id = '2026-03-19'
+      `,
+    );
+
+    const stageInsert = `
+      INSERT INTO sleep_stage_segments (sleep_id, start, end, stage, is_estimated)
+      VALUES (?, ?, ?, ?, ?)
+    `;
+    await adapter.runAsync(stageInsert, '2026-03-19', '2026-03-18 23:00:00', '2026-03-19 02:00:00', 'deep', 1);
+    await adapter.runAsync(stageInsert, '2026-03-19', '2026-03-19 02:00:00', '2026-03-19 02:10:00', 'awake', 1);
+    await adapter.runAsync(stageInsert, '2026-03-19', '2026-03-19 02:30:00', '2026-03-19 07:00:00', 'light', 1);
+
+    repository.invalidateCaches(['dashboard', 'sleep']);
+
+    const sleepHistory = await repository.getSleepHistory('14d');
+    expect(sleepHistory.headlineScore).toBeCloseTo((470 / 480) * 100, 5);
+    expect(sleepHistory.sessions[0]?.score).toBeCloseTo((470 / 480) * 100, 5);
+
+    const dashboard = await repository.getDashboardSnapshot('2026-03-19');
+    expect(dashboard.sleepCard.score).toBeCloseTo((470 / 480) * 100, 5);
+    expect(dashboard.sleepCard.durationMinutes).toBe(470);
+    expect(dashboard.sleepCard.timeInBedMinutes).toBe(480);
+    expect(dashboard.sleepCard.stages.reduce((sum, stage) => sum + stage.minutes, 0)).toBe(480);
+
+    const sleepMarker = dashboard.heartCard.markers.find((marker) => marker.id === 'sleep-2026-03-19');
+    expect(sleepMarker?.details?.score).toBeCloseTo((470 / 480) * 100, 5);
+    expect((sleepMarker?.details?.stages ?? []).reduce((sum, stage) => sum + stage.minutes, 0)).toBe(480);
+
+    adapter.close();
+  });
+
+  it('skips redetected sleep artifacts when a sleep was manualized for the same day', async () => {
+    const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
+    await initializeDatabase(adapter as never);
+
+    await insertOvernightStillness(adapter, new Date(2026, 3, 1, 23, 0, 0));
+    await refreshDerivedData(adapter as never);
+
+    const detectedSleep = await adapter.getFirstAsync<{ sleep_id: string }>(
+      `
+        SELECT sleep_id
+        FROM sleep_cycles
+        ORDER BY start ASC
+        LIMIT 1
+      `,
+    );
+
+    expect(detectedSleep?.sleep_id).toBe('2026-04-02');
+
+    const repository = new SQLiteHealthRepository(adapter as never);
+    await repository.updateSleep(
+      'sleep-2026-04-02',
+      new Date('2026-04-01T23:10:00'),
+      new Date('2026-04-02T06:55:00'),
+    );
+
+    await expect(refreshDerivedData(adapter as never)).resolves.toBeUndefined();
+
+    await markDerivedRefreshPending(adapter as never, '2026-04-01 23:00:00', '2026-04-02 07:00:00');
+    await expect(processPendingDerivedRefresh(adapter as never)).resolves.toBe(true);
+
+    const storedRows = await adapter.getAllAsync<{
+      start: string;
+      end: string;
+      source: string;
+      review_state: string;
+    }>(
+      `
+        SELECT start, end, source, review_state
+        FROM sleep_cycles
+        WHERE sleep_id = '2026-04-02'
+      `,
+    );
+
+    expect(storedRows).toEqual([
+      {
+        start: '2026-04-01 23:10:00',
+        end: '2026-04-02 06:55:00',
+        source: 'manual',
+        review_state: 'confirmed',
+      },
+    ]);
+
+    const stageCount = await adapter.getFirstAsync<{ count: number }>(
+      `
+        SELECT COUNT(*) AS count
+        FROM sleep_stage_segments
+        WHERE sleep_id = '2026-04-02'
+      `,
+    );
+    expect(stageCount?.count ?? 0).toBeGreaterThan(0);
+
+    repository.invalidateCaches(['dashboard', 'sleep', 'wellness', 'trends']);
+    const dashboard = await repository.getDashboardSnapshot('2026-04-02');
+    expect(dashboard.heartCard.markers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'sleep-2026-04-02',
+          kind: 'sleep',
+          label: 'Sleep',
+        }),
+      ]),
+    );
+
+    adapter.close();
+  });
+
   it('confirms and relabels detected activities while preserving them across derived refreshes', async () => {
     const { adapter, repository } = await createRepositoryFixture();
 
@@ -1353,14 +1592,70 @@ describe('SQLiteHealthRepository', () => {
     const sleepHistory = await repository.getSleepHistory('14d');
 
     expect(sleepHistory.wakeTime).toBe('4:30 AM');
-    expect(sleepHistory.durationMinutes).toBe(245);
+    expect(sleepHistory.durationMinutes).toBe(250);
     expect(sleepHistory.timeInBedMinutes).toBe(445);
     expect(sleepHistory.sessions[0]).toMatchObject({
       wakeTime: '4:30 AM',
-      durationMinutes: 245,
+      durationMinutes: 250,
       timeInBedMinutes: 445,
     });
-    expect(sleepHistory.sessions[0]?.efficiency).toBeCloseTo((245 / 445) * 100, 5);
+    expect(sleepHistory.sessions[0]?.efficiency).toBeCloseTo((250 / 445) * 100, 5);
+
+    adapter.close();
+  });
+
+  it('counts unstaged gaps inside the sleep span toward time asleep and time in bed', async () => {
+    const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
+    await initializeDatabase(adapter as never);
+
+    await adapter.runAsync(
+      `
+        INSERT INTO derived_data_state (id, derived_schema_version, source_heart_count, refreshed_at)
+        VALUES (1, ?, 0, '2026-04-05 01:00:00')
+      `,
+      DERIVED_DATA_SCHEMA_VERSION,
+    );
+
+    await adapter.runAsync(
+      `
+        INSERT INTO sleep_cycles (id, sleep_id, start, end, min_bpm, max_bpm, avg_bpm, min_hrv, max_hrv, avg_hrv, score, synced)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+      `,
+      '2026-04-05',
+      '2026-04-05',
+      '2026-04-05 00:00:00',
+      '2026-04-05 01:00:00',
+      54,
+      64,
+      58,
+      40,
+      56,
+      48,
+      86,
+    );
+
+    const stageInsert = `
+      INSERT INTO sleep_stage_segments (sleep_id, start, end, stage, is_estimated)
+      VALUES (?, ?, ?, ?, ?)
+    `;
+    await adapter.runAsync(stageInsert, '2026-04-05', '2026-04-05 00:00:00', '2026-04-05 00:20:00', 'light', 1);
+    await adapter.runAsync(stageInsert, '2026-04-05', '2026-04-05 00:20:00', '2026-04-05 00:30:00', 'awake', 1);
+    await adapter.runAsync(stageInsert, '2026-04-05', '2026-04-05 00:40:00', '2026-04-05 01:00:00', 'deep', 1);
+
+    const repository = new SQLiteHealthRepository(adapter as never);
+    const sleepHistory = await repository.getSleepHistory('14d');
+
+    expect(sleepHistory.durationMinutes).toBe(50);
+    expect(sleepHistory.timeInBedMinutes).toBe(60);
+    expect(sleepHistory.headlineScore).toBeCloseTo((50 / 480) * 100, 5);
+    expect(sleepHistory.sessions[0]).toMatchObject({
+      wakeTime: '1:00 AM',
+      durationMinutes: 50,
+      timeInBedMinutes: 60,
+    });
+    expect(sleepHistory.sessions[0]?.score).toBeCloseTo((50 / 480) * 100, 5);
+    expect(sleepHistory.sessions[0]?.efficiency).toBeCloseTo((50 / 60) * 100, 5);
+    expect((sleepHistory.sessions[0]?.stages ?? []).reduce((sum, stage) => sum + stage.minutes, 0)).toBe(60);
 
     adapter.close();
   });

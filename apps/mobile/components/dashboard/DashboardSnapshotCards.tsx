@@ -20,7 +20,7 @@ import Animated, {
 
 import { SleepStageChart } from '@/components/charts/SleepStageChart';
 import { TrendChart } from '@/components/charts/TrendChart';
-import { PannableHeartChart } from './PannableHeartChart';
+import { PannableHeartChart, type HeartActivityDraft, type HeartMarkerDraftKind } from './PannableHeartChart';
 import { SectionHeader } from '@/components/layout/SectionHeader';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { PulsingHeartIcon } from '@/components/ui/PulsingHeartIcon';
@@ -36,7 +36,7 @@ import type {
   SleepCardSnapshot,
   StrainCardSnapshot,
 } from '@/types/health';
-import { addMinutes, formatClock } from '@/utils/dateTime';
+import { addMinutes, dateKey, formatClock } from '@/utils/dateTime';
 import { formatCompactDuration, formatMetricValue, formatShortDuration } from '@/utils/formatters';
 import {
   canManageHeartIntradayMarker,
@@ -88,19 +88,16 @@ const HEART_CARD_CHROME_REVEAL_DELAY_AFTER_SWAP_MS = 40;
 const HEART_CHART_POINT_INTERVAL_MINUTES = 5;
 const DEFAULT_NEW_ACTIVITY_DURATION_MINUTES = 60;
 const REVIEW_ACTIVITY_OPTIONS: ManualActivityKind[] = ['Activity', 'Walk', 'Workout', 'Nap'];
+const REVIEW_DRAFT_OPTIONS: HeartMarkerDraftKind[] = [...REVIEW_ACTIVITY_OPTIONS, 'Sleep'];
 
 interface HeartActivityReviewActions {
   createManualActivity: (activity: ManualActivityKind, start: Date, end: Date) => Promise<string>;
+  createManualSleep: (start: Date, end: Date) => Promise<string>;
   updateActivity: (activityId: string, activity: ManualActivityKind, start: Date, end: Date) => Promise<void>;
+  updateSleep: (sleepId: string, start: Date, end: Date) => Promise<void>;
   confirmActivity: (activityId: string) => Promise<void>;
   dismissActivity: (activityId: string) => Promise<void>;
   relabelActivity: (activityId: string, activity: ManualActivityKind) => Promise<void>;
-}
-
-interface HeartActivityDraft {
-  activity: ManualActivityKind;
-  endMinuteOffset: number;
-  startMinuteOffset: number;
 }
 
 interface HeartChartViewportState {
@@ -315,7 +312,7 @@ function resolveHeartPointDate(points: readonly { label: string }[], anchorDayKe
 }
 
 function buildInitialHeartActivityDraft(
-  activity: ManualActivityKind,
+  kind: HeartMarkerDraftKind,
   viewportState: HeartChartViewportState,
   pointCount: number,
 ): HeartActivityDraft {
@@ -342,13 +339,21 @@ function buildInitialHeartActivityDraft(
   );
 
   return {
-    activity,
+    kind,
     endMinuteOffset: startMinuteOffset + spanMinutes,
     startMinuteOffset,
   };
 }
 
-function resolveManualActivityKind(marker: HeartIntradayMarker): ManualActivityKind {
+function isManualActivityKind(kind: HeartMarkerDraftKind): kind is ManualActivityKind {
+  return kind !== 'Sleep';
+}
+
+function resolveDraftKind(marker: HeartIntradayMarker): HeartMarkerDraftKind {
+  if (marker.kind === 'sleep') {
+    return 'Sleep';
+  }
+
   const exactMatch = REVIEW_ACTIVITY_OPTIONS.find((option) => option.toLowerCase() === marker.label.toLowerCase());
 
   if (exactMatch) {
@@ -359,7 +364,7 @@ function resolveManualActivityKind(marker: HeartIntradayMarker): ManualActivityK
 }
 
 function buildHeartActivityDraftFromMarker(marker: HeartIntradayMarker, pointCount: number): HeartActivityDraft | null {
-  if (marker.kind === 'sleep' || pointCount < 2) {
+  if (pointCount < 2) {
     return null;
   }
 
@@ -376,7 +381,7 @@ function buildHeartActivityDraftFromMarker(marker: HeartIntradayMarker, pointCou
   );
 
   return {
-    activity: resolveManualActivityKind(marker),
+    kind: resolveDraftKind(marker),
     endMinuteOffset,
     startMinuteOffset,
   };
@@ -398,11 +403,13 @@ function buildHeartActivityDraftMarker(
   }
 
   const totalSeriesMinutes = Math.max((points.length - 1) * HEART_CHART_POINT_INTERVAL_MINUTES, 1);
+  const markerKind = draft.kind === 'Sleep' ? 'sleep' : draft.kind === 'Nap' ? 'nap' : 'activity';
+  const markerLabel = draft.kind;
 
   return {
-    id: 'draft-activity',
-    kind: draft.activity === 'Nap' ? 'nap' : 'activity',
-    label: draft.activity,
+    id: draft.kind === 'Sleep' ? `sleep-${dateKey(end)}` : 'draft-activity',
+    kind: markerKind,
+    label: markerLabel,
     timeLabel: `${formatClock(start)} - ${formatClock(end)}`,
     startFraction: draft.startMinuteOffset / totalSeriesMinutes,
     endFraction: draft.endMinuteOffset / totalSeriesMinutes,
@@ -679,7 +686,14 @@ export function HeartSnapshotCard({
       pendingActivityActionKey !== 'draft:save' &&
       pendingEditActivityDraft === null,
   );
-  const canCreateGraphActivity = Boolean(activityReviewActions?.createManualActivity) && !isPresentedDraftEditing;
+  const canEditFocusedSleep = Boolean(
+    !isPresentedDraftEditing &&
+      activityReviewActions?.updateSleep &&
+      resolvedFocusedMarker?.kind === 'sleep' &&
+      pendingActivityActionKey !== 'draft:save' &&
+      pendingEditActivityDraft === null,
+  );
+  const canCreateGraphActivity = Boolean(activityReviewActions?.createManualActivity && activityReviewActions?.createManualSleep) && !isPresentedDraftEditing;
   const isAwaitingSavedActivityFocus = requestedFocusMarkerId !== null;
   const viewportSeriesSummary = useMemo(
     () => summarizeViewportHeartValues(snapshot, chartViewportState),
@@ -692,6 +706,11 @@ export function HeartSnapshotCard({
     !isAwaitingSavedActivityFocus;
   const activityDetailChips = isActivityFocused ? focusedCardContent?.chips ?? [] : [];
   const sleepStageChips = focusedCardContent?.stageChips ?? [];
+  const draftTypeOptions: HeartMarkerDraftKind[] = editingActivityMarker?.kind === 'sleep'
+    ? ['Sleep']
+    : editingActivityMarker
+      ? REVIEW_ACTIVITY_OPTIONS
+      : REVIEW_DRAFT_OPTIONS;
   const sleepStageChipSignature = sleepStageChips
     .map((chip) => `${chip.label}:${chip.value}:${chip.accentColor}`)
     .join('|');
@@ -699,7 +718,13 @@ export function HeartSnapshotCard({
   const activityDetailPanelVisible =
     showIdleCreateGraphActivity ||
     isDraftEditing ||
-    (isActivityFocused && (activityDetailChips.length > 0 || canManageFocusedActivity || canEditFocusedActivity || activityActionError !== null));
+    ((isActivityFocused || isSleepFocused) && (
+      activityDetailChips.length > 0 ||
+      canManageFocusedActivity ||
+      canEditFocusedActivity ||
+      canEditFocusedSleep ||
+      activityActionError !== null
+    ));
   const activityDetailPanelFallbackMaxHeight = !activityDetailPanelVisible
     ? 0
     : isPresentedDraftEditing
@@ -968,9 +993,9 @@ export function HeartSnapshotCard({
     setLatestJumpVersion((current) => current + 1);
   }, [focusedMarker, snapshot.series.length]);
 
-  const handleSelectDraftActivityType = useCallback((activity: ManualActivityKind) => {
+  const handleSelectDraftActivityType = useCallback((activity: HeartMarkerDraftKind) => {
     setActivityActionError(null);
-    setActivityDraft((current) => (current ? { ...current, activity } : current));
+    setActivityDraft((current) => (current ? { ...current, kind: activity } : current));
   }, []);
 
   const handleCancelDraftActivity = useCallback(() => {
@@ -1032,11 +1057,20 @@ export function HeartSnapshotCard({
     setActivityDraft(null);
 
     try {
-      if (activityToEdit) {
-        await reviewActions.updateActivity(activityToEdit.id, draftToSave.activity, start, end);
+      if (draftToSave.kind === 'Sleep') {
+        if (activityToEdit?.kind === 'sleep') {
+          await reviewActions.updateSleep(activityToEdit.id, start, end);
+          setRequestedFocusMarkerId(nextOptimisticFocusMarker.id);
+        } else {
+          const sleepId = await reviewActions.createManualSleep(start, end);
+          setRequestedFocusMarkerId(sleepId);
+        }
+        setEditingActivityMarker(null);
+      } else if (activityToEdit) {
+        await reviewActions.updateActivity(activityToEdit.id, draftToSave.kind, start, end);
         setEditingActivityMarker(null);
       } else {
-        const activityId = await reviewActions.createManualActivity(draftToSave.activity, start, end);
+        const activityId = await reviewActions.createManualActivity(draftToSave.kind, start, end);
         setRequestedFocusMarkerId(activityId);
       }
     } catch (error) {
@@ -1059,7 +1093,7 @@ export function HeartSnapshotCard({
   }, [activityDraft, activityReviewActions, editingActivityMarker, snapshot.series, viewportKey]);
 
   useEffect(() => {
-    const shouldShowIdleActivityPanelAfterReset = Boolean(activityReviewActions?.createManualActivity);
+    const shouldShowIdleActivityPanelAfterReset = Boolean(activityReviewActions?.createManualActivity && activityReviewActions?.createManualSleep);
 
     setChartViewportState({
       windowPointCount: resolvedWindowPointCount,
@@ -1111,6 +1145,7 @@ export function HeartSnapshotCard({
     setSelectedSleepStage(null);
   }, [
     activityReviewActions?.createManualActivity,
+    activityReviewActions?.createManualSleep,
     activityDetailPanelMarginTop,
     activityDetailPanelMaxHeight,
     activityDetailPanelOpacity,
@@ -1721,9 +1756,9 @@ export function HeartSnapshotCard({
               {isPresentedDraftEditing && displayedActivityDraft && !isAwaitingSavedActivityFocus ? (
                 <View>
                   <View style={styles.draftTypeChipRow}>
-                    {REVIEW_ACTIVITY_OPTIONS.map((option) => {
-                      const accentColor = option === 'Nap' ? colors.aqua : colors.heart;
-                      const selected = displayedActivityDraft.activity === option;
+                    {draftTypeOptions.map((option) => {
+                      const accentColor = option === 'Sleep' ? colors.indigo : option === 'Nap' ? colors.aqua : colors.heart;
+                      const selected = displayedActivityDraft.kind === option;
 
                       return (
                         <Pressable
@@ -1803,6 +1838,16 @@ export function HeartSnapshotCard({
                       void handleDismissFocusedActivity();
                     }}
                     testID={chartTestID ? `${chartTestID}-activity-dismiss` : undefined}
+                  />
+                </View>
+              ) : canEditFocusedSleep ? (
+                <View style={styles.reviewActionRow}>
+                  <ReviewActionButton
+                    accentColor={colors.indigo}
+                    disabled={pendingActivityActionKey !== null}
+                    label="Edit Sleep"
+                    onPress={handleEditFocusedActivity}
+                    testID={chartTestID ? `${chartTestID}-sleep-edit` : undefined}
                   />
                 </View>
               ) : canEditFocusedActivity ? (

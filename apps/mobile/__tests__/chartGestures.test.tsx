@@ -556,7 +556,7 @@ describe('chart gesture ownership', () => {
       <PannableHeartChart
         accentColor={colors.heart}
         activityDraft={{
-          activity: 'Workout',
+          kind: 'Workout',
           endMinuteOffset: 104 * 5,
           startMinuteOffset: 92 * 5,
         }}
@@ -604,9 +604,11 @@ describe('chart gesture ownership', () => {
     const activityReviewActions = {
       confirmActivity: jest.fn(async () => undefined),
       createManualActivity: jest.fn(async () => 'manual-1'),
+      createManualSleep: jest.fn(async () => 'sleep-2026-04-23'),
       dismissActivity: jest.fn(async () => undefined),
       relabelActivity: jest.fn(async () => undefined),
       updateActivity: jest.fn(async () => undefined),
+      updateSleep: jest.fn(async () => undefined),
     };
     const firstSnapshot = {
       restingHr: 48,
@@ -673,9 +675,11 @@ describe('chart gesture ownership', () => {
     const activityReviewActions = {
       confirmActivity: jest.fn(async () => undefined),
       createManualActivity: jest.fn(async () => 'manual-1'),
+      createManualSleep: jest.fn(async () => 'sleep-2026-04-23'),
       dismissActivity: jest.fn(async () => undefined),
       relabelActivity: jest.fn(async () => undefined),
       updateActivity: jest.fn(async () => undefined),
+      updateSleep: jest.fn(async () => undefined),
     };
     const firstSnapshot = {
       restingHr: 48,
@@ -819,9 +823,11 @@ describe('chart gesture ownership', () => {
     const activityReviewActions = {
       confirmActivity: jest.fn(async () => undefined),
       createManualActivity: jest.fn(async () => 'manual-1'),
+      createManualSleep: jest.fn(async () => 'sleep-2026-04-23'),
       dismissActivity: jest.fn(async () => undefined),
       relabelActivity: jest.fn(async () => undefined),
       updateActivity: jest.fn(async () => undefined),
+      updateSleep: jest.fn(async () => undefined),
     };
     const firstSnapshot = {
       restingHr: 48,
@@ -888,9 +894,11 @@ describe('chart gesture ownership', () => {
     const activityReviewActions = {
       confirmActivity: jest.fn(async () => undefined),
       createManualActivity: jest.fn(async () => 'manual-1'),
+      createManualSleep: jest.fn(async () => 'sleep-2026-04-23'),
       dismissActivity: jest.fn(async () => undefined),
       relabelActivity: jest.fn(async () => undefined),
       updateActivity: jest.fn(async () => undefined),
+      updateSleep: jest.fn(async () => undefined),
     };
     const snapshot = {
       restingHr: 48,
@@ -949,9 +957,11 @@ describe('chart gesture ownership', () => {
     const activityReviewActions = {
       confirmActivity: jest.fn(async () => undefined),
       createManualActivity: jest.fn(async () => 'manual-1'),
+      createManualSleep: jest.fn(async () => 'sleep-2026-04-23'),
       dismissActivity: jest.fn(async () => undefined),
       relabelActivity: jest.fn(async () => undefined),
       updateActivity: jest.fn(async () => undefined),
+      updateSleep: jest.fn(async () => undefined),
     };
     const screen = render(
       <HeartSnapshotCard

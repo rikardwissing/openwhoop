@@ -131,8 +131,17 @@ export function TodayScreen() {
     refreshAfterActivityMutation();
     return activityId;
   }, [refreshAfterActivityMutation, repository]);
+  const handleCreateManualHeartSleep = useCallback(async (start: Date, end: Date) => {
+    const sleepId = await repository.createManualSleep(start, end);
+    refreshAfterActivityMutation();
+    return sleepId;
+  }, [refreshAfterActivityMutation, repository]);
   const handleUpdateHeartActivity = useCallback(async (activityId: string, activity: ManualActivityKind, start: Date, end: Date) => {
     await repository.updateActivity(activityId, activity, start, end);
+    refreshAfterActivityMutation();
+  }, [refreshAfterActivityMutation, repository]);
+  const handleUpdateHeartSleep = useCallback(async (sleepId: string, start: Date, end: Date) => {
+    await repository.updateSleep(sleepId, start, end);
     refreshAfterActivityMutation();
   }, [refreshAfterActivityMutation, repository]);
 
@@ -224,9 +233,11 @@ export function TodayScreen() {
           activityReviewActions={{
             confirmActivity: handleConfirmHeartActivity,
             createManualActivity: handleCreateManualHeartActivity,
+            createManualSleep: handleCreateManualHeartSleep,
             dismissActivity: handleDismissHeartActivity,
             relabelActivity: handleRelabelHeartActivity,
             updateActivity: handleUpdateHeartActivity,
+            updateSleep: handleUpdateHeartSleep,
           }}
           chartTestID="today-heart-chart"
           isRefreshing={isHeartCardRefreshing}

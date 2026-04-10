@@ -262,9 +262,18 @@ function buildInsights(selectedIndex: number, strain: number | null): DashboardI
   ];
 }
 
-const sessions: SleepSession[] = [
+interface MockSleepRecord extends SleepSession {
+  end: Date;
+  endDayKey: string;
+  start: Date;
+}
+
+const sessionSeeds: MockSleepRecord[] = [
   {
     id: 'sleep-1',
+    start: new Date(2026, 3, 22, 23, 7, 0, 0),
+    end: new Date(2026, 3, 23, 7, 45, 0, 0),
+    endDayKey: '2026-04-23',
     dateLabel: 'Apr 23',
     score: 82,
     bedtime: '11:07 PM',
@@ -294,6 +303,9 @@ const sessions: SleepSession[] = [
   },
   {
     id: 'sleep-2',
+    start: new Date(2026, 3, 21, 22, 54, 0, 0),
+    end: new Date(2026, 3, 22, 7, 38, 0, 0),
+    endDayKey: '2026-04-22',
     dateLabel: 'Apr 22',
     score: 86,
     bedtime: '10:54 PM',
@@ -322,6 +334,9 @@ const sessions: SleepSession[] = [
   },
   {
     id: 'sleep-3',
+    start: new Date(2026, 3, 20, 23, 21, 0, 0),
+    end: new Date(2026, 3, 21, 7, 31, 0, 0),
+    endDayKey: '2026-04-21',
     dateLabel: 'Apr 21',
     score: 78,
     bedtime: '11:21 PM',
@@ -427,8 +442,47 @@ const activitySeedRecords: MockActivityRecord[] = activitySeeds.map((activity) =
   reviewState: 'none',
 }));
 
-function buildSleepPlanSnapshot(targetWakeMinutes: number, alarmEnabled: boolean): SleepPlanSnapshot {
-  const chronologicalSessions = [...sessions].reverse();
+function dayKeyForDate(date: Date) {
+  return `${date.getFullYear()}-${`${date.getMonth() + 1}`.padStart(2, '0')}-${`${date.getDate()}`.padStart(2, '0')}`;
+}
+
+function formatDateLabel(date: Date) {
+  return new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+  }).format(date);
+}
+
+function buildMockSleepRecord(start: Date, end: Date): MockSleepRecord {
+  const durationMinutes = Math.max(1, Math.round((end.getTime() - start.getTime()) / 60000));
+  const sleepScore = Math.round(clamp((durationMinutes / BASE_SLEEP_NEED_MINUTES) * 100, 0, 100));
+
+  return {
+    id: `sleep-${dayKeyForDate(end)}`,
+    start,
+    end,
+    endDayKey: dayKeyForDate(end),
+    dateLabel: formatDateLabel(end),
+    score: sleepScore,
+    bedtime: formatClockMinutes(start.getHours() * 60 + start.getMinutes()),
+    wakeTime: formatClockMinutes(end.getHours() * 60 + end.getMinutes()),
+    durationMinutes,
+    timeInBedMinutes: durationMinutes,
+    efficiency: 100,
+    remMinutes: 0,
+    deepMinutes: 0,
+    consistency: null,
+    stages: [],
+  };
+}
+
+function parseSleepMarkerId(sleepId: string) {
+  const match = /^sleep-(.+)$/.exec(sleepId);
+  return match?.[1] ?? null;
+}
+
+function buildSleepPlanSnapshot(sleepSessions: readonly MockSleepRecord[], targetWakeMinutes: number, alarmEnabled: boolean): SleepPlanSnapshot {
+  const chronologicalSessions = [...sleepSessions].reverse();
   const sleepDebtMinutes = calculateSleepDebtMinutes(
     chronologicalSessions.map((session) => session.durationMinutes),
   );
@@ -466,6 +520,22 @@ function buildMockSleepMarkerDetails(session: SleepSession): HeartIntradayMarker
   };
 }
 
+function buildMockSleepMarker(
+  session: MockSleepRecord,
+  windowStart: Date,
+  windowEnd: Date,
+): HeartIntradayMarker {
+  return {
+    id: `sleep-${session.endDayKey}`,
+    kind: 'sleep',
+    label: 'Sleep',
+    timeLabel: `${session.bedtime} - ${session.wakeTime}`,
+    startFraction: fractionOfWindow(session.start, windowStart, windowEnd),
+    endFraction: fractionOfWindow(session.end, windowStart, windowEnd),
+    details: buildMockSleepMarkerDetails(session),
+  };
+}
+
 function buildMockActivityMarkerDetails(activity: MockActivityRecord): HeartIntradayMarker['details'] {
   return {
     durationMinutes: activity.durationMinutes,
@@ -495,43 +565,17 @@ function activitiesOverlap(left: MockActivityRecord, right: MockActivityRecord) 
   return left.startMinutes < rightEnd && leftEnd > right.startMinutes;
 }
 
-const intradayMarkers: HeartIntradayMarker[] = [
-  {
-    id: 'sleep-latest',
-    kind: 'sleep',
-    label: 'Sleep',
-    timeLabel: '12:00 AM - 7:45 AM',
-    startFraction: 0,
-    endFraction: fractionOfDay(7 * 60 + 45),
-    details: buildMockSleepMarkerDetails(sessions[0] ?? sessions.at(-1)!),
-  },
-];
-
-const todayIntradayMarkers: HeartIntradayMarker[] = [
-  {
-    id: 'sleep-latest',
-    kind: 'sleep',
-    label: 'Sleep',
-    timeLabel: '11:07 PM - 7:45 AM',
-    startFraction: fractionOfWindow(
-      new Date(2026, 3, 22, 23, 7, 0, 0),
-      todayDashboardHeartWindowStart,
-      todayDashboardHeartWindowEnd,
-    ),
-    endFraction: fractionOfWindow(
-      new Date(2026, 3, 23, 7, 45, 0, 0),
-      todayDashboardHeartWindowStart,
-      todayDashboardHeartWindowEnd,
-    ),
-    details: buildMockSleepMarkerDetails(sessions[0] ?? sessions.at(-1)!),
-  },
-];
-
 export class MockHealthRepository implements HealthRepository {
   private targetWakeMinutes = 7 * 60 + 45;
   private alarmEnabled = true;
   private manualActivityCount = 0;
   private activities: MockActivityRecord[] = activitySeedRecords.map((activity) => ({ ...activity }));
+  private sleepSessions: MockSleepRecord[] = sessionSeeds.map((session) => ({
+    ...session,
+    start: new Date(session.start.getTime()),
+    end: new Date(session.end.getTime()),
+    stages: session.stages.map((stage) => ({ ...stage })),
+  }));
 
   constructor(private readonly options: { delayMs?: number } = {}) {}
 
@@ -545,11 +589,22 @@ export class MockHealthRepository implements HealthRepository {
     return this.getVisibleActivities().map((activity) => toActivitySummary(activity));
   }
 
-  private getIntradayMarkers() {
-    return [...intradayMarkers, ...buildIntradayActivityMarkers(this.getVisibleActivities())];
+  private getIntradayMarkers(session = this.sleepSessions[0] ?? this.sleepSessions.at(-1) ?? null) {
+    const sleepMarkers = session
+      ? [
+          buildMockSleepMarker(
+            session,
+            new Date(`${session.endDayKey}T00:00:00`),
+            new Date(new Date(`${session.endDayKey}T00:00:00`).getTime() + 24 * 3600000),
+          ),
+        ]
+      : [];
+
+    return [...sleepMarkers, ...buildIntradayActivityMarkers(this.getVisibleActivities())];
   }
 
   private getTodayIntradayMarkers() {
+    const latestSession = this.sleepSessions[0] ?? this.sleepSessions.at(-1) ?? null;
     const activityMarkers = this.getVisibleActivities().map((activity) => {
       const startHour = Math.floor(activity.startMinutes / 60);
       const startMinute = activity.startMinutes % 60;
@@ -576,7 +631,11 @@ export class MockHealthRepository implements HealthRepository {
       };
     });
 
-    return [...todayIntradayMarkers, ...activityMarkers];
+    const sleepMarkers = latestSession
+      ? [buildMockSleepMarker(latestSession, todayDashboardHeartWindowStart, todayDashboardHeartWindowEnd)]
+      : [];
+
+    return [...sleepMarkers, ...activityMarkers];
   }
 
   private getActivityById(activityId: string) {
@@ -587,6 +646,20 @@ export class MockHealthRepository implements HealthRepository {
     }
 
     return activity;
+  }
+
+  private getSleepById(sleepId: string) {
+    const sleepDayKey = parseSleepMarkerId(sleepId);
+    if (!sleepDayKey) {
+      throw new Error(`Unknown sleep id: ${sleepId}`);
+    }
+
+    const session = this.sleepSessions.find((entry) => entry.endDayKey === sleepDayKey);
+    if (!session) {
+      throw new Error(`Sleep not found: ${sleepId}`);
+    }
+
+    return session;
   }
 
   async primeDashboardSnapshot(): Promise<boolean> {
@@ -662,6 +735,25 @@ export class MockHealthRepository implements HealthRepository {
     return manualActivity.id;
   }
 
+  async createManualSleep(start: Date, end: Date): Promise<string> {
+    await this.wait();
+
+    if (end.getTime() <= start.getTime()) {
+      throw new Error('Manual sleep end must be after start.');
+    }
+
+    const sleepDayKey = dayKeyForDate(end);
+    if (this.sleepSessions.some((session) => session.endDayKey === sleepDayKey)) {
+      throw new Error('A sleep already exists for this day. Focus it and edit instead.');
+    }
+
+    this.sleepSessions = [...this.sleepSessions, buildMockSleepRecord(start, end)].sort(
+      (left, right) => right.end.getTime() - left.end.getTime(),
+    );
+
+    return `sleep-${sleepDayKey}`;
+  }
+
   async updateActivity(activityId: string, activity: ManualActivityKind, start: Date, end: Date): Promise<void> {
     await this.wait();
 
@@ -679,6 +771,25 @@ export class MockHealthRepository implements HealthRepository {
     entry.durationMinutes = Math.max(1, Math.round((end.getTime() - start.getTime()) / 60000));
     entry.source = 'manual';
     entry.reviewState = 'confirmed';
+  }
+
+  async updateSleep(sleepId: string, start: Date, end: Date): Promise<void> {
+    await this.wait();
+
+    if (end.getTime() <= start.getTime()) {
+      throw new Error('Sleep end must be after start.');
+    }
+
+    const current = this.getSleepById(sleepId);
+    const nextSleepDayKey = dayKeyForDate(end);
+    if (nextSleepDayKey !== current.endDayKey && this.sleepSessions.some((session) => session.endDayKey === nextSleepDayKey)) {
+      throw new Error('A sleep already exists for this day. Focus it and edit instead.');
+    }
+
+    const nextSession = buildMockSleepRecord(start, end);
+    this.sleepSessions = this.sleepSessions
+      .map((session) => (session.endDayKey === current.endDayKey ? nextSession : session))
+      .sort((left, right) => right.end.getTime() - left.end.getTime());
   }
 
   async confirmActivity(activityId: string): Promise<void> {
@@ -757,14 +868,14 @@ export class MockHealthRepository implements HealthRepository {
       hasPartialData: true,
       stepPerDay: 0.02,
     });
-    const selectedSession = sessions[Math.max(0, sessions.length - 1 - (dashboardDayKeys.length - 1 - selectedIndex))] ?? sessions[0];
+    const selectedSession = this.sleepSessions.find((session) => session.endDayKey === day.dayKey) ?? this.sleepSessions[0];
     const strainScore = strainValues[selectedIndex] ?? strainValues.at(-1) ?? null;
     const dayOffset = Math.max(0, dashboardDayKeys.length - 1 - selectedIndex);
     const selectedActivities = this.getActivitySummaries().slice(
       0,
       selectedIndex >= dashboardDayKeys.length - 2 ? 3 : selectedIndex >= dashboardDayKeys.length - 4 ? 2 : 1,
     );
-    const tonightPlan = buildSleepPlanSnapshot(this.targetWakeMinutes, this.alarmEnabled);
+    const tonightPlan = buildSleepPlanSnapshot(this.sleepSessions, this.targetWakeMinutes, this.alarmEnabled);
 
     return {
       layoutVersion: 2,
@@ -788,7 +899,7 @@ export class MockHealthRepository implements HealthRepository {
         averageHr: useRollingTodayHeartWindow ? todayDashboardAverageHr : intradayAverageHr - dayOffset,
         maxHr: useRollingTodayHeartWindow ? todayDashboardMaxHr : intradayMaxHr - dayOffset * 2,
         series: useRollingTodayHeartWindow ? todayDashboardHeartSeries : dashboardHeartSeries,
-        markers: useRollingTodayHeartWindow ? this.getTodayIntradayMarkers() : this.getIntradayMarkers(),
+        markers: useRollingTodayHeartWindow ? this.getTodayIntradayMarkers() : this.getIntradayMarkers(selectedSession),
       },
       sleepCard: {
         score: selectedSession.score,
@@ -817,19 +928,21 @@ export class MockHealthRepository implements HealthRepository {
   async getSleepHistory(range: HistoryRange): Promise<SleepHistorySnapshot> {
     await this.wait();
 
+    const latestSleep = this.sleepSessions[0] ?? null;
+
     return {
-      headlineScore: 82,
+      headlineScore: latestSleep?.score ?? 82,
       headlineLabel: 'Good sleep',
-      bedtime: '11:07 PM',
-      wakeTime: '7:45 AM',
-      durationMinutes: 465,
-      timeInBedMinutes: 479,
+      bedtime: latestSleep?.bedtime ?? '11:07 PM',
+      wakeTime: latestSleep?.wakeTime ?? '7:45 AM',
+      durationMinutes: latestSleep?.durationMinutes ?? 465,
+      timeInBedMinutes: latestSleep?.timeInBedMinutes ?? 479,
       bedtimeConsistency: 88,
       wakeConsistency: 91,
       scoreTrend: takeTail(series(scoreLabels, sleepScores), range),
       durationTrend: takeTail(series(scoreLabels, sleepDurations), range),
-      sessions: sessions.slice(0, 3),
-      sleepPlan: buildSleepPlanSnapshot(this.targetWakeMinutes, this.alarmEnabled),
+      sessions: this.sleepSessions.slice(0, 3),
+      sleepPlan: buildSleepPlanSnapshot(this.sleepSessions, this.targetWakeMinutes, this.alarmEnabled),
     };
   }
 

@@ -30,7 +30,9 @@ export interface HealthRepository {
   processPendingDerivedRefresh(): Promise<boolean>;
   rescanActivities(): Promise<ActivityRescanResult>;
   createManualActivity(activity: ManualActivityKind, start: Date, end: Date): Promise<string>;
+  createManualSleep(start: Date, end: Date): Promise<string>;
   updateActivity(activityId: string, activity: ManualActivityKind, start: Date, end: Date): Promise<void>;
+  updateSleep(sleepId: string, start: Date, end: Date): Promise<void>;
   confirmActivity(activityId: string): Promise<void>;
   dismissActivity(activityId: string): Promise<void>;
   relabelActivity(activityId: string, activity: ManualActivityKind): Promise<void>;

@@ -525,6 +525,64 @@ describe('screen rendering', () => {
     });
   });
 
+  it('adds and edits a manual sleep from the history heart graph', async () => {
+    const repository = new MockHealthRepository({ delayMs: 0 });
+    const createManualSleepSpy = jest.spyOn(repository, 'createManualSleep');
+    const updateSleepSpy = jest.spyOn(repository, 'updateSleep');
+    const screen = renderWithRepository(repository, <HistoryScreen />);
+
+    await screen.findByTestId('history-heart-chart');
+    await waitFor(() => {
+      expect(screen.getByTestId('history-heart-chart-add-activity-button')).toBeTruthy();
+    });
+
+    fireEvent.press(screen.getByTestId('history-heart-chart-add-activity-button'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('history-heart-chart-draft-type-activity')).toBeTruthy();
+      expect(screen.getByTestId('history-heart-chart-draft-type-sleep')).toBeTruthy();
+      expect(screen.getByTestId('history-heart-chart-draft-save')).toBeTruthy();
+    });
+
+    fireEvent.press(screen.getByTestId('history-heart-chart-draft-type-sleep'));
+    fireEvent.press(screen.getByTestId('history-heart-chart-draft-save'));
+
+    await waitFor(() => {
+      expect(createManualSleepSpy).toHaveBeenCalledTimes(1);
+    });
+
+    const createdSleepId = await createManualSleepSpy.mock.results[0]?.value;
+    const [start, end] = createManualSleepSpy.mock.calls[0] ?? [];
+
+    expect(createdSleepId).toMatch(/^sleep-/);
+    expect(start).toBeInstanceOf(Date);
+    expect(end).toBeInstanceOf(Date);
+    expect((start as Date).getTime()).toBeLessThan((end as Date).getTime());
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('history-heart-chart-draft-save')).toBeNull();
+      expect(screen.getByTestId('history-heart-chart-title').props.children).toBe('Sleep');
+      expect(screen.getByTestId('history-heart-chart-sleep-edit')).toBeTruthy();
+      expect(screen.queryByTestId('history-heart-chart-add-activity-button')).toBeNull();
+    });
+
+    fireEvent.press(screen.getByTestId('history-heart-chart-sleep-edit'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('history-heart-chart-draft-type-sleep')).toBeTruthy();
+      expect(screen.queryByTestId('history-heart-chart-draft-type-activity')).toBeNull();
+      expect(screen.getByTestId('history-heart-chart-draft-save')).toBeTruthy();
+    });
+
+    fireEvent.press(screen.getByTestId('history-heart-chart-draft-save'));
+
+    await waitFor(() => {
+      expect(updateSleepSpy).toHaveBeenCalledTimes(1);
+    });
+
+    expect(updateSleepSpy.mock.calls[0]?.[0]).toBe(createdSleepId);
+  });
+
   it('restores the idle add activity action when changing days after focusing a saved history activity', async () => {
     const repository = new MockHealthRepository({ delayMs: 0 });
     const createManualActivitySpy = jest.spyOn(repository, 'createManualActivity');

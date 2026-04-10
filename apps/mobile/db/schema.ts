@@ -87,7 +87,9 @@ export async function initializeDatabase(db: SQLiteDatabase) {
       avg_hrv INTEGER NOT NULL,
       avg_skin_temp REAL,
       score REAL,
-      synced INTEGER NOT NULL DEFAULT 0
+      synced INTEGER NOT NULL DEFAULT 0,
+      source TEXT NOT NULL DEFAULT 'detected',
+      review_state TEXT NOT NULL DEFAULT 'none'
     );
 
     CREATE INDEX IF NOT EXISTS idx_sleep_cycles_start ON sleep_cycles(start);
@@ -302,7 +304,20 @@ export async function initializeDatabase(db: SQLiteDatabase) {
 
   if (!sleepCycleColumnNames.has('avg_skin_temp')) {
     await db.execAsync('ALTER TABLE sleep_cycles ADD COLUMN avg_skin_temp REAL;');
+    sleepCycleColumnNames.add('avg_skin_temp');
   }
+
+  if (!sleepCycleColumnNames.has('source')) {
+    await db.execAsync("ALTER TABLE sleep_cycles ADD COLUMN source TEXT NOT NULL DEFAULT 'detected';");
+    sleepCycleColumnNames.add('source');
+  }
+
+  if (!sleepCycleColumnNames.has('review_state')) {
+    await db.execAsync("ALTER TABLE sleep_cycles ADD COLUMN review_state TEXT NOT NULL DEFAULT 'none';");
+    sleepCycleColumnNames.add('review_state');
+  }
+
+  await db.execAsync('CREATE INDEX IF NOT EXISTS idx_sleep_cycles_source_review ON sleep_cycles(source, review_state);');
 
   const activityColumns = await db.getAllAsync<{ name: string }>('PRAGMA table_info(activities)');
   const activityColumnNames = new Set(activityColumns.map((column) => column.name));

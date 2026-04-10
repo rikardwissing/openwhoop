@@ -76,8 +76,10 @@ const AnimatedSvgPath = Animated.createAnimatedComponent(Path) as ComponentType<
   ComponentProps<typeof Path> & { animatedProps?: object }
 >;
 
-interface HeartActivityDraft {
-  activity: ManualActivityKind;
+export type HeartMarkerDraftKind = ManualActivityKind | 'Sleep';
+
+export interface HeartActivityDraft {
+  kind: HeartMarkerDraftKind;
   startMinuteOffset: number;
   endMinuteOffset: number;
 }
@@ -1092,10 +1094,16 @@ export function PannableHeartChart({
       return null;
     }
 
+    const markerKind = activityDraft.kind === 'Sleep'
+      ? 'sleep'
+      : activityDraft.kind === 'Nap'
+        ? 'nap'
+        : 'activity';
+
     const draftMarker = {
       id: 'draft-activity-marker',
-      kind: activityDraft.activity === 'Nap' ? 'nap' : 'activity',
-      label: activityDraft.activity,
+      kind: markerKind,
+      label: activityDraft.kind,
       timeLabel: 'Draft activity',
       startFraction: 0,
       endFraction: 0,
@@ -1126,6 +1134,16 @@ export function PannableHeartChart({
       timeLabel: draftMarker.timeLabel,
     } satisfies HeartMarkerVisual;
   }, [activityDraft, activityDraftVisual, chartTestID]);
+  const activityDraftAccentColor = activityDraft?.kind === 'Sleep'
+    ? colors.indigo
+    : activityDraft?.kind === 'Nap'
+      ? colors.aqua
+      : colors.heart;
+  const activityDraftFillColor = activityDraft?.kind === 'Sleep'
+    ? 'rgba(93, 120, 255, 0.18)'
+    : activityDraft?.kind === 'Nap'
+      ? 'rgba(86, 255, 209, 0.18)'
+      : 'rgba(255, 210, 107, 0.18)';
   const markerBandTop = viewportHeight * (ACTIVITY_DRAFT_BAND_TOP / HEART_CHART_VIEWBOX_HEIGHT);
   const markerBandHeight = viewportHeight * (ACTIVITY_DRAFT_BAND_HEIGHT / HEART_CHART_VIEWBOX_HEIGHT);
   const markerBandRadius = viewportHeight * (3 / HEART_CHART_VIEWBOX_HEIGHT);
@@ -1833,7 +1851,7 @@ export function PannableHeartChart({
   const axisPanGesture = useMemo(
     () =>
       Gesture.Pan()
-        .enabled(!isFocusedWindow && activityDraft === null)
+        .enabled(!isFocusedWindow)
         .activeOffsetX([-2, 2])
         .failOffsetY([-12, 12])
         .onStart(() => {
@@ -1897,7 +1915,6 @@ export function PannableHeartChart({
       handleAxisPanEnd,
       handleAxisPanStart,
       handleLoadMore,
-      activityDraft,
       isFocusedWindow,
       isAxisDragging,
       isLoadingMore,
@@ -2275,9 +2292,8 @@ export function PannableHeartChart({
                 style={[
                   styles.activityDraftBand,
                   {
-                    backgroundColor:
-                      activityDraft.activity === 'Nap' ? 'rgba(86, 255, 209, 0.18)' : 'rgba(255, 210, 107, 0.18)',
-                    borderColor: activityDraft.activity === 'Nap' ? colors.aqua : colors.heart,
+                    backgroundColor: activityDraftFillColor,
+                    borderColor: activityDraftAccentColor,
                     height: activityDraftVisual.bandHeight,
                     left: activityDraftVisual.startX,
                     top: activityDraftVisual.bandTop,
@@ -2334,7 +2350,7 @@ export function PannableHeartChart({
                   pointerEvents="none"
                   style={[
                     styles.activityDraftHandleGrip,
-                    { backgroundColor: activityDraft.activity === 'Nap' ? colors.aqua : colors.heart },
+                    { backgroundColor: activityDraftAccentColor },
                   ]}
                 />
               </View>
@@ -2353,7 +2369,7 @@ export function PannableHeartChart({
                   pointerEvents="none"
                   style={[
                     styles.activityDraftHandleGrip,
-                    { backgroundColor: activityDraft.activity === 'Nap' ? colors.aqua : colors.heart },
+                    { backgroundColor: activityDraftAccentColor },
                   ]}
                 />
               </View>

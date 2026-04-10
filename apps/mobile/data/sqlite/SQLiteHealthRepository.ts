@@ -60,6 +60,8 @@ const LIMITED_SENSOR_REASON = 'The wearable has not collected enough samples for
 const LIMITED_LOAD_REASON = 'More heart data is needed before daily load can be estimated.';
 const BUILDING_SLEEP_CONSISTENCY_REASON = 'More nights are needed before sleep consistency can be scored.';
 const BUILDING_TEMPERATURE_BASELINE_REASON = 'A few nights of temperature data are needed before baseline shifts can be tracked.';
+const MANUAL_SLEEP_HEART_DATA_ERROR = 'Sleep needs overlapping heart data in the selected window.';
+const MANUAL_SLEEP_CONFLICT_ERROR = 'A sleep already exists for this day. Focus it and edit instead.';
 
 const dashboardAggregateEnsurePromises = new WeakMap<SQLiteDatabase, Promise<void>>();
 const heartIntradayEnsurePromises = new WeakMap<SQLiteDatabase, Promise<void>>();
@@ -502,6 +504,11 @@ function parseActivityDatabaseId(activityId: string): number | null {
 
   const value = Number.parseInt(match[1] ?? '', 10);
   return Number.isFinite(value) ? value : null;
+}
+
+function parseSleepMarkerId(sleepId: string): string | null {
+  const match = /^sleep-(.+)$/.exec(sleepId);
+  return match?.[1] ?? null;
 }
 
 async function withAggregateAccessLock<T>(db: SQLiteDatabase, callback: () => Promise<T>): Promise<T> {
@@ -1352,7 +1359,10 @@ function buildSleepCycle(period: ActivityDetectorPeriod, rows: HeartRateRecord[]
     avgHrv: hrvSummary ? Math.round(hrvSummary.average) : 0,
     avgSkinTemp: tempValues.length > 0 ? mean(tempValues) : null,
     score: null,
-    asleepMinutes: trimmedStageRows.length === 0 ? minutesBetween(period.start, adjustedEnd) : calculateTimeAsleepMinutes(trimmedStageRows),
+    asleepMinutes:
+      trimmedStageRows.length === 0
+        ? minutesBetween(period.start, adjustedEnd)
+        : calculateTimeAsleepMinutes(trimmedStageRows, period.start, adjustedEnd),
   };
 }
 
@@ -1466,6 +1476,57 @@ function buildStageSegments(sleep: SleepCycleRecord, rows: HeartRateRecord[]): S
   return buildSleepStageRows(sleep.sleepId, rowsInRange(rows, sleep.start, sleep.inBedEnd ?? sleep.end));
 }
 
+function buildManualSleepPersistenceArtifacts(options: {
+  heartRows: readonly HeartRateRecord[];
+  id: string;
+  priorSleeps: readonly SleepCycleRecord[];
+  sleepId: string;
+  start: Date;
+  end: Date;
+}) {
+  const windowRows = rowsInRange([...options.heartRows], options.start, options.end);
+  if (windowRows.length === 0) {
+    throw new Error(MANUAL_SLEEP_HEART_DATA_ERROR);
+  }
+
+  const bpmSummary = summarizeHeartRows(windowRows);
+  if (!bpmSummary) {
+    throw new Error(MANUAL_SLEEP_HEART_DATA_ERROR);
+  }
+
+  const hrvSummary = summarizeNumbers(calculateRollingHrv(windowRows.flatMap((row) => row.rr)));
+  const tempValues = windowRows
+    .map((row) => resolvedSkinTemp(row))
+    .filter((value): value is number => value !== null);
+  const stages = buildSleepStageRows(options.sleepId, windowRows);
+  const stageSummary = summarizeSleepStages(stages, options.start, options.end);
+  const baseSleep: SleepCycleRecord = {
+    id: options.id,
+    sleepId: options.sleepId,
+    start: options.start,
+    end: options.end,
+    inBedEnd: options.end,
+    minBpm: bpmSummary.min,
+    maxBpm: bpmSummary.max,
+    avgBpm: Math.round(bpmSummary.average),
+    minHrv: hrvSummary?.min ?? 0,
+    maxHrv: hrvSummary?.max ?? 0,
+    avgHrv: hrvSummary ? Math.round(hrvSummary.average) : 0,
+    avgSkinTemp: tempValues.length > 0 ? mean(tempValues) : null,
+    score: null,
+    asleepMinutes: stageSummary.timeAsleepMinutes,
+  };
+  const scoredSleep = scoreSleepCycles(
+    [...options.priorSleeps, baseSleep].sort((left, right) => left.end.getTime() - right.end.getTime()),
+    [],
+  ).find((sleep) => sleep.id === baseSleep.id && sleep.sleepId === baseSleep.sleepId) ?? baseSleep;
+
+  return {
+    sleep: scoredSleep,
+    stages,
+  };
+}
+
 function filterRowsForSleepEnd(rows: readonly HeartRateRecord[], sleepEnd: Date) {
   const sleepEndMs = sleepEnd.getTime();
 
@@ -1528,9 +1589,23 @@ function trimTrailingAwakeEnd(records: readonly SleepStageRecord[], fallbackEnd:
   return fallbackEnd;
 }
 
-function calculateTimeAsleepMinutes(records: readonly SleepStageRecord[]): number {
-  const totalMinutes = records.reduce((sum, record) => (
-    record.stage === 'awake'
+function calculateTimeAsleepMinutes(
+  records: readonly SleepStageRecord[],
+  start?: Date,
+  end?: Date,
+): number {
+  const awakeMinutes = records.reduce((sum, record, index) => (
+    record.stage === 'awake' && !isTransientAwakeStage(records, index)
+      ? sum + exactMinutesBetween(record.start, record.end)
+      : sum
+  ), 0);
+
+  if (start && end) {
+    return Math.max(0, Math.round(exactMinutesBetween(start, end) - awakeMinutes));
+  }
+
+  const totalMinutes = records.reduce((sum, record, index) => (
+    record.stage === 'awake' && !isTransientAwakeStage(records, index)
       ? sum
       : sum + exactMinutesBetween(record.start, record.end)
   ), 0);
@@ -2243,6 +2318,32 @@ async function loadReviewedActivityOverlapsRange(db: SQLiteDatabase, start: Date
   );
 }
 
+async function loadPreservedSleepIds(
+  db: SQLiteDatabase,
+  sleepIds: readonly string[],
+) {
+  const uniqueSleepIds = [...new Set(sleepIds)];
+  if (uniqueSleepIds.length === 0) {
+    return [];
+  }
+
+  const placeholders = uniqueSleepIds.map(() => '?').join(', ');
+  const rows = await db.getAllAsync<{ sleep_id: string }>(
+    `
+      SELECT sleep_id
+      FROM sleep_cycles
+      WHERE sleep_id IN (${placeholders})
+        AND NOT (
+          (source IS NULL OR source = 'detected')
+          AND (review_state IS NULL OR review_state = 'none')
+        )
+    `,
+    ...uniqueSleepIds,
+  );
+
+  return [...new Set(rows.map((row) => row.sleep_id))];
+}
+
 function activitiesOverlap(
   left: Pick<ActivityRecord, 'start' | 'end'>,
   right: Pick<ActivityRecord, 'start' | 'end'>,
@@ -2261,17 +2362,34 @@ function applyReviewedActivityGuardrails(
   return detectedActivities.filter((activity) => !reviewedOverlaps.some((reviewed) => activitiesOverlap(activity, reviewed)));
 }
 
-async function loadHeartMarkerSleepDetails(
-  db: SQLiteDatabase,
-  sleepCycles: readonly SleepCycleRecord[],
-): Promise<Map<string, HeartIntradayMarkerDetails>> {
-  const sleepIds = [...new Set(sleepCycles.map((sleep) => sleep.sleepId))];
-  if (sleepIds.length === 0) {
-    return new Map();
+function applyPreservedSleepGuardrails(
+  artifacts: ReturnType<typeof buildDerivedDetectionArtifacts>,
+  preservedSleepIds: readonly string[],
+) {
+  if (artifacts.sleepCycles.length === 0 || preservedSleepIds.length === 0) {
+    return artifacts;
   }
 
-  const placeholders = sleepIds.map(() => '?').join(', ');
-  const stageRecords = await querySleepStages(
+  const preservedIds = new Set(preservedSleepIds);
+
+  return {
+    ...artifacts,
+    sleepCycles: artifacts.sleepCycles.filter((sleep) => !preservedIds.has(sleep.sleepId)),
+    stages: artifacts.stages.filter((stage) => !preservedIds.has(stage.sleepId)),
+  };
+}
+
+async function loadSleepStageRecordsForIds(
+  db: SQLiteDatabase,
+  sleepIds: readonly string[],
+) {
+  const uniqueSleepIds = [...new Set(sleepIds)];
+  if (uniqueSleepIds.length === 0) {
+    return [];
+  }
+
+  const placeholders = uniqueSleepIds.map(() => '?').join(', ');
+  return querySleepStages(
     db,
     `
       SELECT id, sleep_id, start, end, stage, is_estimated
@@ -2279,8 +2397,11 @@ async function loadHeartMarkerSleepDetails(
       WHERE sleep_id IN (${placeholders})
       ORDER BY sleep_id ASC, start ASC
     `,
-    sleepIds,
+    uniqueSleepIds,
   );
+}
+
+function groupSleepStageRecordsBySleepId(stageRecords: readonly SleepStageRecord[]) {
   const recordsBySleepId = new Map<string, SleepStageRecord[]>();
 
   for (const record of stageRecords) {
@@ -2292,13 +2413,82 @@ async function loadHeartMarkerSleepDetails(
     }
   }
 
+  return recordsBySleepId;
+}
+
+function buildSleepStageSummaryMap(
+  sleepCycles: readonly SleepCycleRecord[],
+  stageRecords: readonly SleepStageRecord[],
+) {
+  const recordsBySleepId = groupSleepStageRecordsBySleepId(stageRecords);
+
+  return new Map(
+    sleepCycles.map((sleep) => [
+      sleep.sleepId,
+      summarizeSleepStages(recordsBySleepId.get(sleep.sleepId) ?? [], sleep.start, sleep.inBedEnd ?? sleep.end),
+    ] as const),
+  );
+}
+
+async function loadNapActivitiesForSleepScoreRange(
+  db: SQLiteDatabase,
+  sleepCycles: readonly SleepCycleRecord[],
+) {
+  if (sleepCycles.length === 0) {
+    return [];
+  }
+
+  const earliestRelevantStart = new Date(sleepCycles[0].start.getTime() - 24 * 3600000);
+  const latestRelevantEnd = sleepCycles.at(-1)?.start ?? sleepCycles[0].start;
+
+  return queryActivities(
+    db,
+    `
+      SELECT ${ACTIVITY_SELECT_COLUMNS}
+      FROM activities
+      WHERE activity = 'Nap' AND start >= ? AND end <= ? AND review_state <> 'dismissed'
+      ORDER BY start ASC
+    `,
+    [formatSqliteDateTime(earliestRelevantStart), formatSqliteDateTime(latestRelevantEnd)],
+  );
+}
+
+function rescoreSleepCyclesWithSummaries(
+  sleepCycles: readonly SleepCycleRecord[],
+  stageSummaries: ReadonlyMap<string, SleepStageSummary>,
+  naps: readonly ActivityRecord[],
+) {
+  if (sleepCycles.length === 0) {
+    return [];
+  }
+
+  return scoreSleepCycles(
+    sleepCycles.map((sleep) => ({
+      ...sleep,
+      asleepMinutes:
+        stageSummaries.get(sleep.sleepId)?.timeAsleepMinutes ??
+        sleep.asleepMinutes ??
+        minutesBetween(sleep.start, sleep.end),
+    })),
+    [...naps],
+  );
+}
+
+async function loadHeartMarkerSleepDetails(
+  db: SQLiteDatabase,
+  sleepCycles: readonly SleepCycleRecord[],
+): Promise<Map<string, HeartIntradayMarkerDetails>> {
+  const sleepIds = [...new Set(sleepCycles.map((sleep) => sleep.sleepId))];
+  if (sleepIds.length === 0) {
+    return new Map();
+  }
+
+  const stageRecords = await loadSleepStageRecordsForIds(db, sleepIds);
+  const summariesBySleepId = buildSleepStageSummaryMap(sleepCycles, stageRecords);
+
   return new Map(
     sleepCycles.map((sleep) => {
-      const summary = summarizeSleepStages(
-        recordsBySleepId.get(sleep.sleepId) ?? [],
-        sleep.start,
-        sleep.inBedEnd ?? sleep.end,
-      );
+      const summary = summariesBySleepId.get(sleep.sleepId) ?? null;
 
       return [sleep.sleepId, buildHeartIntradaySleepDetails(sleep, summary)] as const;
     }),
@@ -2827,30 +3017,64 @@ function simplifySleepStageSummaries(
   return mergeAdjacentSleepStageSummaries(simplified);
 }
 
-function aggregateSleepStages(records: SleepStageRecord[]): SleepStageSegment[] {
+function aggregateSleepStages(
+  records: readonly SleepStageRecord[],
+  start: Date,
+  end: Date,
+): SleepStageSegment[] {
+  if (records.length === 0 || end.getTime() <= start.getTime()) {
+    return [];
+  }
+
   const merged: Array<{ stage: SleepStage; exactMinutes: number }> = [];
+  let cursor = start;
 
-  for (let index = 0; index < records.length; index += 1) {
-    if (isTransientAwakeStage(records, index)) {
-      continue;
-    }
-
-    const record = records[index];
-    const exactMinutes = exactMinutesBetween(record.start, record.end);
+  const pushStage = (stage: SleepStage, exactMinutes: number) => {
     if (exactMinutes <= 0) {
-      continue;
+      return;
     }
 
     const previous = merged.at(-1);
-    if (previous?.stage === record.stage) {
+    if (previous?.stage === stage) {
       previous.exactMinutes += exactMinutes;
-      continue;
+      return;
     }
 
     merged.push({
-      stage: record.stage,
+      stage,
       exactMinutes,
     });
+  };
+
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index];
+    const recordStart = new Date(Math.max(cursor.getTime(), record.start.getTime(), start.getTime()));
+    const recordEnd = new Date(Math.min(record.end.getTime(), end.getTime()));
+
+    if (recordStart.getTime() > cursor.getTime()) {
+      pushStage('light', exactMinutesBetween(cursor, recordStart));
+    }
+
+    const exactMinutes = exactMinutesBetween(recordStart, recordEnd);
+    if (exactMinutes <= 0) {
+      if (recordEnd.getTime() > cursor.getTime()) {
+        cursor = recordEnd;
+      }
+      continue;
+    }
+
+    if (isTransientAwakeStage(records, index)) {
+      pushStage('light', exactMinutes);
+      cursor = recordEnd;
+      continue;
+    }
+
+    pushStage(record.stage, exactMinutes);
+    cursor = recordEnd;
+  }
+
+  if (cursor.getTime() < end.getTime()) {
+    pushStage('light', exactMinutesBetween(cursor, end));
   }
 
   return simplifySleepStageSummaries(merged).map((segment) => ({
@@ -2964,10 +3188,11 @@ function summarizeSleepStages(
   start: Date,
   end: Date,
 ): SleepStageSummary {
-  const inBedEnd = records.at(-1)?.end ?? end;
+  const lastRecordedEnd = records.at(-1)?.end ?? null;
+  const inBedEnd = lastRecordedEnd && lastRecordedEnd.getTime() > end.getTime() ? lastRecordedEnd : end;
   const sleepEnd = trimTrailingAwakeEnd(records, inBedEnd);
   const visibleRecords = records.filter((record) => record.start.getTime() < sleepEnd.getTime());
-  const stages = aggregateSleepStages([...visibleRecords]);
+  const stages = aggregateSleepStages(visibleRecords, start, sleepEnd);
   const timeInBedMinutes = Math.max(0, Math.round(exactMinutesBetween(start, inBedEnd)));
 
   if (records.length === 0) {
@@ -2983,7 +3208,7 @@ function summarizeSleepStages(
     };
   }
 
-  const timeAsleepMinutes = Math.min(timeInBedMinutes, calculateTimeAsleepMinutes(visibleRecords));
+  const timeAsleepMinutes = Math.min(timeInBedMinutes, calculateTimeAsleepMinutes(visibleRecords, start, sleepEnd));
   const remMinutes = Math.round(
     visibleRecords.reduce((sum, record) => (
       record.stage === 'rem' ? sum + exactMinutesBetween(record.start, record.end) : sum
@@ -3954,6 +4179,8 @@ async function replaceDerivedDetectionRange(
     `
       DELETE FROM sleep_cycles
       WHERE start <= ? AND end >= ?
+        AND (source IS NULL OR source = 'detected')
+        AND (review_state IS NULL OR review_state = 'none')
     `,
     rangeEnd,
     rangeStart,
@@ -3971,9 +4198,17 @@ async function replaceDerivedDetectionRange(
 
 async function clearAllDerivedTables(tx: TransactionWriter) {
   await tx.execAsync(`
-    DELETE FROM sleep_cycles;
+    DELETE FROM sleep_stage_segments
+    WHERE sleep_id IN (
+      SELECT sleep_id
+      FROM sleep_cycles
+      WHERE (source IS NULL OR source = 'detected')
+        AND (review_state IS NULL OR review_state = 'none')
+    );
+    DELETE FROM sleep_cycles
+    WHERE (source IS NULL OR source = 'detected')
+      AND (review_state IS NULL OR review_state = 'none');
     DELETE FROM activities WHERE source = 'detected' AND review_state = 'none';
-    DELETE FROM sleep_stage_segments;
   `);
 }
 
@@ -4087,6 +4322,21 @@ async function loadSleepCycleForDay(db: SQLiteDatabase, dayKey: string) {
       LIMIT 1
     `,
     [dayStartSql, nextDaySql],
+  );
+
+  return rows[0] ?? null;
+}
+
+async function loadSleepCycleBySleepId(db: SQLiteDatabase, sleepId: string) {
+  const rows = await querySleepCycles(
+    db,
+    `
+      SELECT id, sleep_id, start, end, min_bpm, max_bpm, avg_bpm, min_hrv, max_hrv, avg_hrv, avg_skin_temp, score
+      FROM sleep_cycles
+      WHERE sleep_id = ?
+      LIMIT 1
+    `,
+    [sleepId],
   );
 
   return rows[0] ?? null;
@@ -4601,13 +4851,25 @@ export async function refreshDerivedDataRange(
 
   const reviewedActivityQueryStartedAt = Date.now();
   const reviewedActivityOverlaps = await loadReviewedActivityOverlapsRange(db, detectionStart, detectionEnd);
-  const guardedArtifacts = {
+  const activityGuardedArtifacts = {
     ...artifacts,
     activities: applyReviewedActivityGuardrails(artifacts.activities, reviewedActivityOverlaps),
   };
   logMobilePerf('derived.range.applyActivityGuardrails', reviewedActivityQueryStartedAt, {
     reviewedOverlaps: reviewedActivityOverlaps.length,
-    suppressedActivities: artifacts.activities.length - guardedArtifacts.activities.length,
+    suppressedActivities: artifacts.activities.length - activityGuardedArtifacts.activities.length,
+  });
+
+  const preservedSleepQueryStartedAt = Date.now();
+  const preservedSleepIds = await loadPreservedSleepIds(
+    db,
+    activityGuardedArtifacts.sleepCycles.map((sleep) => sleep.sleepId),
+  );
+  const guardedArtifacts = applyPreservedSleepGuardrails(activityGuardedArtifacts, preservedSleepIds);
+  logMobilePerf('derived.range.applySleepGuardrails', preservedSleepQueryStartedAt, {
+    preservedSleepIds: preservedSleepIds.length,
+    suppressedSleepCycles: activityGuardedArtifacts.sleepCycles.length - guardedArtifacts.sleepCycles.length,
+    suppressedSleepStages: activityGuardedArtifacts.stages.length - guardedArtifacts.stages.length,
   });
 
   const overlapQueryStartedAt = Date.now();
@@ -4616,6 +4878,8 @@ export async function refreshDerivedDataRange(
       SELECT sleep_id
       FROM sleep_cycles
       WHERE start <= ? AND end >= ?
+        AND (source IS NULL OR source = 'detected')
+        AND (review_state IS NULL OR review_state = 'none')
     `,
     formatSqliteDateTime(detectionEnd),
     formatSqliteDateTime(detectionStart),
@@ -4694,13 +4958,24 @@ export async function refreshDerivedData(db: SQLiteDatabase) {
   const reviewedActivityOverlaps = heartRows.length === 0
     ? []
     : await loadReviewedActivityOverlapsRange(db, heartRows[0].date, heartRows.at(-1)!.date);
-  const guardedArtifacts = {
+  const activityGuardedArtifacts = {
     ...artifacts,
     activities: applyReviewedActivityGuardrails(artifacts.activities, reviewedActivityOverlaps),
   };
   logMobilePerf('derived.full.applyActivityGuardrails', reviewedActivityQueryStartedAt, {
     reviewedOverlaps: reviewedActivityOverlaps.length,
-    suppressedActivities: artifacts.activities.length - guardedArtifacts.activities.length,
+    suppressedActivities: artifacts.activities.length - activityGuardedArtifacts.activities.length,
+  });
+  const preservedSleepQueryStartedAt = Date.now();
+  const preservedSleepIds = await loadPreservedSleepIds(
+    db,
+    activityGuardedArtifacts.sleepCycles.map((sleep) => sleep.sleepId),
+  );
+  const guardedArtifacts = applyPreservedSleepGuardrails(activityGuardedArtifacts, preservedSleepIds);
+  logMobilePerf('derived.full.applySleepGuardrails', preservedSleepQueryStartedAt, {
+    preservedSleepIds: preservedSleepIds.length,
+    suppressedSleepCycles: activityGuardedArtifacts.sleepCycles.length - guardedArtifacts.sleepCycles.length,
+    suppressedSleepStages: activityGuardedArtifacts.stages.length - guardedArtifacts.stages.length,
   });
   const refreshedAt = formatSqliteDateTime(new Date());
 
@@ -5346,9 +5621,18 @@ async function buildFullDashboardSnapshot(db: SQLiteDatabase): Promise<Dashboard
     return buildEmptyDashboardSnapshot(now, deviceState);
   }
 
-  const latestSleep = sleepCycles.at(-1) ?? null;
+  const rawLatestSleep = sleepCycles.at(-1) ?? null;
+  const [allSleepStageRecords, scoreNapActivities] = await Promise.all([
+    loadSleepStageRecordsForIds(db, sleepCycles.map((sleep) => sleep.sleepId)),
+    loadNapActivitiesForSleepScoreRange(db, sleepCycles),
+  ]);
+  const sleepSummaryById = buildSleepStageSummaryMap(sleepCycles, allSleepStageRecords);
+  const rescoredSleepCycles = rescoreSleepCyclesWithSummaries(sleepCycles, sleepSummaryById, scoreNapActivities);
+  const latestSleep = rawLatestSleep
+    ? rescoredSleepCycles.find((sleep) => sleep.sleepId === rawLatestSleep.sleepId) ?? rawLatestSleep
+    : null;
   const [sleepPreferences, napActivities] = await Promise.all([
-    loadSleepPreferences(db, sleepCycles),
+    loadSleepPreferences(db, rescoredSleepCycles),
     latestSleep
       ? queryActivities(
           db,
@@ -5370,8 +5654,12 @@ async function buildFullDashboardSnapshot(db: SQLiteDatabase): Promise<Dashboard
   const [selectedDayHeartRows, selectedSleepHeartRows, stageRecords, latestDashboardHeartCard] = await Promise.all([
     loadHeartRowsForDay(db, selectedDayKey),
     latestSleep ? loadHeartRowsBetweenRange(db, latestSleep.start, latestSleep.end) : Promise.resolve([]),
-    loadLatestSleepStagesForDashboard(db, latestSleep),
-    loadLatestDashboardHeartCard(db, heartState.latest_heart_time, sleepCycles),
+    Promise.resolve(
+      latestSleep
+        ? allSleepStageRecords.filter((stage) => stage.sleepId === latestSleep.sleepId)
+        : [],
+    ),
+    loadLatestDashboardHeartCard(db, heartState.latest_heart_time, rescoredSleepCycles),
   ]);
   logMobilePerf('dashboard.full.loadDetail', detailLoadStartedAt, {
     dayRows: selectedDayHeartRows.length,
@@ -5381,10 +5669,10 @@ async function buildFullDashboardSnapshot(db: SQLiteDatabase): Promise<Dashboard
 
   const computeStartedAt = Date.now();
   const dailyMinima = heartDayStats.map((stat) => stat.minBpm);
-  const restingHr = personalizeRestingHr(sleepCycles, dailyMinima);
+  const restingHr = personalizeRestingHr(rescoredSleepCycles, dailyMinima);
   const maxHr = personalizeMaxHrFromObservedPeak(heartState.observed_peak_bpm, restingHr);
-  const recovery = estimateRecoveryScoreFromSleeps(latestSleep, sleepCycles, heartState.latest_stress);
-  const tonightPlan = buildSleepPlanSnapshot(sleepPreferences, sleepCycles, napActivities);
+  const recovery = estimateRecoveryScoreFromSleeps(latestSleep, rescoredSleepCycles, heartState.latest_stress);
+  const tonightPlan = buildSleepPlanSnapshot(sleepPreferences, rescoredSleepCycles, napActivities);
   const sleepCard = buildDashboardSleepCard(latestSleep, stageRecords);
   const dayStatsByDay = new Map(heartDayStats.map((stat) => [stat.day, stat]));
   const todayStrain = dayStatsByDay.get(selectedDayKey)?.strainScore ?? null;
@@ -5407,7 +5695,7 @@ async function buildFullDashboardSnapshot(db: SQLiteDatabase): Promise<Dashboard
     db,
     selectedDayKey,
     heartDayStats,
-    sleepCycles,
+    sleepCycles: rescoredSleepCycles,
     selectedSleep: latestSleep,
     latestStress: heartState.latest_stress,
     restingHr,
@@ -5964,6 +6252,83 @@ export class SQLiteHealthRepository implements HealthRepository {
     });
   }
 
+  async createManualSleep(start: Date, end: Date): Promise<string> {
+    if (end.getTime() <= start.getTime()) {
+      throw new Error('Manual sleep end must be after start.');
+    }
+
+    return this.runRepositoryMutation(async () => {
+      const sleepId = dateKey(end);
+      const existing = await loadSleepCycleBySleepId(this.db, sleepId);
+      if (existing) {
+        throw new Error(MANUAL_SLEEP_CONFLICT_ERROR);
+      }
+
+      const [heartRows, priorSleeps] = await Promise.all([
+        loadHeartRowsBetweenRange(this.db, start, end),
+        querySleepCycles(
+          this.db,
+          `
+            SELECT id, sleep_id, start, end, min_bpm, max_bpm, avg_bpm, min_hrv, max_hrv, avg_hrv, avg_skin_temp, score
+            FROM sleep_cycles
+            ORDER BY end ASC
+          `,
+        ),
+      ]);
+      const { sleep, stages } = buildManualSleepPersistenceArtifacts({
+        heartRows,
+        id: sleepId,
+        priorSleeps,
+        sleepId,
+        start,
+        end,
+      });
+
+      await withExclusiveTransaction(this.db, async (tx) => {
+        await tx.runAsync(
+          `
+            INSERT INTO sleep_cycles (
+              id, sleep_id, start, end, min_bpm, max_bpm, avg_bpm,
+              min_hrv, max_hrv, avg_hrv, avg_skin_temp, score, synced, source, review_state
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'manual', 'confirmed')
+          `,
+          sleep.id,
+          sleep.sleepId,
+          formatSqliteDateTime(sleep.start),
+          formatSqliteDateTime(sleep.end),
+          sleep.minBpm,
+          sleep.maxBpm,
+          sleep.avgBpm,
+          sleep.minHrv,
+          sleep.maxHrv,
+          sleep.avgHrv,
+          sleep.avgSkinTemp,
+          sleep.score,
+        );
+
+        for (const stage of stages) {
+          await tx.runAsync(
+            `
+              INSERT INTO sleep_stage_segments (sleep_id, start, end, stage, is_estimated)
+              VALUES (?, ?, ?, ?, ?)
+            `,
+            stage.sleepId,
+            formatSqliteDateTime(stage.start),
+            formatSqliteDateTime(stage.end),
+            stage.stage,
+            stage.isEstimated ? 1 : 0,
+          );
+        }
+      });
+
+      await refreshDashboardSnapshot(this.db, 'full');
+      this.invalidateCaches(['dashboard', 'sleep', 'heart', 'wellness', 'trends']);
+
+      return `sleep-${sleepId}`;
+    });
+  }
+
   async updateActivity(activityId: string, activity: ManualActivityKind, start: Date, end: Date): Promise<void> {
     if (!MANUAL_ACTIVITY_KINDS.has(activity)) {
       throw new Error(`Unsupported manual activity kind: ${activity}`);
@@ -5993,6 +6358,112 @@ export class SQLiteHealthRepository implements HealthRepository {
       );
 
       await rebuildActivityDetectorPersonalization(this.db);
+
+      await refreshDashboardSnapshot(this.db, 'full');
+      this.invalidateCaches(['dashboard', 'sleep', 'heart', 'wellness', 'trends']);
+    });
+  }
+
+  async updateSleep(sleepMarkerId: string, start: Date, end: Date): Promise<void> {
+    if (end.getTime() <= start.getTime()) {
+      throw new Error('Sleep end must be after start.');
+    }
+
+    const currentSleepId = parseSleepMarkerId(sleepMarkerId);
+    if (!currentSleepId) {
+      throw new Error(`Unknown sleep id: ${sleepMarkerId}`);
+    }
+
+    await this.runRepositoryMutation(async () => {
+      const existing = await loadSleepCycleBySleepId(this.db, currentSleepId);
+      if (!existing) {
+        throw new Error(`Sleep not found: ${sleepMarkerId}`);
+      }
+
+      const nextSleepId = dateKey(end);
+      if (nextSleepId !== currentSleepId) {
+        const conflictingSleep = await loadSleepCycleBySleepId(this.db, nextSleepId);
+        if (conflictingSleep) {
+          throw new Error(MANUAL_SLEEP_CONFLICT_ERROR);
+        }
+      }
+
+      const [heartRows, priorSleeps] = await Promise.all([
+        loadHeartRowsBetweenRange(this.db, start, end),
+        querySleepCycles(
+          this.db,
+          `
+            SELECT id, sleep_id, start, end, min_bpm, max_bpm, avg_bpm, min_hrv, max_hrv, avg_hrv, avg_skin_temp, score
+            FROM sleep_cycles
+            ORDER BY end ASC
+          `,
+        ),
+      ]);
+      const { sleep, stages } = buildManualSleepPersistenceArtifacts({
+        heartRows,
+        id: existing.id,
+        priorSleeps: priorSleeps.filter((candidate) => candidate.sleepId !== currentSleepId),
+        sleepId: nextSleepId,
+        start,
+        end,
+      });
+
+      await withExclusiveTransaction(this.db, async (tx) => {
+        await tx.runAsync(
+          `
+            DELETE FROM sleep_stage_segments
+            WHERE sleep_id = ?
+          `,
+          currentSleepId,
+        );
+
+        await tx.runAsync(
+          `
+            UPDATE sleep_cycles
+            SET sleep_id = ?,
+                start = ?,
+                end = ?,
+                min_bpm = ?,
+                max_bpm = ?,
+                avg_bpm = ?,
+                min_hrv = ?,
+                max_hrv = ?,
+                avg_hrv = ?,
+                avg_skin_temp = ?,
+                score = ?,
+                synced = 0,
+                source = 'manual',
+                review_state = 'confirmed'
+            WHERE sleep_id = ?
+          `,
+          sleep.sleepId,
+          formatSqliteDateTime(sleep.start),
+          formatSqliteDateTime(sleep.end),
+          sleep.minBpm,
+          sleep.maxBpm,
+          sleep.avgBpm,
+          sleep.minHrv,
+          sleep.maxHrv,
+          sleep.avgHrv,
+          sleep.avgSkinTemp,
+          sleep.score,
+          currentSleepId,
+        );
+
+        for (const stage of stages) {
+          await tx.runAsync(
+            `
+              INSERT INTO sleep_stage_segments (sleep_id, start, end, stage, is_estimated)
+              VALUES (?, ?, ?, ?, ?)
+            `,
+            stage.sleepId,
+            formatSqliteDateTime(stage.start),
+            formatSqliteDateTime(stage.end),
+            stage.stage,
+            stage.isEstimated ? 1 : 0,
+          );
+        }
+      });
 
       await refreshDashboardSnapshot(this.db, 'full');
       this.invalidateCaches(['dashboard', 'sleep', 'heart', 'wellness', 'trends']);
@@ -6311,19 +6782,7 @@ export class SQLiteHealthRepository implements HealthRepository {
     }
 
     const sortedIds = [...sleepIds].sort();
-    const placeholders = buildInClause(sortedIds);
-    return this.readQuery(`sleep-stages:${sortedIds.join('|')}`, () =>
-      querySleepStages(
-        this.db,
-        `
-          SELECT id, sleep_id, start, end, stage, is_estimated
-          FROM sleep_stage_segments
-          WHERE sleep_id IN (${placeholders})
-          ORDER BY start ASC
-        `,
-        sortedIds,
-      ),
-    );
+    return this.readQuery(`sleep-stages:${sortedIds.join('|')}`, () => loadSleepStageRecordsForIds(this.db, sortedIds));
   }
 
   private async loadDeviceStateRow() {
@@ -6394,30 +6853,43 @@ export class SQLiteHealthRepository implements HealthRepository {
 
     const selectedDayKey = availableDayKeys.includes(dayKey) ? dayKey : availableDayKeys.at(-1)!;
     const selectedDate = dateFromDayKey(selectedDayKey);
-    const [heartDayStats, sleepCycles, selectedSleep, selectedHeartRow, latestHeartTime] = await Promise.all([
+    const [heartDayStats, sleepCycles, selectedSleepRaw, selectedHeartRow, latestHeartTime] = await Promise.all([
       loadHeartDayStatsThroughDay(this.db, selectedDayKey, 14),
       loadSleepCyclesThroughDay(this.db, selectedDayKey, 15),
       loadSleepCycleForDay(this.db, selectedDayKey),
       loadLatestHeartRowBefore(this.db, nextDayFromDayKey(selectedDayKey)),
       loadLatestHeartTimeForDay(this.db, selectedDayKey),
     ]);
-    const latestSleepForPlan = sleepCycles.at(-1) ?? null;
+    const [allSleepStageRecords, scoreNapActivities] = await Promise.all([
+      this.loadSleepStagesForIds(sleepCycles.map((sleep) => sleep.sleepId)),
+      loadNapActivitiesForSleepScoreRange(this.db, sleepCycles),
+    ]);
+    const sleepSummaryById = buildSleepStageSummaryMap(sleepCycles, allSleepStageRecords);
+    const rescoredSleepCycles = rescoreSleepCyclesWithSummaries(sleepCycles, sleepSummaryById, scoreNapActivities);
+    const selectedSleep = selectedSleepRaw
+      ? rescoredSleepCycles.find((sleep) => sleep.sleepId === selectedSleepRaw.sleepId) ?? selectedSleepRaw
+      : null;
+    const latestSleepForPlan = rescoredSleepCycles.at(-1) ?? null;
     const [sleepPreferences, napActivities] = await Promise.all([
-      loadSleepPreferences(this.db, sleepCycles),
+      loadSleepPreferences(this.db, rescoredSleepCycles),
       latestSleepForPlan ? this.loadNapActivitiesSince(latestSleepForPlan.end) : Promise.resolve([]),
     ]);
     const dailyMinima = heartDayStats.map((stat) => stat.minBpm);
-    const restingHr = personalizeRestingHr(sleepCycles, dailyMinima);
+    const restingHr = personalizeRestingHr(rescoredSleepCycles, dailyMinima);
     const maxHr = personalizeMaxHrFromObservedPeak(heartState.observed_peak_bpm, restingHr);
-    const recovery = estimateRecoveryScoreFromSleeps(selectedSleep, sleepCycles, selectedHeartRow?.stress ?? null);
-    const tonightPlan = buildSleepPlanSnapshot(sleepPreferences, sleepCycles, napActivities);
+    const recovery = estimateRecoveryScoreFromSleeps(selectedSleep, rescoredSleepCycles, selectedHeartRow?.stress ?? null);
+    const tonightPlan = buildSleepPlanSnapshot(sleepPreferences, rescoredSleepCycles, napActivities);
     const selectedDayStart = startOfDayFromDayKey(selectedDayKey);
     const selectedDayLatestHeartDate = latestHeartTime ? parseSqliteDateTime(latestHeartTime) : null;
 
     const [selectedDayHeartRows, selectedSleepHeartRows, stageRecords] = await Promise.all([
       loadHeartRowsForDay(this.db, selectedDayKey),
       selectedSleep ? loadHeartRowsBetweenRange(this.db, selectedSleep.start, selectedSleep.end) : Promise.resolve([]),
-      loadLatestSleepStagesForDashboard(this.db, selectedSleep),
+      Promise.resolve(
+        selectedSleep
+          ? allSleepStageRecords.filter((stage) => stage.sleepId === selectedSleep.sleepId)
+          : [],
+      ),
     ]);
     const selectedDayEnd = endOfDashboardDayWindow(
       selectedDayKey,
@@ -6430,7 +6902,7 @@ export class SQLiteHealthRepository implements HealthRepository {
         db: this.db,
         selectedDayKey,
         heartDayStats,
-        sleepCycles,
+        sleepCycles: rescoredSleepCycles,
         selectedSleep,
         latestStress: selectedHeartRow?.stress ?? null,
         restingHr,
@@ -6463,7 +6935,8 @@ export class SQLiteHealthRepository implements HealthRepository {
               selectedSleep.sleepId,
               buildHeartIntradaySleepDetails(
                 selectedSleep,
-                summarizeSleepStages(stageRecords, selectedSleep.start, selectedSleep.inBedEnd ?? selectedSleep.end),
+                sleepSummaryById.get(selectedSleep.sleepId) ??
+                  summarizeSleepStages(stageRecords, selectedSleep.start, selectedSleep.inBedEnd ?? selectedSleep.end),
               ),
             ],
           ])
@@ -6691,11 +7164,17 @@ export class SQLiteHealthRepository implements HealthRepository {
         await this.ensurePrepared();
 
         const sleepCycles = await this.loadRecentSleepCycles(Math.max(rangeDays(range), 15));
-        const preferences = await loadSleepPreferences(this.db, sleepCycles);
-        const latestSleepForPlan = sleepCycles.at(-1) ?? null;
+        const [stageRecords, scoreNapActivities] = await Promise.all([
+          this.loadSleepStagesForIds(sleepCycles.map((sleep) => sleep.sleepId)),
+          loadNapActivitiesForSleepScoreRange(this.db, sleepCycles),
+        ]);
+        const sleepSummaries = buildSleepStageSummaryMap(sleepCycles, stageRecords);
+        const rescoredSleepCycles = rescoreSleepCyclesWithSummaries(sleepCycles, sleepSummaries, scoreNapActivities);
+        const preferences = await loadSleepPreferences(this.db, rescoredSleepCycles);
+        const latestSleepForPlan = rescoredSleepCycles.at(-1) ?? null;
         const napActivities = latestSleepForPlan ? await this.loadNapActivitiesSince(latestSleepForPlan.end) : [];
-        const sleepPlan = buildSleepPlanSnapshot(preferences, sleepCycles, napActivities);
-        const sessions = sleepCycles.slice(-rangeDays(range)).reverse();
+        const sleepPlan = buildSleepPlanSnapshot(preferences, rescoredSleepCycles, napActivities);
+        const sessions = rescoredSleepCycles.slice(-rangeDays(range)).reverse();
         const latestSleep = sessions[0] ?? null;
 
         if (!latestSleep) {
@@ -6720,7 +7199,6 @@ export class SQLiteHealthRepository implements HealthRepository {
           };
         }
 
-        const stageRecords = await this.loadSleepStagesForIds(sessions.map((session) => session.sleepId));
         const bedtimeValues = sessions.map((session) => session.start.getHours() * 60 + session.start.getMinutes());
         const wakeValues = sessions.map((session) => session.end.getHours() * 60 + session.end.getMinutes());
         const bedtimeMean = mean(bedtimeValues);
@@ -6729,11 +7207,7 @@ export class SQLiteHealthRepository implements HealthRepository {
         const wakeConsistency = clamp(100 - stdDev(wakeValues, wakeMean) / Math.max(1, wakeMean) * 100, 0, 100);
 
         const mappedSessions: SleepSession[] = sessions.map((session) => {
-          const summary = summarizeSleepStages(
-            stageRecords.filter((stage) => stage.sleepId === session.sleepId),
-            session.start,
-            session.end,
-          );
+          const summary = sleepSummaries.get(session.sleepId) ?? summarizeSleepStages([], session.start, session.end);
 
           return {
             id: session.id,
