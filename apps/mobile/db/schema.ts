@@ -199,16 +199,7 @@ export async function initializeDatabase(db: SQLiteDatabase) {
       latest_stress REAL
     );
 
-    CREATE TABLE IF NOT EXISTS heart_intraday_buckets (
-      bucket_start TEXT PRIMARY KEY NOT NULL,
-      sample_count INTEGER NOT NULL,
-      avg_bpm REAL NOT NULL,
-      first_bpm INTEGER NOT NULL,
-      second_bpm INTEGER,
-      penultimate_bpm INTEGER,
-      last_bpm INTEGER NOT NULL,
-      max_triplet_avg REAL
-    );
+    DROP TABLE IF EXISTS heart_intraday_buckets;
 
     CREATE TABLE IF NOT EXISTS heart_intraday_bucket_state (
       id INTEGER PRIMARY KEY NOT NULL CHECK (id = 1),

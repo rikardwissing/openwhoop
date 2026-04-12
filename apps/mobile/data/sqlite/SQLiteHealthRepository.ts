@@ -4599,55 +4599,6 @@ async function replaceWellnessDayStatsRange(
   });
 }
 
-async function replaceHeartIntradayBucketRange(
-  db: SQLiteDatabase,
-  bucketRangeStart: string,
-  bucketRangeEnd: string,
-  bucketRows: readonly HeartIntradayBucketRow[],
-  options?: { replaceAll?: boolean },
-) {
-  await withExclusiveTransaction(db, async (tx) => {
-    if (options?.replaceAll) {
-      await tx.execAsync('DELETE FROM heart_intraday_buckets;');
-    } else {
-      await tx.runAsync(
-        `
-          DELETE FROM heart_intraday_buckets
-          WHERE bucket_start >= ? AND bucket_start <= ?
-        `,
-        bucketRangeStart,
-        bucketRangeEnd,
-      );
-    }
-
-    for (const bucket of bucketRows) {
-      await tx.runAsync(
-        `
-          INSERT INTO heart_intraday_buckets (
-            bucket_start,
-            sample_count,
-            avg_bpm,
-            first_bpm,
-            second_bpm,
-            penultimate_bpm,
-            last_bpm,
-            max_triplet_avg
-          )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        `,
-        bucket.bucket_start,
-        bucket.sample_count,
-        bucket.avg_bpm,
-        bucket.first_bpm,
-        bucket.second_bpm,
-        bucket.penultimate_bpm,
-        bucket.last_bpm,
-        bucket.max_triplet_avg,
-      );
-    }
-  });
-}
-
 function toIntradayMetricBucketRow(
   bucket: HeartIntradayBucketSummaryRow,
   bucketSeconds: number,
@@ -4801,7 +4752,6 @@ async function refreshHeartIntradayBucketsForRange(
     if (heartCount === 0) {
       await withExclusiveTransaction(db, async (tx) => {
         await tx.execAsync(`
-          DELETE FROM heart_intraday_buckets;
           DELETE FROM heart_intraday_bucket_state;
           DELETE FROM intraday_metric_buckets;
           DELETE FROM intraday_metric_bucket_state;
@@ -6004,7 +5954,6 @@ export async function clearDashboardAggregatesForDebug(db: SQLiteDatabase) {
     await tx.execAsync(`
       DELETE FROM heart_day_stats;
       DELETE FROM heart_global_stats;
-      DELETE FROM heart_intraday_buckets;
       DELETE FROM heart_intraday_bucket_state;
       DELETE FROM intraday_metric_buckets;
       DELETE FROM intraday_metric_bucket_state;

@@ -1439,7 +1439,6 @@ describe('SQLiteHealthRepository', () => {
 
     const aggregateCounts = await adapter.getFirstAsync<{
       heart_days: number;
-      bucket_rows: number;
       generic_bucket_rows: number;
       heart_bucket_detail_rows: number;
       has_global: number;
@@ -1448,7 +1447,6 @@ describe('SQLiteHealthRepository', () => {
       `
         SELECT
           (SELECT COUNT(*) FROM heart_day_stats) AS heart_days,
-          (SELECT COUNT(*) FROM heart_intraday_buckets) AS bucket_rows,
           (SELECT COUNT(*) FROM intraday_metric_buckets WHERE metric_key = 'heart_bpm' AND bucket_seconds = 300) AS generic_bucket_rows,
           (SELECT COUNT(*) FROM heart_intraday_bucket_details WHERE bucket_seconds = 300) AS heart_bucket_detail_rows,
           (SELECT COUNT(*) FROM heart_global_stats) AS has_global,
@@ -1457,9 +1455,8 @@ describe('SQLiteHealthRepository', () => {
     );
 
     expect(aggregateCounts?.heart_days).toBe(2);
-  expect(aggregateCounts?.bucket_rows).toBe(0);
-  expect(aggregateCounts?.generic_bucket_rows).toBeGreaterThan(0);
-  expect(aggregateCounts?.heart_bucket_detail_rows).toBe(aggregateCounts?.generic_bucket_rows);
+    expect(aggregateCounts?.generic_bucket_rows).toBeGreaterThan(0);
+    expect(aggregateCounts?.heart_bucket_detail_rows).toBe(aggregateCounts?.generic_bucket_rows);
     expect(aggregateCounts?.has_global).toBe(1);
     expect(aggregateCounts?.wellness_days).toBe(2);
 
