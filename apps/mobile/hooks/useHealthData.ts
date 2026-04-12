@@ -1,13 +1,14 @@
 import { startTransition, useEffect, useState } from 'react';
 
 import type {
-  DashboardSnapshot,
   DerivedRefreshState,
-  HeartHistorySnapshot,
+  HeartHistoryData,
+  HistoryOverview,
   HistoryRange,
-  SleepHistorySnapshot,
-  TrendSnapshot,
-  WellnessSnapshot,
+  SleepHistoryData,
+  TodayOverview,
+  TrendData,
+  WellnessData,
 } from '@/types/health';
 import { useHealthDataVersion, useHealthRepository } from '@/providers/HealthDataProvider';
 import type { HealthRepository } from '@/data/HealthRepository';
@@ -82,21 +83,32 @@ function useAsyncValue<T>(
   return state;
 }
 
-export function useDashboardSnapshot(dayKey?: string) {
+export function useHistoryOverview(dayKey: string) {
   const repository = useHealthRepository();
   const version = useHealthDataVersion('dashboard');
-  return useAsyncValue<DashboardSnapshot>(
+  return useAsyncValue<HistoryOverview>(
     repository,
-    `dashboard:${dayKey ?? 'latest'}`,
-    () => repository.getDashboardSnapshot(dayKey),
+    `history:overview:${dayKey}`,
+    () => repository.getHistoryOverview(dayKey),
     [repository, dayKey, version],
+  );
+}
+
+export function useTodayOverview() {
+  const repository = useHealthRepository();
+  const version = useHealthDataVersion('dashboard');
+  return useAsyncValue<TodayOverview>(
+    repository,
+    'today:overview',
+    () => repository.getTodayOverview(),
+    [repository, version],
   );
 }
 
 export function useSleepHistory(range: HistoryRange) {
   const repository = useHealthRepository();
   const version = useHealthDataVersion('sleep');
-  return useAsyncValue<SleepHistorySnapshot>(
+  return useAsyncValue<SleepHistoryData>(
     repository,
     `sleep:${range}`,
     () => repository.getSleepHistory(range),
@@ -107,7 +119,7 @@ export function useSleepHistory(range: HistoryRange) {
 export function useHeartHistory(range: HistoryRange) {
   const repository = useHealthRepository();
   const version = useHealthDataVersion('heart');
-  return useAsyncValue<HeartHistorySnapshot>(
+  return useAsyncValue<HeartHistoryData>(
     repository,
     `heart:${range}`,
     () => repository.getHeartHistory(range),
@@ -115,13 +127,13 @@ export function useHeartHistory(range: HistoryRange) {
   );
 }
 
-export function useWellnessSnapshot(range: HistoryRange) {
+export function useWellnessData(range: HistoryRange) {
   const repository = useHealthRepository();
   const version = useHealthDataVersion('wellness');
-  return useAsyncValue<WellnessSnapshot>(
+  return useAsyncValue<WellnessData>(
     repository,
     `wellness:${range}`,
-    () => repository.getWellnessSnapshot(range),
+    () => repository.getWellnessData(range),
     [repository, range, version],
   );
 }
@@ -137,13 +149,13 @@ export function useDerivedRefreshState() {
   );
 }
 
-export function useTrendSnapshot(range: HistoryRange) {
+export function useTrendData(range: HistoryRange) {
   const repository = useHealthRepository();
   const version = useHealthDataVersion('trends');
-  return useAsyncValue<TrendSnapshot>(
+  return useAsyncValue<TrendData>(
     repository,
     `trends:${range}`,
-    () => repository.getTrendSnapshot(range),
+    () => repository.getTrendData(range),
     [repository, range, version],
   );
 }

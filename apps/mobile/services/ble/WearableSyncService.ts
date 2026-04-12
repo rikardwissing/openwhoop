@@ -51,8 +51,27 @@ const HISTORY_WRITE_BATCH_SIZE = 250;
 const HISTORY_WRITE_MAX_RETRIES = 4;
 const HISTORY_WRITE_RETRY_DELAY_MS = 150;
 const HISTORY_INSERT_SQL = `
-  INSERT INTO heart_rate (bpm, time, rr_intervals, sensor_data, synced)
-  VALUES (?, ?, ?, ?, 0)
+  INSERT INTO heart_rate (
+    bpm,
+    time,
+    rr_intervals,
+    ppg_green,
+    ppg_red_ir,
+    spo2_red,
+    spo2_ir,
+    skin_temp_raw,
+    ambient_light,
+    led_drive_1,
+    led_drive_2,
+    resp_rate_raw,
+    signal_quality,
+    skin_contact,
+    accel_gravity_x,
+    accel_gravity_y,
+    accel_gravity_z,
+    synced
+  )
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
   ON CONFLICT(time) DO UPDATE SET
     bpm = CASE
       WHEN excluded.bpm BETWEEN ${MIN_PLAUSIBLE_RECORDED_BPM} AND ${MAX_PLAUSIBLE_RECORDED_BPM} THEN excluded.bpm
@@ -60,7 +79,20 @@ const HISTORY_INSERT_SQL = `
       ELSE excluded.bpm
     END,
     rr_intervals = COALESCE(NULLIF(excluded.rr_intervals, ''), heart_rate.rr_intervals),
-    sensor_data = COALESCE(excluded.sensor_data, heart_rate.sensor_data)
+    ppg_green = COALESCE(excluded.ppg_green, heart_rate.ppg_green),
+    ppg_red_ir = COALESCE(excluded.ppg_red_ir, heart_rate.ppg_red_ir),
+    spo2_red = COALESCE(excluded.spo2_red, heart_rate.spo2_red),
+    spo2_ir = COALESCE(excluded.spo2_ir, heart_rate.spo2_ir),
+    skin_temp_raw = COALESCE(excluded.skin_temp_raw, heart_rate.skin_temp_raw),
+    ambient_light = COALESCE(excluded.ambient_light, heart_rate.ambient_light),
+    led_drive_1 = COALESCE(excluded.led_drive_1, heart_rate.led_drive_1),
+    led_drive_2 = COALESCE(excluded.led_drive_2, heart_rate.led_drive_2),
+    resp_rate_raw = COALESCE(excluded.resp_rate_raw, heart_rate.resp_rate_raw),
+    signal_quality = COALESCE(excluded.signal_quality, heart_rate.signal_quality),
+    skin_contact = COALESCE(excluded.skin_contact, heart_rate.skin_contact),
+    accel_gravity_x = COALESCE(excluded.accel_gravity_x, heart_rate.accel_gravity_x),
+    accel_gravity_y = COALESCE(excluded.accel_gravity_y, heart_rate.accel_gravity_y),
+    accel_gravity_z = COALESCE(excluded.accel_gravity_z, heart_rate.accel_gravity_z)
 `;
 
 const SHOULD_LOG_SYNC_IMPORT_PERF =
@@ -127,8 +159,59 @@ function toSyncImportPerfLogDetails(summary: SyncImportPerformanceSummary): Reco
   };
 }
 
-function serializeSensorData(value: SensorDataPacket | null) {
-  return value ? JSON.stringify(value) : null;
+interface SerializedSensorColumns {
+  ppgGreen: number | null;
+  ppgRedIr: number | null;
+  spo2Red: number | null;
+  spo2Ir: number | null;
+  skinTempRaw: number | null;
+  ambientLight: number | null;
+  ledDrive1: number | null;
+  ledDrive2: number | null;
+  respRateRaw: number | null;
+  signalQuality: number | null;
+  skinContact: number | null;
+  accelGravityX: number | null;
+  accelGravityY: number | null;
+  accelGravityZ: number | null;
+}
+
+function serializeSensorColumns(value: SensorDataPacket | null): SerializedSensorColumns {
+  if (!value) {
+    return {
+      ppgGreen: null,
+      ppgRedIr: null,
+      spo2Red: null,
+      spo2Ir: null,
+      skinTempRaw: null,
+      ambientLight: null,
+      ledDrive1: null,
+      ledDrive2: null,
+      respRateRaw: null,
+      signalQuality: null,
+      skinContact: null,
+      accelGravityX: null,
+      accelGravityY: null,
+      accelGravityZ: null,
+    };
+  }
+
+  return {
+    ppgGreen: value.ppg_green,
+    ppgRedIr: value.ppg_red_ir,
+    spo2Red: value.spo2_red,
+    spo2Ir: value.spo2_ir,
+    skinTempRaw: value.skin_temp_raw,
+    ambientLight: value.ambient_light,
+    ledDrive1: value.led_drive_1,
+    ledDrive2: value.led_drive_2,
+    respRateRaw: value.resp_rate_raw,
+    signalQuality: value.signal_quality,
+    skinContact: value.skin_contact,
+    accelGravityX: value.accel_gravity[0] ?? null,
+    accelGravityY: value.accel_gravity[1] ?? null,
+    accelGravityZ: value.accel_gravity[2] ?? null,
+  };
 }
 
 function shouldPersistHistoryReading(reading: {
@@ -209,7 +292,20 @@ async function writeHistoryRows(
         row.bpm,
         row.time,
         row.rrIntervals,
-        row.sensorData,
+        row.ppgGreen,
+        row.ppgRedIr,
+        row.spo2Red,
+        row.spo2Ir,
+        row.skinTempRaw,
+        row.ambientLight,
+        row.ledDrive1,
+        row.ledDrive2,
+        row.respRateRaw,
+        row.signalQuality,
+        row.skinContact,
+        row.accelGravityX,
+        row.accelGravityY,
+        row.accelGravityZ,
       );
     }
     return;
@@ -225,7 +321,20 @@ async function writeHistoryRows(
         row.bpm,
         row.time,
         row.rrIntervals,
-        row.sensorData,
+        row.ppgGreen,
+        row.ppgRedIr,
+        row.spo2Red,
+        row.spo2Ir,
+        row.skinTempRaw,
+        row.ambientLight,
+        row.ledDrive1,
+        row.ledDrive2,
+        row.respRateRaw,
+        row.signalQuality,
+        row.skinContact,
+        row.accelGravityX,
+        row.accelGravityY,
+        row.accelGravityZ,
       );
     }
   } finally {
@@ -251,7 +360,20 @@ interface PendingHistoryRow {
   bpm: number;
   time: string;
   rrIntervals: string;
-  sensorData: string | null;
+  ppgGreen: number | null;
+  ppgRedIr: number | null;
+  spo2Red: number | null;
+  spo2Ir: number | null;
+  skinTempRaw: number | null;
+  ambientLight: number | null;
+  ledDrive1: number | null;
+  ledDrive2: number | null;
+  respRateRaw: number | null;
+  signalQuality: number | null;
+  skinContact: number | null;
+  accelGravityX: number | null;
+  accelGravityY: number | null;
+  accelGravityZ: number | null;
 }
 
 interface PendingHistoryAck {
@@ -1229,7 +1351,7 @@ export class WearableSyncService {
                   bpm: parsed.reading.bpm,
                   time: readingTime,
                   rrIntervals: rrToString(parsed.reading.rr),
-                  sensorData: serializeSensorData(parsed.reading.sensorData),
+                  ...serializeSensorColumns(parsed.reading.sensorData),
                 });
                 queuedPersistableHistoryRowCount += 1;
                 maxPendingHistoryRows = Math.max(maxPendingHistoryRows, pendingHistoryRows.length);

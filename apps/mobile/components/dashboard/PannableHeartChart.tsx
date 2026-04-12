@@ -21,6 +21,7 @@ import Animated, {
   useDerivedValue,
   useAnimatedStyle,
   useSharedValue,
+  withDelay,
   withTiming,
   type SharedValue,
 } from 'react-native-reanimated';
@@ -54,11 +55,12 @@ import { addMinutes, formatShortDate } from '@/utils/dateTime';
 import { formatMetricNumber } from '@/utils/formatters';
 import { getHeartIntradayMarkerPresentation, mapHeartIntradayMarkersToTrendMarkers } from '@/utils/heartChartMarkers';
 
-const HEART_POINT_INTERVAL_MINUTES = 5;
+const DEFAULT_HEART_POINT_INTERVAL_MINUTES = 5;
 const LOAD_MORE_EDGE_THRESHOLD_POINTS = 2;
 const LOAD_MORE_TRIGGER_DRAG_PX = 18;
 const SNAP_DURATION_MS = 110;
 const FOCUS_ZOOM_DURATION_MS = 220;
+const PRECISION_SWAP_FADE_DURATION_MS = 180;
 const Y_AXIS_LAG_DURATION_MS = 180;
 const HEART_CHART_VIEWBOX_HEIGHT = 40;
 const MARKER_BADGE_SIZE = 24;
@@ -99,6 +101,12 @@ interface HeartPlotAnimationInputs {
   focusedDomainMin: SharedValue<number>;
   focusedDomainMax: SharedValue<number>;
   isFocusDomainSourceFrozen: SharedValue<number>;
+  isTimelineDomainSourceFrozen: SharedValue<number>;
+  timelineDomainTransitionProgress: SharedValue<number>;
+  timelineSourceDomainMin: SharedValue<number>;
+  timelineSourceDomainMax: SharedValue<number>;
+  timelineTargetDomainMin: SharedValue<number>;
+  timelineTargetDomainMax: SharedValue<number>;
   windowDomains: ReturnType<typeof buildHeartWindowDomains>;
 }
 
@@ -222,7 +230,7 @@ export function getHeartViewportZoomScale(baseWindowPointCount: number, windowPo
 
 function parseHeartAxisLabelMinutes(label: string) {
   const trimmed = label.trim();
-  const match = /^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)$/i.exec(trimmed);
+  const match = /^(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?\s*(AM|PM)$/i.exec(trimmed);
 
   if (!match) {
     return null;
@@ -230,14 +238,15 @@ function parseHeartAxisLabelMinutes(label: string) {
 
   const rawHours = Number(match[1]);
   const minutes = Number(match[2] ?? '0');
-  const meridiem = match[3]?.toUpperCase();
+  const seconds = Number(match[3] ?? '0');
+  const meridiem = match[4]?.toUpperCase();
 
-  if (!Number.isFinite(rawHours) || !Number.isFinite(minutes)) {
+  if (!Number.isFinite(rawHours) || !Number.isFinite(minutes) || !Number.isFinite(seconds)) {
     return null;
   }
 
   const normalizedHours = rawHours % 12 + (meridiem === 'PM' ? 12 : 0);
-  return normalizedHours * 60 + minutes;
+  return normalizedHours * 60 + minutes + seconds / 60;
 }
 
 export function buildHeartViewportDayLabel(
@@ -245,6 +254,7 @@ export function buildHeartViewportDayLabel(
   windowPointCount: number,
   anchorDayKey?: string,
   windowStart?: number,
+  pointIntervalMinutes = DEFAULT_HEART_POINT_INTERVAL_MINUTES,
 ) {
   if (!anchorDayKey || points.length === 0) {
     return null;
@@ -267,7 +277,7 @@ export function buildHeartViewportDayLabel(
   const pointsFromNewest = Math.max(0, points.length - 1 - midpointIndex);
   const anchorDate = new Date(`${anchorDayKey}T00:00:00`);
   const latestPointDate = addMinutes(anchorDate, latestPointMinutes);
-  const viewportMidpointDate = addMinutes(latestPointDate, -pointsFromNewest * HEART_POINT_INTERVAL_MINUTES);
+  const viewportMidpointDate = addMinutes(latestPointDate, -pointsFromNewest * pointIntervalMinutes);
 
   return formatShortDate(viewportMidpointDate);
 }
@@ -305,6 +315,7 @@ export function buildHeartAxisLabels(
   windowPointCount: number,
   anchorDayKey?: string,
   windowStart?: number,
+  pointIntervalMinutes = DEFAULT_HEART_POINT_INTERVAL_MINUTES,
 ): [string | undefined, string | undefined, string | undefined] {
   if (points.length === 0) {
     return [undefined, undefined, undefined];
@@ -315,7 +326,13 @@ export function buildHeartAxisLabels(
   const safeWindowStart = clamp(windowStart ?? maxWindowStart, 0, maxWindowStart);
   const visiblePoints = points.slice(safeWindowStart, safeWindowStart + safeWindowPointCount);
   const firstLabel = visiblePoints[0]?.label;
-  const viewportDayLabel = buildHeartViewportDayLabel(points, safeWindowPointCount, anchorDayKey, safeWindowStart);
+  const viewportDayLabel = buildHeartViewportDayLabel(
+    points,
+    safeWindowPointCount,
+    anchorDayKey,
+    safeWindowStart,
+    pointIntervalMinutes,
+  );
   const leadingLabel =
     safeWindowStart < maxWindowStart && viewportDayLabel
       ? firstLabel
@@ -483,13 +500,26 @@ function getHeartPlotTransform(baseDomain: ReturnType<typeof buildTrendDomain>, 
   const animatedVisibleDomain = inputs.windowDomains
     ? interpolateHeartDomain(inputs.animatedDomainWindowStart.value, inputs.windowDomains.mins, inputs.windowDomains.maxs)
     : null;
+  const timelineVisibleDomain =
+    inputs.isTimelineDomainSourceFrozen.value > 0
+      ? {
+          min:
+            inputs.timelineSourceDomainMin.value +
+            (inputs.timelineTargetDomainMin.value - inputs.timelineSourceDomainMin.value) *
+              inputs.timelineDomainTransitionProgress.value,
+          max:
+            inputs.timelineSourceDomainMax.value +
+            (inputs.timelineTargetDomainMax.value - inputs.timelineSourceDomainMax.value) *
+              inputs.timelineDomainTransitionProgress.value,
+        }
+      : animatedVisibleDomain;
   const transitionSourceDomain =
     inputs.isFocusDomainSourceFrozen.value > 0
       ? {
           min: inputs.focusSourceDomainMin.value,
           max: inputs.focusSourceDomainMax.value,
         }
-      : animatedVisibleDomain;
+      : timelineVisibleDomain;
   const focusedDomain =
     inputs.isFocusDomainSourceFrozen.value > 0
       ? {
@@ -577,6 +607,14 @@ interface HeartMarkerVisual {
   startX: number;
   testID?: string;
   timeLabel: string;
+}
+
+interface PrecisionSwapOverlay {
+  areas: string[];
+  bridgePaths: string[];
+  chartEndX: number;
+  guideLineY: number;
+  linePaths: string[];
 }
 
 interface HeartSleepStageHighlight {
@@ -683,6 +721,61 @@ function buildHeartSleepStageHighlights(
     testID: testIDPrefix ? `${testIDPrefix}-stage-highlight-${stage}-${index}` : undefined,
     width: Math.max((span.endRatio - span.startRatio) * sessionWidth, 1),
   }));
+}
+
+function buildPrecisionSwapOverlay(params: {
+  marker: HeartIntradayMarker | null;
+  points: readonly TrendPoint[];
+  viewportWidth: number;
+  windowPointCount: number;
+  windowStart: number;
+}): PrecisionSwapOverlay | null {
+  const { marker, points, viewportWidth, windowPointCount, windowStart } = params;
+
+  if (viewportWidth <= 0 || points.length === 0) {
+    return null;
+  }
+
+  const safeWindowPointCount = Math.min(Math.max(windowPointCount, 2), Math.max(points.length, 1));
+  const maxWindowStart = Math.max(0, points.length - safeWindowPointCount);
+  const safeWindowStart = clamp(windowStart, 0, maxWindowStart);
+  const visiblePoints = points.slice(safeWindowStart, safeWindowStart + safeWindowPointCount);
+
+  if (visiblePoints.length === 0) {
+    return null;
+  }
+
+  const domain =
+    buildHeartMarkerDomain(points, marker) ??
+    buildVisibleHeartDomain(points, safeWindowPointCount, safeWindowStart) ??
+    buildTrendDomain(visiblePoints, { mode: 'line' });
+
+  if (!domain) {
+    return null;
+  }
+
+  const pointSpacing = getHeartViewportPointSpacing(viewportWidth, safeWindowPointCount);
+  const coordinates = buildHeartCoordinates(visiblePoints, domain, pointSpacing);
+  const geometry = buildTrendLineGeometry(coordinates);
+  const linePaths = geometry.segments.map((segment) => buildLine(segment));
+  const bridgePaths = geometry.bridges.map((bridge) => buildLine(bridge));
+  const areas = geometry.segments
+    .filter((segment) => segment.length >= 2)
+    .map((segment) => {
+      const path = buildLine(segment);
+      const startX = segment[0]?.x ?? 0;
+      const endX = segment.at(-1)?.x ?? startX;
+
+      return `${path} L ${endX} ${TREND_VIEWBOX_BASELINE} L ${startX} ${TREND_VIEWBOX_BASELINE} Z`;
+    });
+
+  return {
+    areas,
+    bridgePaths,
+    chartEndX: Math.max(viewportWidth, pointSpacing),
+    guideLineY: domain.min < 0 && domain.max > 0 ? mapTrendValueToY(0, domain) : 24,
+    linePaths,
+  };
 }
 
 function HeartMarkerBadge({
@@ -804,9 +897,11 @@ export function PannableHeartChart({
   onActivityDraftChange,
   onFocusedMarkerChange,
   onFocusTransitionStateChange,
+  onPresetZoomTransitionStateChange,
   onLoadMore,
   onViewportWindowChange,
   onViewingLatestWindowChange,
+  pointIntervalMinutes = DEFAULT_HEART_POINT_INTERVAL_MINUTES,
   points,
   requestedFocusedMarker = null,
   requestedFocusedMarkerId,
@@ -827,9 +922,11 @@ export function PannableHeartChart({
   onActivityDraftChange?: (draft: HeartActivityDraft) => void;
   onFocusedMarkerChange?: (marker: HeartIntradayMarker | null) => void;
   onFocusTransitionStateChange?: (isTransitioning: boolean) => void;
+  onPresetZoomTransitionStateChange?: (isTransitioning: boolean) => void;
   onLoadMore?: () => void;
   onViewportWindowChange?: (window: HeartViewportWindowState) => void;
   onViewingLatestWindowChange?: (isViewingLatestWindow: boolean) => void;
+  pointIntervalMinutes?: number;
   points: TrendPoint[];
   requestedFocusedMarker?: HeartIntradayMarker | null;
   requestedFocusedMarkerId?: string | null;
@@ -838,6 +935,7 @@ export function PannableHeartChart({
 }) {
   const [viewportWidth, setViewportWidth] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(height);
+  const [precisionSwapOverlay, setPrecisionSwapOverlay] = useState<PrecisionSwapOverlay | null>(null);
   const baseWindowPointCount = Math.min(Math.max(windowPointCount, 2), Math.max(points.length, 1));
   const [activeWindowPointCount, setActiveWindowPointCount] = useState(baseWindowPointCount);
   const activeWindowPointCountRef = useRef(baseWindowPointCount);
@@ -856,11 +954,22 @@ export function PannableHeartChart({
   const draftGestureOriginRef = useRef<HeartActivityDraft | null>(activityDraft ?? null);
   const latestActivityDraftRef = useRef<HeartActivityDraft | null>(activityDraft);
   const previousRequestedFocusedMarkerRef = useRef<HeartIntradayMarker | null>(null);
+  const previousPrecisionContextRef = useRef({
+    markers,
+    points,
+    pointIntervalMinutes,
+  });
+  const previousTimelineZoomContextRef = useRef({
+    baseWindowPointCount,
+    pointIntervalMinutes,
+    resetKey,
+  });
   const requestedFocusMarkerIdRef = useRef<string | null>(null);
   const pendingLoadMoreRef = useRef(false);
   const previousJumpToLatestSignalRef = useRef<number | undefined>(jumpToLatestSignal);
   const skipLatestWindowChangeRef = useRef(true);
   const focusTransitionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const presetZoomTransitionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const chartId = useId().replace(/[:]/g, '');
   const acquireScreenScrollLock = useAcquireScreenScrollLock();
 
@@ -874,6 +983,8 @@ export function PannableHeartChart({
   const viewportZoomScale = useSharedValue(1);
   const viewportZoomAnchorIndex = useSharedValue(maxWindowStart);
   const viewportZoomAnchorScreenX = useSharedValue(0);
+  const precisionSwapHasOverlay = useSharedValue(0);
+  const precisionSwapProgress = useSharedValue(1);
 
   const pointSpacing = getHeartViewportPointSpacing(viewportWidth, safeWindowPointCount);
   const basePointSpacing = getHeartViewportPointSpacing(viewportWidth, baseWindowPointCount);
@@ -890,6 +1001,12 @@ export function PannableHeartChart({
   const focusTargetDomainMin = useSharedValue(baseDomain?.min ?? 0);
   const focusTargetDomainMax = useSharedValue(baseDomain?.max ?? 1);
   const isFocusDomainSourceFrozen = useSharedValue(0);
+  const isTimelineDomainSourceFrozen = useSharedValue(0);
+  const timelineDomainTransitionProgress = useSharedValue(1);
+  const timelineSourceDomainMin = useSharedValue(visibleDomain?.min ?? baseDomain?.min ?? 0);
+  const timelineSourceDomainMax = useSharedValue(visibleDomain?.max ?? baseDomain?.max ?? 1);
+  const timelineTargetDomainMin = useSharedValue(visibleDomain?.min ?? baseDomain?.min ?? 0);
+  const timelineTargetDomainMax = useSharedValue(visibleDomain?.max ?? baseDomain?.max ?? 1);
   const focusedDomainMin = useSharedValue(baseDomain?.min ?? 0);
   const focusedDomainMax = useSharedValue(baseDomain?.max ?? 1);
   const windowDomains = useMemo(
@@ -965,8 +1082,8 @@ export function PannableHeartChart({
   );
 
   const axisLabels = useMemo(
-    () => buildHeartAxisLabels(points, safeWindowPointCount, anchorDayKey, windowStart),
-    [anchorDayKey, points, safeWindowPointCount, windowStart],
+    () => buildHeartAxisLabels(points, safeWindowPointCount, anchorDayKey, windowStart, pointIntervalMinutes),
+    [anchorDayKey, pointIntervalMinutes, points, safeWindowPointCount, windowStart],
   );
   const focusedMarker = useMemo(
     () => markers.find((marker) => marker.id === focusedMarkerId) ?? (focusedMarkerId !== null ? requestedFocusedMarker : null),
@@ -978,6 +1095,12 @@ export function PannableHeartChart({
     },
     [onFocusTransitionStateChange],
   );
+  const reportPresetZoomTransitionStateChange = useCallback(
+    (isTransitioning: boolean) => {
+      onPresetZoomTransitionStateChange?.(isTransitioning);
+    },
+    [onPresetZoomTransitionStateChange],
+  );
   const clearFocusTransitionTimeout = useCallback(() => {
     if (focusTransitionTimeoutRef.current === null) {
       return;
@@ -986,6 +1109,14 @@ export function PannableHeartChart({
     clearTimeout(focusTransitionTimeoutRef.current);
     focusTransitionTimeoutRef.current = null;
   }, []);
+  const clearPresetZoomTransitionTimeout = useCallback(() => {
+    if (presetZoomTransitionTimeoutRef.current === null) {
+      return;
+    }
+
+    clearTimeout(presetZoomTransitionTimeoutRef.current);
+    presetZoomTransitionTimeoutRef.current = null;
+  }, []);
   const scheduleFocusTransitionSettled = useCallback(() => {
     clearFocusTransitionTimeout();
     focusTransitionTimeoutRef.current = setTimeout(() => {
@@ -993,6 +1124,16 @@ export function PannableHeartChart({
       reportFocusTransitionStateChange(false);
     }, FOCUS_ZOOM_DURATION_MS);
   }, [clearFocusTransitionTimeout, reportFocusTransitionStateChange]);
+  const schedulePresetZoomTransitionSettled = useCallback(
+    (durationMs: number) => {
+      clearPresetZoomTransitionTimeout();
+      presetZoomTransitionTimeoutRef.current = setTimeout(() => {
+        presetZoomTransitionTimeoutRef.current = null;
+        reportPresetZoomTransitionStateChange(false);
+      }, durationMs);
+    },
+    [clearPresetZoomTransitionTimeout, reportPresetZoomTransitionStateChange],
+  );
   const focusedMarkerDomain = useMemo(
     () => buildHeartMarkerDomain(points, focusedMarker),
     [focusedMarker, points],
@@ -1012,17 +1153,17 @@ export function PannableHeartChart({
     () => buildHeartSleepStageSelectionRanges(points.length, focusedMarker, highlightedSleepStage),
     [focusedMarker, highlightedSleepStage, points.length],
   );
-  const draftVisibleWindowStartMinuteOffset = windowStart * HEART_POINT_INTERVAL_MINUTES;
+  const draftVisibleWindowStartMinuteOffset = windowStart * pointIntervalMinutes;
   const draftVisibleWindowEndMinuteOffset = Math.max(
     draftVisibleWindowStartMinuteOffset + MIN_ACTIVITY_DRAFT_MINUTE_SPAN,
-    (windowStart + safeWindowPointCount - 1) * HEART_POINT_INTERVAL_MINUTES,
+    (windowStart + safeWindowPointCount - 1) * pointIntervalMinutes,
   );
   const activityDraftVisual = useMemo(() => {
     if (!activityDraft || viewportWidth <= 0 || pointSpacing <= 0 || viewportHeight <= 0) {
       return null;
     }
 
-    const minuteSpacing = pointSpacing / HEART_POINT_INTERVAL_MINUTES;
+    const minuteSpacing = pointSpacing / pointIntervalMinutes;
     if (minuteSpacing <= 0) {
       return null;
     }
@@ -1386,6 +1527,135 @@ export function PannableHeartChart({
     ],
   );
 
+  const runPrecisionSwapOverlay = useCallback(
+    (
+      previousContext: {
+        marker: HeartIntradayMarker | null;
+        points: readonly TrendPoint[];
+        windowPointCount: number;
+        windowStart: number;
+      },
+      durationMs = PRECISION_SWAP_FADE_DURATION_MS,
+    ) => {
+      const nextPrecisionSwapOverlay = buildPrecisionSwapOverlay({
+        marker: previousContext.marker,
+        points: previousContext.points,
+        viewportWidth,
+        windowPointCount: previousContext.windowPointCount,
+        windowStart: previousContext.windowStart,
+      });
+
+      cancelAnimation(precisionSwapProgress);
+
+      if (!nextPrecisionSwapOverlay) {
+        precisionSwapHasOverlay.value = 0;
+        precisionSwapProgress.value = 1;
+        setPrecisionSwapOverlay(null);
+        return;
+      }
+
+      setPrecisionSwapOverlay(nextPrecisionSwapOverlay);
+      precisionSwapHasOverlay.value = 1;
+      precisionSwapProgress.value = 0;
+      precisionSwapProgress.value = withTiming(
+        1,
+        {
+          duration: durationMs,
+          easing: Easing.out(Easing.cubic),
+        },
+        (finished) => {
+          if (!finished) {
+            return;
+          }
+
+          precisionSwapHasOverlay.value = 0;
+          runOnJS(setPrecisionSwapOverlay)(null);
+        },
+      );
+    },
+    [cancelAnimation, precisionSwapHasOverlay, precisionSwapProgress, viewportWidth],
+  );
+
+  const syncFocusedWindowInstant = useCallback(
+    (
+      nextWindowPointCount: number,
+      nextWindowStart: number,
+      nextFocusedMarkerId: string | null,
+      nextViewportZoomAnchorIndex?: number,
+    ) => {
+      const previousPrecisionContext = previousPrecisionContextRef.current;
+      const previousFocusedMarker =
+        previousPrecisionContext.markers.find((marker) => marker.id === focusedMarkerId) ??
+        previousRequestedFocusedMarkerRef.current ??
+        null;
+      const resolvedWindowPointCount = Math.min(Math.max(nextWindowPointCount, 2), Math.max(points.length, 1));
+      const nextMaxWindowStart = Math.max(0, points.length - resolvedWindowPointCount);
+      const clampedWindowStart = clamp(nextWindowStart, 0, nextMaxWindowStart);
+      const nextZoomScale = getHeartViewportZoomScale(baseWindowPointCount, resolvedWindowPointCount);
+      const nextAnchorIndex = clamp(
+        nextViewportZoomAnchorIndex ?? clampedWindowStart,
+        0,
+        Math.max(points.length - 1, 0),
+      );
+      const nextAnchorScreenX = nextZoomScale * (nextAnchorIndex - clampedWindowStart) * chartPointSpacing;
+
+      pendingLoadMoreRef.current = false;
+      loadRequested.value = false;
+      commitSelection(null);
+      releaseScrollLock();
+      cancelAnimation(animatedWindowStart);
+      cancelAnimation(viewportZoomScale);
+      cancelAnimation(viewportZoomAnchorScreenX);
+      isAxisDragging.value = false;
+      isFocusDomainSourceFrozen.value = 0;
+
+      activeWindowPointCountRef.current = resolvedWindowPointCount;
+      windowStartRef.current = clampedWindowStart;
+      gestureStartWindowStart.value = clampedWindowStart;
+      reportedWindowStart.value = clampedWindowStart;
+      viewportZoomAnchorIndex.value = nextAnchorIndex;
+      animatedWindowStart.value = clampedWindowStart;
+      viewportZoomScale.value = nextZoomScale;
+      viewportZoomAnchorScreenX.value = nextAnchorScreenX;
+
+      startTransition(() => {
+        setActiveWindowPointCount(resolvedWindowPointCount);
+        setFocusedMarkerId(nextFocusedMarkerId);
+        setWindowStart(clampedWindowStart);
+      });
+
+      runPrecisionSwapOverlay(
+        {
+          marker: previousFocusedMarker,
+          points: previousPrecisionContext.points,
+          windowPointCount: activeWindowPointCountRef.current,
+          windowStart: windowStartRef.current,
+        },
+        PRECISION_SWAP_FADE_DURATION_MS,
+      );
+    },
+    [
+      animatedWindowStart,
+      baseWindowPointCount,
+      cancelAnimation,
+      chartPointSpacing,
+      commitSelection,
+      focusedMarkerId,
+      gestureStartWindowStart,
+      isAxisDragging,
+      isFocusDomainSourceFrozen,
+      loadRequested,
+      points.length,
+      releaseScrollLock,
+      reportedWindowStart,
+      runPrecisionSwapOverlay,
+      viewportWidth,
+      viewportZoomAnchorIndex,
+      viewportZoomAnchorScreenX,
+      viewportZoomScale,
+    ],
+  );
+
   const handleMarkerZoomPress = useCallback(
     (marker: HeartMarkerVisual) => {
       if (!marker.isZoomable) {
@@ -1418,6 +1688,18 @@ export function PannableHeartChart({
       return;
     }
 
+    const previousRequestedMarker = previousRequestedFocusedMarkerRef.current;
+    const previousPrecisionContext = previousPrecisionContextRef.current;
+    const isPrecisionSwapForFocusedMarker =
+      focusedMarkerId !== null &&
+      focusedMarkerId === requestedFocusedMarker.id &&
+      (
+        previousPrecisionContext.points.length !== points.length ||
+        previousPrecisionContext.pointIntervalMinutes !== pointIntervalMinutes ||
+        previousRequestedMarker?.startFraction !== requestedFocusedMarker.startFraction ||
+        previousRequestedMarker?.endFraction !== requestedFocusedMarker.endFraction
+      );
+
     previousRequestedFocusedMarkerRef.current = requestedFocusedMarker;
 
     if (previousWindowBeforeFocusRef.current === null) {
@@ -1436,13 +1718,39 @@ export function PannableHeartChart({
       ((requestedFocusedMarker.startFraction + requestedFocusedMarker.endFraction) / 2) *
       Math.max(points.length - 1, 0);
 
+    if (isPrecisionSwapForFocusedMarker) {
+      syncFocusedWindowInstant(
+        focusedWindow.windowPointCount,
+        focusedWindow.windowStart,
+        requestedFocusedMarker.id,
+        markerCenterIndex,
+      );
+      return;
+    }
+
     applyWindowZoom(
       focusedWindow.windowPointCount,
       focusedWindow.windowStart,
       requestedFocusedMarker.id,
       markerCenterIndex,
     );
-  }, [applyWindowZoom, baseWindowPointCount, points.length, requestedFocusedMarker]);
+  }, [
+    applyWindowZoom,
+    baseWindowPointCount,
+    focusedMarkerId,
+    pointIntervalMinutes,
+    points.length,
+    requestedFocusedMarker,
+    syncFocusedWindowInstant,
+  ]);
+
+  useEffect(() => {
+    previousPrecisionContextRef.current = {
+      markers,
+      points,
+      pointIntervalMinutes,
+    };
+  }, [markers, pointIntervalMinutes, points]);
 
   useEffect(() => {
     if (!requestedFocusedMarkerId || requestedFocusedMarkerId === requestedFocusMarkerIdRef.current) {
@@ -1530,10 +1838,23 @@ export function PannableHeartChart({
 
   useLayoutEffect(() => {
     const previousPointCount = previousPointCountRef.current;
+    const previousTimelineZoomContext = previousTimelineZoomContextRef.current;
     const previousMaxWindowStart = Math.max(0, previousPointCount - safeWindowPointCount);
     const pointCountDelta = points.length - previousPointCount;
+    const isExternalTimelineZoomChange =
+      previousTimelineZoomContext.resetKey === resetKey &&
+      focusedMarkerId === null &&
+      requestedFocusedMarker === null &&
+      !requestedFocusedMarkerId &&
+      (previousTimelineZoomContext.baseWindowPointCount !== baseWindowPointCount ||
+        previousTimelineZoomContext.pointIntervalMinutes !== pointIntervalMinutes);
 
     if (pointCountDelta === 0) {
+      return;
+    }
+
+    if (isExternalTimelineZoomChange) {
+      previousPointCountRef.current = points.length;
       return;
     }
 
@@ -1567,11 +1888,17 @@ export function PannableHeartChart({
     syncWindowStart(nextWindowStart);
   }, [
     animatedWindowStart,
+    baseWindowPointCount,
+    focusedMarkerId,
     gestureStartWindowStart,
     loadRequested,
     maxWindowStart,
+    pointIntervalMinutes,
     points.length,
     reportedWindowStart,
+    requestedFocusedMarker,
+    requestedFocusedMarkerId,
+    resetKey,
     safeWindowPointCount,
     syncWindowStart,
     viewportZoomAnchorIndex,
@@ -1597,13 +1924,16 @@ export function PannableHeartChart({
     reportedWindowStart.value = nextWindowStart;
     isAxisDragging.value = false;
     clearFocusTransitionTimeout();
+    clearPresetZoomTransitionTimeout();
     isFocusDomainSourceFrozen.value = 0;
+    isTimelineDomainSourceFrozen.value = 0;
+    timelineDomainTransitionProgress.value = 1;
     viewportZoomScale.value = 1;
     viewportZoomAnchorIndex.value = nextWindowStart;
     viewportZoomAnchorScreenX.value = 0;
+    reportPresetZoomTransitionStateChange(false);
   }, [
     animatedWindowStart,
-    baseWindowPointCount,
     cancelAnimation,
     chartPointSpacingValue,
     commitSelection,
@@ -1611,9 +1941,204 @@ export function PannableHeartChart({
     isAxisDragging,
     loadRequested,
     clearFocusTransitionTimeout,
+    clearPresetZoomTransitionTimeout,
     reportedWindowStart,
+    reportPresetZoomTransitionStateChange,
     resetKey,
     isFocusDomainSourceFrozen,
+    isTimelineDomainSourceFrozen,
+    timelineDomainTransitionProgress,
+    viewportZoomAnchorIndex,
+    viewportZoomAnchorScreenX,
+    viewportZoomScale,
+  ]);
+
+  useLayoutEffect(() => {
+    const previousTimelineZoomContext = previousTimelineZoomContextRef.current;
+    previousTimelineZoomContextRef.current = {
+      baseWindowPointCount,
+      pointIntervalMinutes,
+      resetKey,
+    };
+
+    if (previousTimelineZoomContext.resetKey !== resetKey) {
+      return;
+    }
+
+    if (
+      previousTimelineZoomContext.baseWindowPointCount === baseWindowPointCount &&
+      previousTimelineZoomContext.pointIntervalMinutes === pointIntervalMinutes
+    ) {
+      return;
+    }
+
+    if (points.length === 0 || focusedMarkerId !== null || requestedFocusedMarker !== null || requestedFocusedMarkerId) {
+      return;
+    }
+
+    const previousPrecisionContext = previousPrecisionContextRef.current;
+
+    if (previousPrecisionContext.points.length === 0) {
+      return;
+    }
+
+    const previousWindowPointCount = activeWindowPointCountRef.current;
+    const previousWindowStart = windowStartRef.current;
+    const previousVisibleDurationMinutes = Math.max(
+      Math.max(previousWindowPointCount - 1, 0) * previousTimelineZoomContext.pointIntervalMinutes,
+      previousTimelineZoomContext.pointIntervalMinutes,
+    );
+    const nextVisibleDurationMinutes = Math.max(
+      Math.max(baseWindowPointCount - 1, 0) * pointIntervalMinutes,
+      pointIntervalMinutes,
+    );
+    const previousWindowCenterIndex = previousWindowStart + Math.max(previousWindowPointCount - 1, 0) / 2;
+    const previousCenterPointsFromNewest = Math.max(
+      previousPrecisionContext.points.length - 1 - previousWindowCenterIndex,
+      0,
+    );
+    const previousCenterMinutesFromLatest =
+      previousCenterPointsFromNewest * previousTimelineZoomContext.pointIntervalMinutes;
+    const nextCenterIndex = clamp(
+      Math.round(
+        Math.max(points.length - 1 - previousCenterMinutesFromLatest / Math.max(pointIntervalMinutes, 1 / 60), 0),
+      ),
+      0,
+      Math.max(points.length - 1, 0),
+    );
+    const nextMaxWindowStart = Math.max(0, points.length - baseWindowPointCount);
+    const clampedWindowStart = clamp(
+      Math.round(nextCenterIndex - Math.max(baseWindowPointCount - 1, 0) / 2),
+      0,
+      nextMaxWindowStart,
+    );
+    const finalAnchorScreenX = (nextCenterIndex - clampedWindowStart) * chartPointSpacing;
+    const initialZoomScale = clamp(nextVisibleDurationMinutes / previousVisibleDurationMinutes, 0.5, 6);
+    const centerAnchorScreenX = viewportWidth > 0 ? viewportWidth / 2 : finalAnchorScreenX;
+    const shouldPanAfterZoom =
+      viewportWidth > 0 && Math.abs(finalAnchorScreenX - centerAnchorScreenX) > chartPointSpacing / 2;
+    const hasViewportDurationChange =
+      Math.abs(nextVisibleDurationMinutes - previousVisibleDurationMinutes) > Number.EPSILON;
+    const previousVisibleDomain =
+      buildVisibleHeartDomain(previousPrecisionContext.points, previousWindowPointCount, previousWindowStart) ??
+      buildTrendDomain(previousPrecisionContext.points as TrendPoint[], { mode: 'line' });
+    const nextVisibleDomain = buildVisibleHeartDomain(points, baseWindowPointCount, clampedWindowStart) ?? baseDomain;
+    const presetZoomTransitionDurationMs = shouldPanAfterZoom
+      ? FOCUS_ZOOM_DURATION_MS + SNAP_DURATION_MS
+      : FOCUS_ZOOM_DURATION_MS;
+
+    pendingLoadMoreRef.current = false;
+    loadRequested.value = false;
+    commitSelection(null);
+    releaseScrollLock();
+    cancelAnimation(animatedWindowStart);
+    cancelAnimation(viewportZoomScale);
+    cancelAnimation(viewportZoomAnchorScreenX);
+    isAxisDragging.value = false;
+    clearFocusTransitionTimeout();
+    clearPresetZoomTransitionTimeout();
+    isFocusDomainSourceFrozen.value = 0;
+    cancelAnimation(timelineDomainTransitionProgress);
+    previousWindowBeforeFocusRef.current = null;
+
+    if (
+      previousTimelineZoomContext.pointIntervalMinutes !== pointIntervalMinutes &&
+      previousVisibleDomain &&
+      nextVisibleDomain
+    ) {
+      timelineSourceDomainMin.value = previousVisibleDomain.min;
+      timelineSourceDomainMax.value = previousVisibleDomain.max;
+      timelineTargetDomainMin.value = nextVisibleDomain.min;
+      timelineTargetDomainMax.value = nextVisibleDomain.max;
+      isTimelineDomainSourceFrozen.value = 1;
+      timelineDomainTransitionProgress.value = 0;
+      timelineDomainTransitionProgress.value = withTiming(
+        1,
+        {
+          duration: Y_AXIS_LAG_DURATION_MS,
+          easing: Easing.out(Easing.cubic),
+        },
+        (finished) => {
+          if (!finished) {
+            return;
+          }
+
+          isTimelineDomainSourceFrozen.value = 0;
+        },
+      );
+    } else {
+      isTimelineDomainSourceFrozen.value = 0;
+      timelineDomainTransitionProgress.value = 1;
+    }
+
+    if (hasViewportDurationChange) {
+      reportPresetZoomTransitionStateChange(true);
+      schedulePresetZoomTransitionSettled(presetZoomTransitionDurationMs);
+    } else {
+      reportPresetZoomTransitionStateChange(false);
+    }
+
+    activeWindowPointCountRef.current = baseWindowPointCount;
+    windowStartRef.current = clampedWindowStart;
+    gestureStartWindowStart.value = clampedWindowStart;
+    reportedWindowStart.value = clampedWindowStart;
+    viewportZoomAnchorIndex.value = nextCenterIndex;
+    animatedWindowStart.value = clampedWindowStart;
+    viewportZoomScale.value = initialZoomScale;
+    viewportZoomAnchorScreenX.value = centerAnchorScreenX;
+
+    startTransition(() => {
+      setActiveWindowPointCount(baseWindowPointCount);
+      setFocusedMarkerId(null);
+      setWindowStart(clampedWindowStart);
+    });
+
+    viewportZoomScale.value = withTiming(1, {
+      duration: FOCUS_ZOOM_DURATION_MS,
+      easing: Easing.out(Easing.cubic),
+    });
+    viewportZoomAnchorScreenX.value = shouldPanAfterZoom
+      ? withDelay(
+          FOCUS_ZOOM_DURATION_MS,
+          withTiming(finalAnchorScreenX, {
+            duration: SNAP_DURATION_MS,
+            easing: Easing.out(Easing.cubic),
+          }),
+        )
+      : withTiming(finalAnchorScreenX, {
+          duration: FOCUS_ZOOM_DURATION_MS,
+          easing: Easing.out(Easing.cubic),
+        });
+  }, [
+    animatedWindowStart,
+    baseWindowPointCount,
+    cancelAnimation,
+    chartPointSpacing,
+    clearFocusTransitionTimeout,
+    clearPresetZoomTransitionTimeout,
+    commitSelection,
+    focusedMarkerId,
+    gestureStartWindowStart,
+    isAxisDragging,
+    isFocusDomainSourceFrozen,
+    loadRequested,
+    pointIntervalMinutes,
+    timelineDomainTransitionProgress,
+    timelineSourceDomainMax,
+    timelineSourceDomainMin,
+    timelineTargetDomainMax,
+    timelineTargetDomainMin,
+    isTimelineDomainSourceFrozen,
+    points.length,
+    releaseScrollLock,
+    reportPresetZoomTransitionStateChange,
+    reportedWindowStart,
+    resetKey,
+    requestedFocusedMarker,
+    requestedFocusedMarkerId,
+    schedulePresetZoomTransitionSettled,
+    baseDomain,
+    viewportWidth,
     viewportZoomAnchorIndex,
     viewportZoomAnchorScreenX,
     viewportZoomScale,
@@ -1665,8 +2190,12 @@ export function PannableHeartChart({
   }, [onViewportWindowChange, safeWindowPointCount, windowStart]);
 
   useEffect(() => {
+    if (focusedMarker === null && (requestedFocusedMarker !== null || requestedFocusedMarkerId)) {
+      return;
+    }
+
     onFocusedMarkerChange?.(focusedMarker);
-  }, [focusedMarker, onFocusedMarkerChange]);
+  }, [focusedMarker, onFocusedMarkerChange, requestedFocusedMarker, requestedFocusedMarkerId]);
 
   useEffect(() => {
     cancelAnimation(focusTransitionProgress);
@@ -1708,8 +2237,9 @@ export function PannableHeartChart({
   useEffect(
     () => () => {
       clearFocusTransitionTimeout();
+      clearPresetZoomTransitionTimeout();
     },
-    [clearFocusTransitionTimeout],
+    [clearFocusTransitionTimeout, clearPresetZoomTransitionTimeout],
   );
 
   useEffect(() => releaseScrollLock, [releaseScrollLock]);
@@ -1727,16 +2257,16 @@ export function PannableHeartChart({
         return;
       }
 
-      const minuteSpacing = pointSpacing / HEART_POINT_INTERVAL_MINUTES;
+      const minuteSpacing = pointSpacing / pointIntervalMinutes;
       if (minuteSpacing <= 0) {
         return;
       }
 
       const deltaMinutes = Math.round(dx / minuteSpacing);
-      const visibleWindowStartMinuteOffset = windowStartRef.current * HEART_POINT_INTERVAL_MINUTES;
+      const visibleWindowStartMinuteOffset = windowStartRef.current * pointIntervalMinutes;
       const visibleWindowEndMinuteOffset = Math.max(
         visibleWindowStartMinuteOffset + MIN_ACTIVITY_DRAFT_MINUTE_SPAN,
-        (windowStartRef.current + safeWindowPointCount - 1) * HEART_POINT_INTERVAL_MINUTES,
+        (windowStartRef.current + safeWindowPointCount - 1) * pointIntervalMinutes,
       );
       const originSpanMinutes = Math.max(
         origin.endMinuteOffset - origin.startMinuteOffset,
@@ -1780,7 +2310,7 @@ export function PannableHeartChart({
         startMinuteOffset: nextStartMinuteOffset,
       });
     },
-    [onActivityDraftChange, pointSpacing, safeWindowPointCount],
+    [onActivityDraftChange, pointIntervalMinutes, pointSpacing, safeWindowPointCount],
   );
 
   const finalizeActivityDraftGesture = useCallback(() => {
@@ -1990,6 +2520,12 @@ export function PannableHeartChart({
       focusedDomainMin,
       focusedDomainMax,
       isFocusDomainSourceFrozen,
+      isTimelineDomainSourceFrozen,
+      timelineDomainTransitionProgress,
+      timelineSourceDomainMin,
+      timelineSourceDomainMax,
+      timelineTargetDomainMin,
+      timelineTargetDomainMax,
       windowDomains,
     }),
     [
@@ -2002,6 +2538,12 @@ export function PannableHeartChart({
       focusedDomainMin,
       focusedDomainMax,
       isFocusDomainSourceFrozen,
+      isTimelineDomainSourceFrozen,
+      timelineDomainTransitionProgress,
+      timelineSourceDomainMin,
+      timelineSourceDomainMax,
+      timelineTargetDomainMin,
+      timelineTargetDomainMax,
       windowDomains,
     ],
   );
@@ -2012,10 +2554,34 @@ export function PannableHeartChart({
 
       return {
         matrix: [1, 0, 0, scaleY, 0, translateY],
+        opacity: precisionSwapHasOverlay.value > 0 ? precisionSwapProgress.value : 1,
       };
     },
-    [baseDomain, heartPlotAnimationInputs],
+    [baseDomain, heartPlotAnimationInputs, precisionSwapHasOverlay, precisionSwapProgress],
   );
+
+  const animatedPrecisionSwapOverlayProps = useAnimatedProps(
+    () => ({
+      opacity: precisionSwapHasOverlay.value > 0 ? 1 - precisionSwapProgress.value : 0,
+    }),
+    [precisionSwapHasOverlay, precisionSwapProgress],
+  );
+
+  useEffect(() => {
+    if (points.length > 0) {
+      return;
+    }
+
+    precisionSwapHasOverlay.value = 0;
+    precisionSwapProgress.value = 1;
+    setPrecisionSwapOverlay(null);
+  }, [points.length, precisionSwapHasOverlay, precisionSwapProgress]);
+
+  useLayoutEffect(() => {
+    precisionSwapHasOverlay.value = 0;
+    precisionSwapProgress.value = 1;
+    setPrecisionSwapOverlay(null);
+  }, [precisionSwapHasOverlay, precisionSwapProgress, resetKey]);
 
   if (points.length === 0) {
     return null;
@@ -2256,6 +2822,63 @@ export function PannableHeartChart({
                     ) : null}
                   </AnimatedSvgGroup>
                 </G>
+                {precisionSwapOverlay ? (
+                  <G clipPath={`url(#${chartPlotClipId})`}>
+                    <AnimatedSvgGroup animatedProps={animatedPrecisionSwapOverlayProps}>
+                      <Line
+                        stroke="rgba(149, 162, 188, 0.22)"
+                        strokeDasharray="0.36 0.36"
+                        strokeWidth="0.7"
+                        vectorEffect="non-scaling-stroke"
+                        x1={0}
+                        x2={precisionSwapOverlay.chartEndX}
+                        y1={precisionSwapOverlay.guideLineY}
+                        y2={precisionSwapOverlay.guideLineY}
+                      />
+                      <G mask={`url(#${chartId}-fill-mask)`}>
+                        {precisionSwapOverlay.areas.map((area, index) => (
+                          <Path key={`precision-area-${index}`} d={area} fill={`url(#${chartId}-fill)`} />
+                        ))}
+                      </G>
+                      {precisionSwapOverlay.bridgePaths.map((path, index) => (
+                        <Path
+                          d={path}
+                          fill="none"
+                          key={`precision-bridge-${index}`}
+                          stroke={colors.subtle}
+                          strokeDasharray="1.8 1.8"
+                          strokeLinecap="round"
+                          strokeOpacity="0.72"
+                          strokeWidth="0.68"
+                          vectorEffect="non-scaling-stroke"
+                        />
+                      ))}
+                      <G>
+                        {precisionSwapOverlay.linePaths.map((path, index) => (
+                          <Path
+                            key={`precision-shadow-${index}`}
+                            d={path}
+                            fill="none"
+                            stroke={shadowColor}
+                            strokeWidth="1.6"
+                            vectorEffect="non-scaling-stroke"
+                          />
+                        ))}
+                        {precisionSwapOverlay.linePaths.map((path, index) => (
+                          <Path
+                            key={`precision-line-${index}`}
+                            d={path}
+                            fill="none"
+                            stroke={`url(#${chartId}-stroke)`}
+                            strokeLinecap="round"
+                            strokeWidth="0.8"
+                            vectorEffect="non-scaling-stroke"
+                          />
+                        ))}
+                      </G>
+                    </AnimatedSvgGroup>
+                  </G>
+                ) : null}
               </AnimatedSvgGroup>
             </Svg>
           </Animated.View>

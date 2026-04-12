@@ -4,12 +4,13 @@ import type { HealthCacheScope, HealthRepository } from '@/data/HealthRepository
 import { rebuildAggregateTablesForDebug, refreshDerivedData } from '@/data/sqlite/SQLiteHealthRepository';
 import type { BackgroundSyncState } from '@/types/device';
 import type {
-  DashboardSnapshot,
   DerivedRefreshState,
-  HeartHistorySnapshot,
+  HeartHistoryData,
+  HistoryOverview,
   HistoryRange,
-  SleepHistorySnapshot,
-  WellnessSnapshot,
+  SleepHistoryData,
+  TodayOverview,
+  WellnessData,
 } from '@/types/health';
 import { formatSqliteDateTime } from '@/utils/dateTime';
 
@@ -148,15 +149,24 @@ function toRun(row: PerformanceDiagnosticRunRow, steps: PerformanceDiagnosticSte
   };
 }
 
-function summarizeDashboardSnapshot(snapshot: DashboardSnapshot) {
+function summarizeTodayOverview(overview: TodayOverview) {
   return {
-    heartPoints: snapshot.heartCard.series.length,
-    summaryStats: snapshot.summaryStats.length,
-    hasSleep: snapshot.sleepCard.score !== null,
+    activities: overview.activitySummary.length,
+    hasSleep: overview.sleepCard.score !== null,
+    insights: overview.insights.length,
   } satisfies Record<string, PerformanceDiagnosticValue>;
 }
 
-function summarizeSleepSnapshot(snapshot: SleepHistorySnapshot) {
+function summarizeHistoryOverview(overview: HistoryOverview) {
+  return {
+    activities: overview.activitySummary.length,
+    hasSleep: overview.sleepCard.score !== null,
+    heartPoints: overview.heartCard.series.length,
+    markers: overview.heartCard.markers.length,
+  } satisfies Record<string, PerformanceDiagnosticValue>;
+}
+
+function summarizeSleepHistory(snapshot: SleepHistoryData) {
   return {
     sessions: snapshot.sessions.length,
     scorePoints: snapshot.scoreTrend.length,
@@ -164,7 +174,7 @@ function summarizeSleepSnapshot(snapshot: SleepHistorySnapshot) {
   } satisfies Record<string, PerformanceDiagnosticValue>;
 }
 
-function summarizeHeartSnapshot(snapshot: HeartHistorySnapshot) {
+function summarizeHeartHistory(snapshot: HeartHistoryData) {
   return {
     intradayPoints: snapshot.intraday.length,
     weeklyPoints: snapshot.weeklyResting.length,
@@ -172,12 +182,12 @@ function summarizeHeartSnapshot(snapshot: HeartHistorySnapshot) {
   } satisfies Record<string, PerformanceDiagnosticValue>;
 }
 
-function summarizeWellnessSnapshot(snapshot: WellnessSnapshot) {
+function summarizeWellnessData(data: WellnessData) {
   return {
-    activities: snapshot.activities.length,
-    stressPoints: snapshot.stress.series.length,
-    spo2Points: snapshot.spo2.series.length,
-    recoveryPoints: snapshot.recoveryIndex.series.length,
+    activities: data.activities.length,
+    stressPoints: data.stress.series.length,
+    spo2Points: data.spo2.series.length,
+    recoveryPoints: data.recoveryIndex.series.length,
   } satisfies Record<string, PerformanceDiagnosticValue>;
 }
 
@@ -407,6 +417,7 @@ export async function runFullPerformanceSweep({
   const syncState = backgroundSyncState ?? defaultBackgroundSyncState();
   const heartRowCount = await countHeartRows(db);
   const derivedState = await repository.getDerivedRefreshState();
+  let latestDayKey: string | null = null;
 
   try {
     await measureBooleanStep(
@@ -428,12 +439,30 @@ export async function runFullPerformanceSweep({
       steps,
       repository,
       scope: 'dashboard',
-      warmKey: 'dashboard.read.warm',
-      warmLabel: 'Dashboard warm read',
-      coldKey: 'dashboard.read.cold',
-      coldLabel: 'Dashboard cache-cold read',
-      read: () => repository.getDashboardSnapshot(),
-      summarize: summarizeDashboardSnapshot,
+      warmKey: 'today.read.warm',
+      warmLabel: 'Today overview warm read',
+      coldKey: 'today.read.cold',
+      coldLabel: 'Today overview cache-cold read',
+      read: async () => {
+        const overview = await repository.getTodayOverview();
+        latestDayKey = overview.day.dayKey;
+        return overview;
+      },
+      summarize: summarizeTodayOverview,
+    });
+
+    const historyDayKey = latestDayKey ?? (await repository.getTodayOverview()).day.dayKey;
+
+    await runWarmAndColdReadPair({
+      steps,
+      repository,
+      scope: 'dashboard',
+      warmKey: 'history.read.warm',
+      warmLabel: 'History overview warm read',
+      coldKey: 'history.read.cold',
+      coldLabel: 'History overview cache-cold read',
+      read: () => repository.getHistoryOverview(historyDayKey),
+      summarize: summarizeHistoryOverview,
     });
 
     await runWarmAndColdReadPair({
@@ -445,7 +474,7 @@ export async function runFullPerformanceSweep({
       coldKey: 'sleep.read.cold',
       coldLabel: 'Sleep cache-cold read',
       read: () => repository.getSleepHistory(historyRange),
-      summarize: summarizeSleepSnapshot,
+      summarize: summarizeSleepHistory,
     });
 
     await runWarmAndColdReadPair({
@@ -457,7 +486,7 @@ export async function runFullPerformanceSweep({
       coldKey: 'heart.read.cold',
       coldLabel: 'Heart cache-cold read',
       read: () => repository.getHeartHistory(historyRange),
-      summarize: summarizeHeartSnapshot,
+      summarize: summarizeHeartHistory,
     });
 
     await runWarmAndColdReadPair({
@@ -468,8 +497,8 @@ export async function runFullPerformanceSweep({
       warmLabel: 'Wellness warm read',
       coldKey: 'wellness.read.cold',
       coldLabel: 'Wellness cache-cold read',
-      read: () => repository.getWellnessSnapshot(historyRange),
-      summarize: summarizeWellnessSnapshot,
+      read: () => repository.getWellnessData(historyRange),
+      summarize: summarizeWellnessData,
     });
 
     await measureBooleanStep(
@@ -482,32 +511,31 @@ export async function runFullPerformanceSweep({
     repository.invalidateCaches(['dashboard', 'heart', 'wellness', 'trends']);
     await measureReadStep(
       steps,
-      'dashboard.read.after_aggregate',
-      'Dashboard read after aggregate rebuild',
-      () => repository.getDashboardSnapshot(),
-      summarizeDashboardSnapshot,
+      'today.read.after_aggregate',
+      'Today overview read after aggregate rebuild',
+      () => repository.getTodayOverview(),
+      summarizeTodayOverview,
+    );
+    await measureReadStep(
+      steps,
+      'history.read.after_aggregate',
+      'History overview read after aggregate rebuild',
+      () => repository.getHistoryOverview(historyDayKey),
+      summarizeHistoryOverview,
     );
     await measureReadStep(
       steps,
       'heart.read.after_aggregate',
       'Heart read after aggregate rebuild',
       () => repository.getHeartHistory(historyRange),
-      summarizeHeartSnapshot,
+      summarizeHeartHistory,
     );
     await measureReadStep(
       steps,
       'wellness.read.after_aggregate',
       'Wellness read after aggregate rebuild',
-      () => repository.getWellnessSnapshot(historyRange),
-      summarizeWellnessSnapshot,
-    );
-
-    await repository.refreshDashboardSnapshot('full');
-    await measureBooleanStep(
-      steps,
-      'dashboard.snapshot.warm',
-      'Warm dashboard snapshot rebuild',
-      () => repository.refreshDashboardSnapshot('full'),
+      () => repository.getWellnessData(historyRange),
+      summarizeWellnessData,
     );
 
     const finishedAt = formatSqliteDateTime(new Date());

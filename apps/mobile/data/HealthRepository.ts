@@ -1,12 +1,16 @@
 import type {
   DerivedRefreshState,
-  DashboardSnapshot,
-  HeartCardSnapshot,
-  HeartHistorySnapshot,
+  FocusedHeartDetail,
+  HeartCardData,
+  HeartHistoryData,
+  HeartIntradayMarker,
+  HeartTimelineWindow,
+  HistoryOverview,
   HistoryRange,
-  SleepHistorySnapshot,
-  TrendSnapshot,
-  WellnessSnapshot,
+  SleepHistoryData,
+  TodayOverview,
+  TrendData,
+  WellnessData,
 } from '@/types/health';
 
 export type HealthCacheScope = 'all' | 'sleep' | 'heart' | 'dashboard' | 'wellness' | 'trends' | 'derived';
@@ -17,15 +21,20 @@ export interface ActivityRescanResult {
   removedUnconfirmedActivities: number;
 }
 
+export interface DashboardHeartTimelineOptions {
+  bucketMinutes?: number;
+}
+
 export interface HealthRepository {
-  primeDashboardSnapshot(): Promise<boolean>;
-  refreshDashboardSnapshot(mode: 'full' | 'post_sync_heart_only'): Promise<boolean>;
-  getDashboardSnapshot(dayKey?: string): Promise<DashboardSnapshot>;
-  getDashboardHeartTimeline(range: HistoryRange): Promise<HeartCardSnapshot>;
-  getSleepHistory(range: HistoryRange): Promise<SleepHistorySnapshot>;
-  getHeartHistory(range: HistoryRange): Promise<HeartHistorySnapshot>;
-  getWellnessSnapshot(range: HistoryRange): Promise<WellnessSnapshot>;
-  getTrendSnapshot(range: HistoryRange): Promise<TrendSnapshot>;
+  getTodayOverview(): Promise<TodayOverview>;
+  getHistoryOverview(dayKey: string): Promise<HistoryOverview>;
+  getDashboardHeartTimelineWindow(range: HistoryRange): Promise<HeartTimelineWindow>;
+  getDashboardHeartTimeline(range: HistoryRange, options?: DashboardHeartTimelineOptions): Promise<HeartCardData>;
+  getFocusedHeartDetail(marker: HeartIntradayMarker): Promise<FocusedHeartDetail>;
+  getSleepHistory(range: HistoryRange): Promise<SleepHistoryData>;
+  getHeartHistory(range: HistoryRange): Promise<HeartHistoryData>;
+  getWellnessData(range: HistoryRange): Promise<WellnessData>;
+  getTrendData(range: HistoryRange): Promise<TrendData>;
   getDerivedRefreshState(): Promise<DerivedRefreshState>;
   processPendingDerivedRefresh(): Promise<boolean>;
   rescanActivities(): Promise<ActivityRescanResult>;

@@ -21,6 +21,7 @@ import Animated, {
 import { SleepStageChart } from '@/components/charts/SleepStageChart';
 import { TrendChart } from '@/components/charts/TrendChart';
 import { PannableHeartChart, type HeartActivityDraft, type HeartMarkerDraftKind } from './PannableHeartChart';
+import { RangeSegmentedControl } from './RangeSegmentedControl';
 import { SectionHeader } from '@/components/layout/SectionHeader';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { PulsingHeartIcon } from '@/components/ui/PulsingHeartIcon';
@@ -30,11 +31,12 @@ import type { ManualActivityKind } from '@/data/HealthRepository';
 import type {
   ActivitySummary,
   DashboardInsight,
-  HeartCardSnapshot,
+  FocusedHeartDetail,
+  HeartCardData,
   HeartIntradayMarker,
   SleepStage,
-  SleepCardSnapshot,
-  StrainCardSnapshot,
+  SleepCardData,
+  StrainCardData,
 } from '@/types/health';
 import { addMinutes, dateKey, formatClock } from '@/utils/dateTime';
 import { formatCompactDuration, formatMetricValue, formatShortDuration } from '@/utils/formatters';
@@ -42,6 +44,7 @@ import {
   canManageHeartIntradayMarker,
   getHeartIntradayMarkerPresentation,
 } from '@/utils/heartChartMarkers';
+import { logMobilePerf, logMobilePerfError } from '@/utils/mobilePerf';
 
 interface HeartMetricColumn {
   label: string;
@@ -85,7 +88,7 @@ const ACTIVITY_DETAIL_CHIP_STAGE_DELAY_MS = ACTIVITY_DETAIL_PANEL_STAGE_DELAY_MS
 const ACTIVITY_DRAFT_ACTION_STAGE_DELAY_MS = ACTIVITY_DETAIL_CHIP_STAGE_DELAY_MS + 50;
 const HEART_CARD_CHROME_SWAP_DELAY_MS = HEART_CARD_CHROME_OUT_DURATION_MS + HEART_CARD_CHROME_STAGE_DELAY_MS * 2;
 const HEART_CARD_CHROME_REVEAL_DELAY_AFTER_SWAP_MS = 40;
-const HEART_CHART_POINT_INTERVAL_MINUTES = 5;
+const DEFAULT_HEART_CHART_POINT_INTERVAL_MINUTES = 5;
 const DEFAULT_NEW_ACTIVITY_DURATION_MINUTES = 60;
 const REVIEW_ACTIVITY_OPTIONS: ManualActivityKind[] = ['Activity', 'Walk', 'Workout', 'Nap'];
 const REVIEW_DRAFT_OPTIONS: HeartMarkerDraftKind[] = [...REVIEW_ACTIVITY_OPTIONS, 'Sleep'];
@@ -103,6 +106,11 @@ interface HeartActivityReviewActions {
 interface HeartChartViewportState {
   windowPointCount: number;
   windowStart: number;
+}
+
+interface HeartZoomOption {
+  label: string;
+  value: string;
 }
 
 function accentColorForInsight(accent: DashboardInsight['accent']) {
@@ -180,7 +188,7 @@ function clampIndex(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
-function summarizeMarkerHeartValues(snapshot: HeartCardSnapshot, marker: HeartIntradayMarker) {
+function summarizeMarkerHeartValues(snapshot: HeartCardData, marker: HeartIntradayMarker) {
   if (snapshot.series.length === 0) {
     return {
       averageHr: null,
@@ -212,7 +220,7 @@ function summarizeMarkerHeartValues(snapshot: HeartCardSnapshot, marker: HeartIn
   };
 }
 
-function summarizeViewportHeartValues(snapshot: HeartCardSnapshot, viewportState: HeartChartViewportState) {
+function summarizeViewportHeartValues(snapshot: HeartCardData, viewportState: HeartChartViewportState) {
   if (snapshot.series.length === 0) {
     return {
       averageHr: null,
@@ -272,7 +280,7 @@ function formatSleepStageName(stage: SleepStage) {
 
 function parseHeartPointLabelMinutes(label: string) {
   const trimmed = label.trim();
-  const match = /^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)$/i.exec(trimmed);
+  const match = /^(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?\s*(AM|PM)$/i.exec(trimmed);
 
   if (!match) {
     return null;
@@ -280,16 +288,22 @@ function parseHeartPointLabelMinutes(label: string) {
 
   const rawHours = Number(match[1]);
   const minutes = Number(match[2] ?? '0');
-  const meridiem = match[3]?.toUpperCase();
+  const seconds = Number(match[3] ?? '0');
+  const meridiem = match[4]?.toUpperCase();
 
-  if (!Number.isFinite(rawHours) || !Number.isFinite(minutes)) {
+  if (!Number.isFinite(rawHours) || !Number.isFinite(minutes) || !Number.isFinite(seconds)) {
     return null;
   }
 
-  return (rawHours % 12 + (meridiem === 'PM' ? 12 : 0)) * 60 + minutes;
+  return (rawHours % 12 + (meridiem === 'PM' ? 12 : 0)) * 60 + minutes + seconds / 60;
 }
 
-function resolveHeartPointDate(points: readonly { label: string }[], anchorDayKey: string | undefined, minuteOffset: number) {
+function resolveHeartPointDate(
+  points: readonly { label: string }[],
+  anchorDayKey: string | undefined,
+  minuteOffset: number,
+  pointIntervalMinutes = DEFAULT_HEART_CHART_POINT_INTERVAL_MINUTES,
+) {
   if (!anchorDayKey || points.length === 0) {
     return null;
   }
@@ -306,7 +320,7 @@ function resolveHeartPointDate(points: readonly { label: string }[], anchorDayKe
 
   const anchorDate = new Date(`${anchorDayKey}T00:00:00`);
   const latestPointDate = addMinutes(anchorDate, latestPointMinutes);
-  const totalSeriesMinutes = Math.max(points.length - 1, 0) * HEART_CHART_POINT_INTERVAL_MINUTES;
+  const totalSeriesMinutes = Math.max(points.length - 1, 0) * pointIntervalMinutes;
 
   return addMinutes(latestPointDate, Math.round(minuteOffset) - totalSeriesMinutes);
 }
@@ -315,16 +329,17 @@ function buildInitialHeartActivityDraft(
   kind: HeartMarkerDraftKind,
   viewportState: HeartChartViewportState,
   pointCount: number,
+  pointIntervalMinutes = DEFAULT_HEART_CHART_POINT_INTERVAL_MINUTES,
 ): HeartActivityDraft {
   const safePointCount = Math.max(pointCount, 2);
-  const visibleWindowStartMinuteOffset = viewportState.windowStart * HEART_CHART_POINT_INTERVAL_MINUTES;
+  const visibleWindowStartMinuteOffset = viewportState.windowStart * pointIntervalMinutes;
   const visibleWindowEndMinuteOffset = Math.min(
-    Math.max(safePointCount - 1, 0) * HEART_CHART_POINT_INTERVAL_MINUTES,
-    (viewportState.windowStart + Math.max(viewportState.windowPointCount - 1, 1)) * HEART_CHART_POINT_INTERVAL_MINUTES,
+    Math.max(safePointCount - 1, 0) * pointIntervalMinutes,
+    (viewportState.windowStart + Math.max(viewportState.windowPointCount - 1, 1)) * pointIntervalMinutes,
   );
   const visibleWindowDurationMinutes = Math.max(
     visibleWindowEndMinuteOffset - visibleWindowStartMinuteOffset,
-    HEART_CHART_POINT_INTERVAL_MINUTES,
+    pointIntervalMinutes,
   );
   const spanMinutes = Math.max(
     1,
@@ -363,12 +378,16 @@ function resolveDraftKind(marker: HeartIntradayMarker): HeartMarkerDraftKind {
   return marker.kind === 'nap' ? 'Nap' : 'Activity';
 }
 
-function buildHeartActivityDraftFromMarker(marker: HeartIntradayMarker, pointCount: number): HeartActivityDraft | null {
+function buildHeartActivityDraftFromMarker(
+  marker: HeartIntradayMarker,
+  pointCount: number,
+  pointIntervalMinutes = DEFAULT_HEART_CHART_POINT_INTERVAL_MINUTES,
+): HeartActivityDraft | null {
   if (pointCount < 2) {
     return null;
   }
 
-  const totalSeriesMinutes = Math.max((pointCount - 1) * HEART_CHART_POINT_INTERVAL_MINUTES, 1);
+  const totalSeriesMinutes = Math.max((pointCount - 1) * pointIntervalMinutes, 1);
   const startMinuteOffset = clampIndex(
     Math.round(Math.max(0, Math.min(1, marker.startFraction)) * totalSeriesMinutes),
     0,
@@ -389,20 +408,21 @@ function buildHeartActivityDraftFromMarker(marker: HeartIntradayMarker, pointCou
 
 function buildHeartActivityDraftMarker(
   draft: HeartActivityDraft | null,
-  points: HeartCardSnapshot['series'],
+  points: HeartCardData['series'],
   anchorDayKey: string | undefined,
+  pointIntervalMinutes = DEFAULT_HEART_CHART_POINT_INTERVAL_MINUTES,
 ): HeartIntradayMarker | null {
   if (!draft || points.length < 2) {
     return null;
   }
 
-  const start = resolveHeartPointDate(points, anchorDayKey, draft.startMinuteOffset);
-  const end = resolveHeartPointDate(points, anchorDayKey, draft.endMinuteOffset);
+  const start = resolveHeartPointDate(points, anchorDayKey, draft.startMinuteOffset, pointIntervalMinutes);
+  const end = resolveHeartPointDate(points, anchorDayKey, draft.endMinuteOffset, pointIntervalMinutes);
   if (!start || !end || end.getTime() <= start.getTime()) {
     return null;
   }
 
-  const totalSeriesMinutes = Math.max((points.length - 1) * HEART_CHART_POINT_INTERVAL_MINUTES, 1);
+  const totalSeriesMinutes = Math.max((points.length - 1) * pointIntervalMinutes, 1);
   const markerKind = draft.kind === 'Sleep' ? 'sleep' : draft.kind === 'Nap' ? 'nap' : 'activity';
   const markerLabel = draft.kind;
 
@@ -413,6 +433,8 @@ function buildHeartActivityDraftMarker(
     timeLabel: `${formatClock(start)} - ${formatClock(end)}`,
     startFraction: draft.startMinuteOffset / totalSeriesMinutes,
     endFraction: draft.endMinuteOffset / totalSeriesMinutes,
+    startTimeMs: start.getTime(),
+    endTimeMs: end.getTime(),
     details: {
       durationMinutes: Math.max(1, Math.round((end.getTime() - start.getTime()) / 60000)),
       reviewState: 'confirmed',
@@ -478,7 +500,7 @@ function resolveActiveHeartMarker(
 }
 
 function buildFocusedHeartCardContent(
-  snapshot: HeartCardSnapshot,
+  snapshot: HeartCardData,
   marker: HeartIntradayMarker | null,
 ): FocusedHeartCardContent | null {
   if (!marker) {
@@ -564,41 +586,75 @@ function buildFocusedHeartCardContent(
   };
 }
 
-export function HeartSnapshotCard({
+function buildFocusedHeartCardData(
+  baseSnapshot: HeartCardData,
+  detailSnapshot: FocusedHeartDetail,
+): HeartCardData {
+  return {
+    ...baseSnapshot,
+    averageHr: detailSnapshot.averageHr,
+    maxHr: detailSnapshot.maxHr,
+    pointIntervalMinutes: detailSnapshot.pointIntervalMinutes,
+    series: detailSnapshot.series,
+    markers: [detailSnapshot.marker],
+    missingReason: detailSnapshot.missingReason ?? baseSnapshot.missingReason,
+  };
+}
+
+export function HeartCard({
   activityReviewActions,
   canLoadMore = false,
   chartTestID,
   isLoadingMore = false,
   isRefreshing = false,
+  latestWindowLabel,
   liveHeartRateLabel,
+  loadFocusedDetail,
+  bucketOptions,
   onLoadMore,
+  onBucketChange,
   onOpen,
+  onPresetZoomTransitionStateChange,
+  onZoomChange,
   openTestID,
+  selectedBucketValue,
+  selectedZoomValue,
   showLiveHeartRate = false,
-  snapshot,
+  cardData: cardData,
   trailingLabel,
   viewportKey,
   windowPointCount,
+  zoomOptions,
 }: {
   activityReviewActions?: HeartActivityReviewActions;
   canLoadMore?: boolean;
   chartTestID: string;
+  bucketOptions?: readonly HeartZoomOption[];
   isLoadingMore?: boolean;
   isRefreshing?: boolean;
+  latestWindowLabel?: string;
   liveHeartRateLabel?: string | null;
+  loadFocusedDetail?: (marker: HeartIntradayMarker) => Promise<FocusedHeartDetail>;
+  onBucketChange?: (value: string) => void;
   onLoadMore?: () => void;
   onOpen?: () => void;
+  onPresetZoomTransitionStateChange?: (isTransitioning: boolean) => void;
+  onZoomChange?: (value: string) => void;
   openTestID?: string;
+  selectedBucketValue?: string;
+  selectedZoomValue?: string;
   showLiveHeartRate?: boolean;
-  snapshot: HeartCardSnapshot;
+  cardData: HeartCardData;
   trailingLabel: string;
   viewportKey?: string;
   windowPointCount?: number;
+  zoomOptions?: readonly HeartZoomOption[];
 }) {
-  const resolvedWindowPointCount = windowPointCount ?? snapshot.series.length;
+  const resolvedWindowPointCount = windowPointCount ?? cardData.series.length;
+  const basePointIntervalMinutes = cardData.pointIntervalMinutes ?? DEFAULT_HEART_CHART_POINT_INTERVAL_MINUTES;
   const [chartViewportState, setChartViewportState] = useState<HeartChartViewportState>(() => ({
     windowPointCount: resolvedWindowPointCount,
-    windowStart: Math.max(snapshot.series.length - resolvedWindowPointCount, 0),
+    windowStart: Math.max(cardData.series.length - resolvedWindowPointCount, 0),
   }));
   const [isViewingLatestWindow, setIsViewingLatestWindow] = useState(true);
   const [latestJumpVersion, setLatestJumpVersion] = useState(0);
@@ -614,24 +670,43 @@ export function HeartSnapshotCard({
   const [relabelModalVisible, setRelabelModalVisible] = useState(false);
   const [focusedMarkerTarget, setFocusedMarkerTarget] = useState<HeartIntradayMarker | null>(null);
   const [focusedMarker, setFocusedMarker] = useState<HeartIntradayMarker | null>(null);
+  const [focusedDetailState, setFocusedDetailState] = useState<{
+    key: string | null;
+    snapshot: FocusedHeartDetail | null;
+    status: 'idle' | 'loading' | 'ready' | 'error';
+  }>({
+    key: null,
+    snapshot: null,
+    status: 'idle',
+  });
+  const [appliedFocusedDetailState, setAppliedFocusedDetailState] = useState<{
+    key: string | null;
+    snapshot: FocusedHeartDetail | null;
+  }>({
+    key: null,
+    snapshot: null,
+  });
+  const [isChartFocusTransitioning, setIsChartFocusTransitioning] = useState(false);
   const [selectedSleepStage, setSelectedSleepStage] = useState<SleepStage | null>(null);
   const [isSleepStagePanelMounted, setIsSleepStagePanelMounted] = useState(false);
   const [isActivityDetailPanelMounted, setIsActivityDetailPanelMounted] = useState(false);
   const [activityDetailMeasuredHeight, setActivityDetailMeasuredHeight] = useState(0);
   const [renderedSleepStageChips, setRenderedSleepStageChips] = useState<HeartMetricChip[]>([]);
+  const focusedDetailRequestKeyRef = useRef<string | null>(null);
   const previousActivityDetailPanelVisibleRef = useRef(false);
   const isFocusTransitioningRef = useRef(false);
   const pendingFocusedMarkerRef = useRef<HeartIntradayMarker | null>(null);
   const sleepStagePanelUnmountTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activityDetailPanelUnmountTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const showsLatestWindowButton = trailingLabel === 'Last 12h';
+  const resolvedLatestWindowLabel = latestWindowLabel ?? (trailingLabel === 'Last 12h' ? trailingLabel : null);
+  const showsLatestWindowButton = resolvedLatestWindowLabel !== null;
   const isDraftEditing = activityDraft !== null;
   const [isDraftPresentationActive, setIsDraftPresentationActive] = useState(false);
   const hiddenEditingMarkerId =
     editingActivityMarker && (isDraftEditing || isDraftPresentationActive) ? editingActivityMarker.id : null;
-  const resolvedMarkers = useMemo(
+  const baseResolvedMarkers = useMemo(
     () => {
-      const nextMarkers = applyHeartMarkerOverrides(snapshot.markers, activityMarkerOverrides);
+      const nextMarkers = applyHeartMarkerOverrides(cardData.markers, activityMarkerOverrides);
 
       if (!hiddenEditingMarkerId) {
         return nextMarkers;
@@ -639,16 +714,61 @@ export function HeartSnapshotCard({
 
       return nextMarkers.filter((marker) => marker.id !== hiddenEditingMarkerId);
     },
-    [activityMarkerOverrides, hiddenEditingMarkerId, snapshot.markers],
+    [activityMarkerOverrides, hiddenEditingMarkerId, cardData.markers],
   );
   const previousDraftEditingRef = useRef(isDraftEditing);
   const draftChromeTransitionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const displayedActivityDraft = isDraftEditing ? activityDraft : presentedActivityDraft;
   const displayedActivityDraftMarker = useMemo(
-    () => buildHeartActivityDraftMarker(displayedActivityDraft, snapshot.series, viewportKey),
-    [displayedActivityDraft, snapshot.series, viewportKey],
+    () => buildHeartActivityDraftMarker(displayedActivityDraft, cardData.series, viewportKey, basePointIntervalMinutes),
+    [basePointIntervalMinutes, displayedActivityDraft, cardData.series, viewportKey],
   );
   const isPresentedDraftEditing = isDraftPresentationActive && displayedActivityDraft !== null;
+  const resolvedBaseFocusedMarkerTarget = useMemo(
+    () => resolveActiveHeartMarker(focusedMarkerTarget, baseResolvedMarkers, requestedSavedFocusMarker),
+    [baseResolvedMarkers, focusedMarkerTarget, requestedSavedFocusMarker],
+  );
+  const focusedDetailKey = useMemo(() => {
+    if (
+      !loadFocusedDetail ||
+      isDraftEditing ||
+      isDraftPresentationActive ||
+      !resolvedBaseFocusedMarkerTarget ||
+      resolvedBaseFocusedMarkerTarget.startTimeMs === undefined ||
+      resolvedBaseFocusedMarkerTarget.endTimeMs === undefined
+    ) {
+      return null;
+    }
+
+    return `${resolvedBaseFocusedMarkerTarget.id}:${resolvedBaseFocusedMarkerTarget.startTimeMs}:${resolvedBaseFocusedMarkerTarget.endTimeMs}`;
+  }, [isDraftEditing, isDraftPresentationActive, loadFocusedDetail, resolvedBaseFocusedMarkerTarget]);
+  const preparedFocusedDetailSnapshot =
+    focusedDetailKey !== null &&
+    focusedDetailState.status === 'ready' &&
+    focusedDetailState.key === focusedDetailKey
+      ? focusedDetailState.snapshot
+      : null;
+  const activeFocusedDetailSnapshot =
+    focusedDetailKey !== null &&
+    appliedFocusedDetailState.key === focusedDetailKey
+      ? appliedFocusedDetailState.snapshot
+      : null;
+  const displayedChartSnapshot = useMemo(
+    () => (activeFocusedDetailSnapshot ? buildFocusedHeartCardData(cardData, activeFocusedDetailSnapshot) : cardData),
+    [activeFocusedDetailSnapshot, cardData],
+  );
+  const resolvedMarkers = useMemo(
+    () => {
+      const nextMarkers = applyHeartMarkerOverrides(displayedChartSnapshot.markers, activityMarkerOverrides);
+
+      if (!hiddenEditingMarkerId) {
+        return nextMarkers;
+      }
+
+      return nextMarkers.filter((marker) => marker.id !== hiddenEditingMarkerId);
+    },
+    [activityMarkerOverrides, displayedChartSnapshot.markers, hiddenEditingMarkerId],
+  );
   const resolvedFocusedMarkerTarget = useMemo(
     () => resolveActiveHeartMarker(focusedMarkerTarget, resolvedMarkers, requestedSavedFocusMarker),
     [focusedMarkerTarget, requestedSavedFocusMarker, resolvedMarkers],
@@ -663,49 +783,65 @@ export function HeartSnapshotCard({
   const presentedMarker = isPresentedDraftEditing
     ? displayedActivityDraftMarker ?? resolvedFocusedMarker
     : resolvedFocusedMarker;
-  const focusedCardTargetContent = buildFocusedHeartCardContent(snapshot, presentedMarkerTarget);
-  const focusedChartTargetContent = buildFocusedHeartCardContent(snapshot, resolvedFocusedMarkerTarget);
-  const focusedCardContent = buildFocusedHeartCardContent(snapshot, presentedMarker);
+  const focusedCardTargetContent = buildFocusedHeartCardContent(displayedChartSnapshot, presentedMarkerTarget);
+  const focusedChartTargetContent = buildFocusedHeartCardContent(displayedChartSnapshot, resolvedFocusedMarkerTarget);
+  const focusedCardContent = buildFocusedHeartCardContent(displayedChartSnapshot, presentedMarker);
+  const displayedFocusedMarker = presentedMarker ?? presentedMarkerTarget;
+  const displayedFocusedCardContent = focusedCardContent ?? focusedCardTargetContent;
+  const actionableFocusedMarker = useMemo(() => {
+    if (resolvedFocusedMarker) {
+      const resolvedBaseMarker = baseResolvedMarkers.find((candidate) => candidate.id === resolvedFocusedMarker.id);
+
+      if (resolvedBaseMarker) {
+        return resolvedBaseMarker;
+      }
+    }
+
+    return resolvedBaseFocusedMarkerTarget ?? focusedMarker;
+  }, [baseResolvedMarkers, focusedMarker, resolvedBaseFocusedMarkerTarget, resolvedFocusedMarker]);
   const cardAccentColor = focusedCardTargetContent?.accentColor ?? colors.success;
   const chartAccentColor = focusedChartTargetContent?.chartAccentColor ?? colors.primary;
-  const isSleepFocused = presentedMarker?.kind === 'sleep';
-  const isActivityFocused = presentedMarker?.kind === 'activity' || presentedMarker?.kind === 'nap';
+  const isSleepFocused = displayedFocusedMarker?.kind === 'sleep';
+  const isActivityFocused = displayedFocusedMarker?.kind === 'activity' || displayedFocusedMarker?.kind === 'nap';
   const canManageFocusedActivity = Boolean(
     !isPresentedDraftEditing &&
       activityReviewActions &&
-      resolvedFocusedMarker &&
-      canManageHeartIntradayMarker(resolvedFocusedMarker),
+      actionableFocusedMarker &&
+      canManageHeartIntradayMarker(actionableFocusedMarker),
   );
   const canEditFocusedActivity = Boolean(
     !isPresentedDraftEditing &&
       activityReviewActions &&
-      resolvedFocusedMarker &&
-      resolvedFocusedMarker.kind !== 'sleep' &&
-      !canManageHeartIntradayMarker(resolvedFocusedMarker) &&
-      resolvedFocusedMarker.id !== 'draft-activity' &&
+      actionableFocusedMarker &&
+      actionableFocusedMarker.kind !== 'sleep' &&
+      !canManageHeartIntradayMarker(actionableFocusedMarker) &&
+      actionableFocusedMarker.id !== 'draft-activity' &&
       pendingActivityActionKey !== 'draft:save' &&
       pendingEditActivityDraft === null,
   );
   const canEditFocusedSleep = Boolean(
     !isPresentedDraftEditing &&
       activityReviewActions?.updateSleep &&
-      resolvedFocusedMarker?.kind === 'sleep' &&
+      actionableFocusedMarker?.kind === 'sleep' &&
       pendingActivityActionKey !== 'draft:save' &&
       pendingEditActivityDraft === null,
   );
   const canCreateGraphActivity = Boolean(activityReviewActions?.createManualActivity && activityReviewActions?.createManualSleep) && !isPresentedDraftEditing;
   const isAwaitingSavedActivityFocus = requestedFocusMarkerId !== null;
+  const displayedWindowPointCount = activeFocusedDetailSnapshot
+    ? displayedChartSnapshot.series.length
+    : resolvedWindowPointCount;
   const viewportSeriesSummary = useMemo(
-    () => summarizeViewportHeartValues(snapshot, chartViewportState),
-    [chartViewportState, snapshot],
+    () => summarizeViewportHeartValues(displayedChartSnapshot, chartViewportState),
+    [chartViewportState, displayedChartSnapshot],
   );
   const showIdleCreateGraphActivity =
     canCreateGraphActivity &&
-    presentedMarker === null &&
+    displayedFocusedMarker === null &&
     pendingEditActivityDraft === null &&
     !isAwaitingSavedActivityFocus;
-  const activityDetailChips = isActivityFocused ? focusedCardContent?.chips ?? [] : [];
-  const sleepStageChips = focusedCardContent?.stageChips ?? [];
+  const activityDetailChips = isActivityFocused ? displayedFocusedCardContent?.chips ?? [] : [];
+  const sleepStageChips = displayedFocusedCardContent?.stageChips ?? [];
   const draftTypeOptions: HeartMarkerDraftKind[] = editingActivityMarker?.kind === 'sleep'
     ? ['Sleep']
     : editingActivityMarker
@@ -715,6 +851,9 @@ export function HeartSnapshotCard({
     .map((chip) => `${chip.label}:${chip.value}:${chip.accentColor}`)
     .join('|');
   const sleepStagePanelVisible = isSleepFocused && sleepStageChips.length > 0;
+  const showZoomControls = Boolean(zoomOptions && selectedZoomValue && onZoomChange) && !displayedFocusedCardContent && !isPresentedDraftEditing;
+  const showBucketControls =
+    Boolean(bucketOptions && selectedBucketValue && onBucketChange) && !displayedFocusedCardContent && !isPresentedDraftEditing;
   const activityDetailPanelVisible =
     showIdleCreateGraphActivity ||
     isDraftEditing ||
@@ -751,11 +890,11 @@ export function HeartSnapshotCard({
   const activityDetailPanelMarginTop = useSharedValue(0);
   const activityDetailTransitionProgress = useSharedValue(0);
   const chartHeight = HEART_CARD_CHART_HEIGHT;
-  const cardTitle = focusedCardContent?.title ?? 'Heart Rate';
+  const cardTitle = displayedFocusedCardContent?.title ?? 'Heart Rate';
   const defaultCardSubtitle =
     showLiveHeartRate && liveHeartRateLabel ? liveHeartRateLabel : 'Explore your heart rate';
-  const cardSubtitle = focusedCardContent?.subtitle ?? defaultCardSubtitle;
-  const metricColumns: HeartMetricColumn[] = focusedCardContent?.metrics ?? [
+  const cardSubtitle = displayedFocusedCardContent?.subtitle ?? defaultCardSubtitle;
+  const metricColumns: HeartMetricColumn[] = displayedFocusedCardContent?.metrics ?? [
     {
       label: 'Low',
       value: formatMetricValue(viewportSeriesSummary.minHr, 0),
@@ -848,15 +987,10 @@ export function HeartSnapshotCard({
 
   const handleFocusTransitionStateChange = useCallback((isTransitioning: boolean) => {
     isFocusTransitioningRef.current = isTransitioning;
+    setIsChartFocusTransitioning(isTransitioning);
     const nextFocusedMarker = pendingFocusedMarkerRef.current;
 
     if (isTransitioning) {
-      if (isSavedActivityFocusPending) {
-        animateCardChromeStages(1);
-        animateActivityDetailStage(1);
-        return;
-      }
-
       animateCardChromeStages(0);
       animateActivityDetailStage(0);
       return;
@@ -876,7 +1010,129 @@ export function HeartSnapshotCard({
     if (nextFocusedMarker.kind === 'activity' || nextFocusedMarker.kind === 'nap') {
       animateActivityDetailStage(1);
     }
-  }, [animateActivityDetailStage, animateCardChromeStages, canCreateGraphActivity, isSavedActivityFocusPending]);
+  }, [animateActivityDetailStage, animateCardChromeStages, canCreateGraphActivity]);
+
+  const clearFocusedDetail = useCallback(() => {
+    focusedDetailRequestKeyRef.current = null;
+    setAppliedFocusedDetailState((current) => {
+      if (current.key === null && current.snapshot === null) {
+        return current;
+      }
+
+      return {
+        key: null,
+        snapshot: null,
+      };
+    });
+    setFocusedDetailState((current) => {
+      if (current.key === null && current.snapshot === null && current.status === 'idle') {
+        return current;
+      }
+
+      return {
+        key: null,
+        snapshot: null,
+        status: 'idle',
+      };
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!focusedDetailKey || !preparedFocusedDetailSnapshot) {
+      setAppliedFocusedDetailState((current) => {
+        if (current.key === null && current.snapshot === null) {
+          return current;
+        }
+
+        return {
+          key: null,
+          snapshot: null,
+        };
+      });
+      return;
+    }
+
+    if (isChartFocusTransitioning) {
+      return;
+    }
+
+    setAppliedFocusedDetailState((current) => {
+      if (current.key === focusedDetailKey && current.snapshot === preparedFocusedDetailSnapshot) {
+        return current;
+      }
+
+      return {
+        key: focusedDetailKey,
+        snapshot: preparedFocusedDetailSnapshot,
+      };
+    });
+  }, [focusedDetailKey, isChartFocusTransitioning, preparedFocusedDetailSnapshot]);
+
+  useEffect(() => {
+    if (!focusedDetailKey || !loadFocusedDetail || !resolvedBaseFocusedMarkerTarget) {
+      clearFocusedDetail();
+      return;
+    }
+
+    if (
+      focusedDetailState.key === focusedDetailKey &&
+      (focusedDetailState.status === 'loading' || focusedDetailState.status === 'ready')
+    ) {
+      return;
+    }
+
+    focusedDetailRequestKeyRef.current = focusedDetailKey;
+    const detailLoadStartedAt = Date.now();
+    setFocusedDetailState((current) => {
+      if (current.key === focusedDetailKey && current.status === 'loading') {
+        return current;
+      }
+
+      return {
+        key: focusedDetailKey,
+        snapshot: current.key === focusedDetailKey ? current.snapshot : null,
+        status: 'loading',
+      };
+    });
+
+    void loadFocusedDetail(resolvedBaseFocusedMarkerTarget)
+      .then((detailSnapshot) => {
+        if (focusedDetailRequestKeyRef.current !== focusedDetailKey) {
+          return;
+        }
+
+        logMobilePerf('chart.heart.focusedDetail.load', detailLoadStartedAt, {
+          chart: chartTestID,
+          markerId: resolvedBaseFocusedMarkerTarget.id,
+          markerKind: resolvedBaseFocusedMarkerTarget.kind,
+          pointIntervalMinutes: detailSnapshot.pointIntervalMinutes,
+          points: detailSnapshot.series.length,
+        });
+
+        setFocusedDetailState({
+          key: focusedDetailKey,
+          snapshot: detailSnapshot,
+          status: 'ready',
+        });
+      })
+      .catch((error) => {
+        if (focusedDetailRequestKeyRef.current !== focusedDetailKey) {
+          return;
+        }
+
+        logMobilePerfError('chart.heart.focusedDetail.load', error, {
+          chart: chartTestID,
+          markerId: resolvedBaseFocusedMarkerTarget.id,
+          markerKind: resolvedBaseFocusedMarkerTarget.kind,
+        });
+
+        setFocusedDetailState({
+          key: focusedDetailKey,
+          snapshot: null,
+          status: 'error',
+        });
+      });
+  }, [clearFocusedDetail, focusedDetailKey, focusedDetailState.key, focusedDetailState.status, loadFocusedDetail, resolvedBaseFocusedMarkerTarget]);
 
   const clearActivityMarkerOverride = useCallback((activityId: string) => {
     setActivityMarkerOverrides((current) => {
@@ -887,77 +1143,78 @@ export function HeartSnapshotCard({
   }, []);
 
   const handleConfirmFocusedActivity = useCallback(async () => {
-    if (!activityReviewActions || !focusedMarker || !canManageHeartIntradayMarker(focusedMarker)) {
+    if (!activityReviewActions || !actionableFocusedMarker || !canManageHeartIntradayMarker(actionableFocusedMarker)) {
       return;
     }
 
     setActivityActionError(null);
-    setPendingActivityActionKey(`confirm:${focusedMarker.id}`);
+    setPendingActivityActionKey(`confirm:${actionableFocusedMarker.id}`);
     setActivityMarkerOverrides((current) => ({
       ...current,
-      [focusedMarker.id]: buildUpdatedActivityMarker(focusedMarker, { reviewState: 'confirmed' }),
+      [actionableFocusedMarker.id]: buildUpdatedActivityMarker(actionableFocusedMarker, { reviewState: 'confirmed' }),
     }));
 
     try {
-      await activityReviewActions.confirmActivity(focusedMarker.id);
+      await activityReviewActions.confirmActivity(actionableFocusedMarker.id);
     } catch (error) {
-      clearActivityMarkerOverride(focusedMarker.id);
+      clearActivityMarkerOverride(actionableFocusedMarker.id);
       setActivityActionError(error instanceof Error ? error.message : 'Unable to confirm this activity right now.');
     } finally {
       setPendingActivityActionKey(null);
     }
-  }, [activityReviewActions, clearActivityMarkerOverride, focusedMarker]);
+  }, [actionableFocusedMarker, activityReviewActions, clearActivityMarkerOverride]);
 
   const handleDismissFocusedActivity = useCallback(async () => {
-    if (!activityReviewActions || !focusedMarker || focusedMarker.kind === 'sleep') {
+    if (!activityReviewActions || !actionableFocusedMarker || actionableFocusedMarker.kind === 'sleep') {
       return;
     }
 
     setActivityActionError(null);
-    setPendingActivityActionKey(`dismiss:${focusedMarker.id}`);
+    setPendingActivityActionKey(`dismiss:${actionableFocusedMarker.id}`);
     setActivityMarkerOverrides((current) => ({
       ...current,
-      [focusedMarker.id]: null,
+      [actionableFocusedMarker.id]: null,
     }));
     setLatestJumpVersion((current) => current + 1);
 
     try {
-      await activityReviewActions.dismissActivity(focusedMarker.id);
+      await activityReviewActions.dismissActivity(actionableFocusedMarker.id);
     } catch (error) {
-      clearActivityMarkerOverride(focusedMarker.id);
+      clearActivityMarkerOverride(actionableFocusedMarker.id);
       setActivityActionError(error instanceof Error ? error.message : 'Unable to dismiss this activity right now.');
     } finally {
       setPendingActivityActionKey(null);
     }
-  }, [activityReviewActions, clearActivityMarkerOverride, focusedMarker]);
+  }, [actionableFocusedMarker, activityReviewActions, clearActivityMarkerOverride]);
 
   const handleRelabelFocusedActivity = useCallback(async (activity: ManualActivityKind) => {
-    if (!activityReviewActions || !focusedMarker || !canManageHeartIntradayMarker(focusedMarker)) {
+    if (!activityReviewActions || !actionableFocusedMarker || !canManageHeartIntradayMarker(actionableFocusedMarker)) {
       return;
     }
 
     setActivityActionError(null);
-    setPendingActivityActionKey(`relabel:${focusedMarker.id}`);
+    setPendingActivityActionKey(`relabel:${actionableFocusedMarker.id}`);
     setActivityMarkerOverrides((current) => ({
       ...current,
-      [focusedMarker.id]: buildUpdatedActivityMarker(focusedMarker, {
+      [actionableFocusedMarker.id]: buildUpdatedActivityMarker(actionableFocusedMarker, {
         label: activity,
         reviewState: 'relabelled',
       }),
     }));
 
     try {
-      await activityReviewActions.relabelActivity(focusedMarker.id, activity);
+      await activityReviewActions.relabelActivity(actionableFocusedMarker.id, activity);
       setRelabelModalVisible(false);
     } catch (error) {
-      clearActivityMarkerOverride(focusedMarker.id);
+      clearActivityMarkerOverride(actionableFocusedMarker.id);
       setActivityActionError(error instanceof Error ? error.message : 'Unable to relabel this activity right now.');
     } finally {
       setPendingActivityActionKey(null);
     }
-  }, [activityReviewActions, clearActivityMarkerOverride, focusedMarker]);
+  }, [actionableFocusedMarker, activityReviewActions, clearActivityMarkerOverride]);
 
   const handleStartDraftActivity = useCallback(() => {
+    clearFocusedDetail();
     setActivityActionError(null);
     setPendingActivityActionKey(null);
     setEditingActivityMarker(null);
@@ -967,31 +1224,43 @@ export function HeartSnapshotCard({
 
     const nextViewportState = chartViewportState ?? {
       windowPointCount: resolvedWindowPointCount,
-      windowStart: Math.max(snapshot.series.length - resolvedWindowPointCount, 0),
+      windowStart: Math.max(cardData.series.length - resolvedWindowPointCount, 0),
     };
 
-    setActivityDraft(buildInitialHeartActivityDraft('Activity', nextViewportState, snapshot.series.length));
-  }, [chartViewportState, resolvedWindowPointCount, snapshot.series.length]);
+    setActivityDraft(
+      buildInitialHeartActivityDraft(
+        'Activity',
+        nextViewportState,
+        cardData.series.length,
+        basePointIntervalMinutes,
+      ),
+    );
+  }, [basePointIntervalMinutes, chartViewportState, clearFocusedDetail, resolvedWindowPointCount, cardData.series.length]);
 
   const handleEditFocusedActivity = useCallback(() => {
-    if (!focusedMarker) {
+    if (!actionableFocusedMarker) {
       return;
     }
 
-    const nextDraft = buildHeartActivityDraftFromMarker(focusedMarker, snapshot.series.length);
+    const nextDraft = buildHeartActivityDraftFromMarker(
+      actionableFocusedMarker,
+      cardData.series.length,
+      basePointIntervalMinutes,
+    );
     if (!nextDraft) {
       setActivityActionError('Unable to edit this activity from the chart right now.');
       return;
     }
 
+    clearFocusedDetail();
     setActivityActionError(null);
     setPendingActivityActionKey(null);
     setRequestedSavedFocusMarker(null);
     setRequestedFocusMarkerId(null);
-    setEditingActivityMarker(focusedMarker);
+    setEditingActivityMarker(actionableFocusedMarker);
     setPendingEditActivityDraft(nextDraft);
     setLatestJumpVersion((current) => current + 1);
-  }, [focusedMarker, snapshot.series.length]);
+  }, [actionableFocusedMarker, basePointIntervalMinutes, clearFocusedDetail, cardData.series.length]);
 
   const handleSelectDraftActivityType = useCallback((activity: HeartMarkerDraftKind) => {
     setActivityActionError(null);
@@ -999,6 +1268,7 @@ export function HeartSnapshotCard({
   }, []);
 
   const handleCancelDraftActivity = useCallback(() => {
+    clearFocusedDetail();
     setActivityActionError(null);
     setPendingActivityActionKey(null);
     setEditingActivityMarker(null);
@@ -1006,7 +1276,7 @@ export function HeartSnapshotCard({
     setRequestedSavedFocusMarker(null);
     setRequestedFocusMarkerId(null);
     setActivityDraft(null);
-  }, []);
+  }, [clearFocusedDetail]);
 
   const handleSaveDraftActivity = useCallback(async () => {
     const draftToSave = activityDraft;
@@ -1017,8 +1287,18 @@ export function HeartSnapshotCard({
       return;
     }
 
-    const start = resolveHeartPointDate(snapshot.series, viewportKey, draftToSave.startMinuteOffset);
-    const end = resolveHeartPointDate(snapshot.series, viewportKey, draftToSave.endMinuteOffset);
+    const start = resolveHeartPointDate(
+      cardData.series,
+      viewportKey,
+      draftToSave.startMinuteOffset,
+      basePointIntervalMinutes,
+    );
+    const end = resolveHeartPointDate(
+      cardData.series,
+      viewportKey,
+      draftToSave.endMinuteOffset,
+      basePointIntervalMinutes,
+    );
 
     if (!start || !end || end.getTime() <= start.getTime()) {
       setActivityActionError('Unable to resolve the draft activity time range from the chart.');
@@ -1028,7 +1308,12 @@ export function HeartSnapshotCard({
     setActivityActionError(null);
     setPendingActivityActionKey('draft:save');
 
-    const optimisticFocusMarker = buildHeartActivityDraftMarker(draftToSave, snapshot.series, viewportKey);
+    const optimisticFocusMarker = buildHeartActivityDraftMarker(
+      draftToSave,
+      cardData.series,
+      viewportKey,
+      basePointIntervalMinutes,
+    );
     if (!optimisticFocusMarker) {
       setActivityActionError('Unable to resolve the draft activity time range from the chart.');
       setPendingActivityActionKey(null);
@@ -1090,14 +1375,15 @@ export function HeartSnapshotCard({
     } finally {
       setPendingActivityActionKey(null);
     }
-  }, [activityDraft, activityReviewActions, editingActivityMarker, snapshot.series, viewportKey]);
+  }, [activityDraft, activityReviewActions, basePointIntervalMinutes, editingActivityMarker, cardData.series, viewportKey]);
 
   useEffect(() => {
     const shouldShowIdleActivityPanelAfterReset = Boolean(activityReviewActions?.createManualActivity && activityReviewActions?.createManualSleep);
 
+    clearFocusedDetail();
     setChartViewportState({
       windowPointCount: resolvedWindowPointCount,
-      windowStart: Math.max(snapshot.series.length - resolvedWindowPointCount, 0),
+      windowStart: Math.max(cardData.series.length - resolvedWindowPointCount, 0),
     });
     setIsViewingLatestWindow(true);
     setLatestJumpVersion(0);
@@ -1149,6 +1435,7 @@ export function HeartSnapshotCard({
     activityDetailPanelMarginTop,
     activityDetailPanelMaxHeight,
     activityDetailPanelOpacity,
+    clearFocusedDetail,
     cardChipsTransitionProgress,
     cardHeaderTransitionProgress,
     cardMetricsTransitionProgress,
@@ -1184,6 +1471,21 @@ export function HeartSnapshotCard({
     setActivityDraft(pendingEditActivityDraft);
     setPendingEditActivityDraft(null);
   }, [focusedMarker, focusedMarkerTarget, pendingEditActivityDraft]);
+
+  useEffect(() => {
+    if (!requestedFocusMarkerId) {
+      return;
+    }
+
+    const resolvedRequestedMarker = baseResolvedMarkers.find((marker) => marker.id === requestedFocusMarkerId);
+
+    if (!resolvedRequestedMarker) {
+      return;
+    }
+
+    setRequestedSavedFocusMarker(null);
+    setFocusedMarkerTarget((current) => (current?.id === resolvedRequestedMarker.id ? current : resolvedRequestedMarker));
+  }, [baseResolvedMarkers, requestedFocusMarkerId]);
 
   useEffect(() => {
     if (!requestedFocusMarkerId) {
@@ -1257,7 +1559,7 @@ export function HeartSnapshotCard({
     if (!canManageFocusedActivity) {
       setRelabelModalVisible(false);
     }
-  }, [canManageFocusedActivity, focusedMarker?.id]);
+  }, [actionableFocusedMarker?.id, canManageFocusedActivity]);
 
   const handleSleepStagePress = useCallback((stage: SleepStage) => {
     setSelectedSleepStage((current) => (current === stage ? null : stage));
@@ -1503,12 +1805,19 @@ export function HeartSnapshotCard({
     [cardChipsTransitionProgress],
   );
 
+  const requestedChartFocusMarker = requestedSavedFocusMarker ?? activeFocusedDetailSnapshot?.marker ?? null;
+  const chartResetKey = viewportKey ?? 'heart';
+  const handleReturnFromFocus = useCallback(() => {
+    clearFocusedDetail();
+    setLatestJumpVersion((current) => current + 1);
+  }, [clearFocusedDetail]);
+
   return (
     <GlassCard accentColor={cardAccentColor}>
       <Animated.View style={animatedCardHeaderStageStyle}>
         <View style={styles.cardHeader}>
           <View style={styles.cardHeaderLeft}>
-            {focusedCardContent ? (
+            {displayedFocusedCardContent ? (
               <View
                 style={[
                   styles.cardIconWrap,
@@ -1517,7 +1826,7 @@ export function HeartSnapshotCard({
                     borderColor: `${cardAccentColor}33`,
                   },
                 ]}>
-                <Ionicons color={cardAccentColor} name={focusedCardContent.iconName} size={16} />
+                <Ionicons color={cardAccentColor} name={displayedFocusedCardContent.iconName} size={16} />
               </View>
             ) : (
               <PulsingHeartIcon
@@ -1537,14 +1846,12 @@ export function HeartSnapshotCard({
           </View>
           {isPresentedDraftEditing ? (
             <Text style={styles.actionMeta}>Draft activity</Text>
-          ) : focusedCardContent ? (
+          ) : displayedFocusedCardContent ? (
             <View style={styles.actionWrap}>
               <View style={styles.actionButtonRow}>
                 <Pressable
                   accessibilityRole="button"
-                  onPress={() => {
-                    setLatestJumpVersion((current) => current + 1);
-                  }}
+                  onPress={handleReturnFromFocus}
                   style={({ pressed }) => [
                     styles.focusedActionButton,
                     {
@@ -1610,7 +1917,7 @@ export function HeartSnapshotCard({
                         styles.latestButtonText,
                         isViewingLatestWindow ? styles.latestButtonTextIdle : null,
                       ]}>
-                      Last 12h
+                      {resolvedLatestWindowLabel}
                     </Text>
                   </Pressable>
                 ) : null}
@@ -1645,9 +1952,35 @@ export function HeartSnapshotCard({
       </Animated.View>
 
       <Animated.View style={animatedCardChipsStageStyle}>
-        {focusedCardContent?.chips.length && !isActivityFocused ? (
+        {showZoomControls || showBucketControls ? (
+          <View style={styles.controlStack}>
+            {showZoomControls ? (
+              <View style={styles.zoomControlWrap}>
+                <Text style={styles.controlLabel}>Zoom</Text>
+                <RangeSegmentedControl
+                  onChange={onZoomChange!}
+                  options={[...zoomOptions!]}
+                  selectedValue={selectedZoomValue!}
+                  testIDPrefix={chartTestID ? `${chartTestID}-zoom` : undefined}
+                />
+              </View>
+            ) : null}
+            {showBucketControls ? (
+              <View style={styles.zoomControlWrap}>
+                <Text style={styles.controlLabel}>Bucket</Text>
+                <RangeSegmentedControl
+                  onChange={onBucketChange!}
+                  options={[...bucketOptions!]}
+                  selectedValue={selectedBucketValue!}
+                  testIDPrefix={chartTestID ? `${chartTestID}-bucket` : undefined}
+                />
+              </View>
+            ) : null}
+          </View>
+        ) : null}
+        {displayedFocusedCardContent?.chips.length && !isActivityFocused ? (
           <View style={styles.cardChipRow}>
-            {focusedCardContent.chips.map((chip) => (
+            {displayedFocusedCardContent.chips.map((chip) => (
               <StatChip accent={chip.accentColor} key={`${chip.label}-${chip.value}`} label={chip.label} value={chip.value} />
             ))}
           </View>
@@ -1667,16 +2000,18 @@ export function HeartSnapshotCard({
         markers={resolvedMarkers}
         onActivityDraftChange={setActivityDraft}
         jumpToLatestSignal={latestJumpVersion}
-        requestedFocusedMarker={requestedSavedFocusMarker}
+        requestedFocusedMarker={requestedChartFocusMarker}
         requestedFocusedMarkerId={requestedFocusMarkerId}
         onFocusedMarkerChange={handleFocusedMarkerChange}
         onFocusTransitionStateChange={handleFocusTransitionStateChange}
         onLoadMore={onLoadMore}
+        onPresetZoomTransitionStateChange={onPresetZoomTransitionStateChange}
         onViewportWindowChange={setChartViewportState}
         onViewingLatestWindowChange={setIsViewingLatestWindow}
-        points={snapshot.series}
-        resetKey={viewportKey}
-        windowPointCount={resolvedWindowPointCount}
+        pointIntervalMinutes={displayedChartSnapshot.pointIntervalMinutes ?? basePointIntervalMinutes}
+        points={displayedChartSnapshot.series}
+        resetKey={chartResetKey}
+        windowPointCount={displayedWindowPointCount}
       />
       <Animated.View
         pointerEvents={sleepStagePanelVisible ? 'auto' : 'none'}
@@ -1937,7 +2272,7 @@ export function HeartSnapshotCard({
   );
 }
 
-export function HeartSnapshotStatusCard({
+export function HeartCardStatus({
   chartTestID,
   isLoading = true,
   liveHeartRateLabel,
@@ -2025,17 +2360,17 @@ export function HeartSnapshotStatusCard({
   );
 }
 
-export function SleepSnapshotCard({
+export function SleepCard({
   chartTestID,
   onOpen,
   openTestID,
-  snapshot,
+  cardData: cardData,
   trailingLabel,
 }: {
   chartTestID: string;
   onOpen: () => void;
   openTestID: string;
-  snapshot: SleepCardSnapshot;
+  cardData: SleepCardData;
   trailingLabel: string;
 }) {
   return (
@@ -2050,31 +2385,31 @@ export function SleepSnapshotCard({
 
       <View style={styles.sleepSummary}>
         <View>
-          <Text style={styles.sleepScore}>{formatMetricValue(snapshot.score, 0)}%</Text>
-          <Text style={styles.sleepDuration}>{formatCompactDuration(snapshot.durationMinutes)}</Text>
+          <Text style={styles.sleepScore}>{formatMetricValue(cardData.score, 0)}%</Text>
+          <Text style={styles.sleepDuration}>{formatCompactDuration(cardData.durationMinutes)}</Text>
         </View>
         <View style={styles.sleepMeta}>
           <Text style={styles.metricLabel}>In bed</Text>
-          <Text style={styles.sleepMetaValue}>{formatCompactDuration(snapshot.timeInBedMinutes)}</Text>
+          <Text style={styles.sleepMetaValue}>{formatCompactDuration(cardData.timeInBedMinutes)}</Text>
           <Text style={styles.sleepMetaCaption}>
-            {snapshot.startLabel} to {snapshot.endLabel}
+            {cardData.startLabel} to {cardData.endLabel}
           </Text>
         </View>
       </View>
 
       <SleepStageChart
         accentColor={colors.violet}
-        endLabel={snapshot.endLabel}
-        middleLabel={snapshot.middleLabel}
-        segments={snapshot.stages}
-        startLabel={snapshot.startLabel}
+        endLabel={cardData.endLabel}
+        middleLabel={cardData.middleLabel}
+        segments={cardData.stages}
+        startLabel={cardData.startLabel}
         testID={chartTestID}
       />
     </GlassCard>
   );
 }
 
-export function ActivitySnapshotCard({
+export function ActivityCard({
   activities,
   chartTestID,
   onOpen,
@@ -2086,7 +2421,7 @@ export function ActivitySnapshotCard({
   chartTestID: string;
   onOpen: () => void;
   openTestID: string;
-  strainCard: StrainCardSnapshot;
+  strainCard: StrainCardData;
   trailingLabel: string;
 }) {
   return (
@@ -2324,6 +2659,19 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: 10,
     marginBottom: 10,
+  },
+  controlStack: {
+    gap: 8,
+    marginBottom: 10,
+  },
+  controlLabel: {
+    color: colors.muted,
+    fontFamily: typography.bodySemiBold,
+    fontSize: 11,
+    marginBottom: 6,
+  },
+  zoomControlWrap: {
+    marginBottom: 0,
   },
   activityDetailContent: {
     gap: 12,

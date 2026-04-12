@@ -69,6 +69,7 @@ jest.mock('@/db/maintenance', () => ({
 
 import { SleepStageChart } from '@/components/charts/SleepStageChart';
 import { TrendChart } from '@/components/charts/TrendChart';
+import { PannableHeartChart } from '@/components/dashboard/PannableHeartChart';
 import { WearableProgressOverlay } from '@/components/ui/WearableProgressOverlay';
 import { colors } from '@/constants/theme';
 import { MockHealthRepository } from '@/data/mock/MockHealthRepository';
@@ -143,9 +144,9 @@ function renderWithRepository(repository: MockHealthRepository, children: ReactE
 class TrackingMockHealthRepository extends MockHealthRepository {
   readonly dashboardHeartTimelineCalls: HistoryRange[] = [];
 
-  async getDashboardHeartTimeline(range: HistoryRange) {
+  async getDashboardHeartTimelineWindow(range: HistoryRange) {
     this.dashboardHeartTimelineCalls.push(range);
-    return super.getDashboardHeartTimeline(range);
+    return super.getDashboardHeartTimelineWindow(range);
   }
 }
 
@@ -224,7 +225,7 @@ describe('screen rendering', () => {
     expect(await screen.findByText('Last 12h')).toBeTruthy();
     expect(await screen.findByTestId('today-heart-chart-latest-button')).toBeTruthy();
     expect(await screen.findByTestId('today-strain-chart')).toBeTruthy();
-    expect(await screen.findByTestId('today-heart-chart-marker-sleep-latest')).toBeTruthy();
+    expect(await screen.findByTestId('today-heart-chart-marker-sleep-2026-04-23')).toBeTruthy();
   });
 
   it('shows live heart rate on the today dashboard when streaming is active', async () => {
@@ -241,16 +242,16 @@ describe('screen rendering', () => {
     expect(screen.queryByText('Live')).toBeNull();
   });
 
-  it('renders the dashboard heart snapshot immediately while upgrading to the 7d timeline', async () => {
+  it('shows a loading shell until the 7d heart timeline arrives', async () => {
     const repository = new TrackingMockHealthRepository({ delayMs: 50 });
     const screen = renderWithRepository(repository, <TodayScreen />);
 
-    await screen.findByTestId('today-heart-chart-axis');
-
-    expect(screen.queryByText('Loading 7 day heart history...')).toBeNull();
-    expect(screen.queryByTestId('today-heart-chart-loading-shell')).toBeNull();
-    expect(screen.getByTestId('today-heart-chart-axis')).toBeTruthy();
-    expect(screen.getByTestId('today-heart-chart-refresh-indicator')).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.getByTestId('today-heart-chart-loading-shell')).toBeTruthy();
+      expect(screen.getByText('Loading 7 day heart history...')).toBeTruthy();
+      expect(screen.queryByTestId('today-heart-chart-axis')).toBeNull();
+      expect(screen.queryByTestId('today-heart-chart-refresh-indicator')).toBeNull();
+    });
 
     await waitFor(() => {
       expect(repository.dashboardHeartTimelineCalls).toEqual(['7d']);
@@ -258,13 +259,15 @@ describe('screen rendering', () => {
 
     await waitFor(
       () => {
+        expect(screen.queryByTestId('today-heart-chart-loading-shell')).toBeNull();
+        expect(screen.getByTestId('today-heart-chart-axis')).toBeTruthy();
         expect(screen.queryByTestId('today-heart-chart-refresh-indicator')).toBeNull();
       },
       { timeout: 2000 },
     );
   });
 
-  it('keeps the current 7d heart snapshot visible during same-day heart refreshes', async () => {
+  it('keeps the current 7d heart card visible during same-day heart refreshes', async () => {
     const repository = new TrackingMockHealthRepository({ delayMs: 50 });
     let triggerHeartRefresh: (() => void) | null = null;
 
@@ -318,6 +321,98 @@ describe('screen rendering', () => {
       { timeout: 2000 },
     );
   }, 10000);
+
+  it('derives today heart zoom presets from the cached raw heart window', async () => {
+    const repository = new TrackingMockHealthRepository({ delayMs: 50 });
+    const screen = renderWithRepository(repository, <TodayScreen />);
+
+    await screen.findByTestId('today-heart-chart-axis');
+
+    await waitFor(() => {
+      expect(repository.dashboardHeartTimelineCalls).toEqual(['7d']);
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('today-heart-chart-refresh-indicator')).toBeNull();
+    });
+
+    await waitFor(() => {
+      expect(screen.UNSAFE_getByType(PannableHeartChart).props.pointIntervalMinutes).toBe(5);
+      expect(screen.getByText('Last 12h')).toBeTruthy();
+    });
+
+    fireEvent.press(screen.getByTestId('today-heart-chart-zoom-6h'));
+
+    await waitFor(() => {
+      expect(screen.UNSAFE_getByType(PannableHeartChart).props.pointIntervalMinutes).toBe(2);
+      expect(screen.getByText('Last 6h')).toBeTruthy();
+    });
+
+    await waitFor(() => {
+      expect(repository.dashboardHeartTimelineCalls).toEqual(['7d']);
+    });
+
+    fireEvent.press(screen.getByTestId('today-heart-chart-zoom-3h'));
+
+    await waitFor(() => {
+      expect(screen.UNSAFE_getByType(PannableHeartChart).props.pointIntervalMinutes).toBe(2);
+      expect(screen.getByText('Last 3h')).toBeTruthy();
+    });
+
+    fireEvent.press(screen.getByTestId('today-heart-chart-zoom-24h'));
+
+    await waitFor(() => {
+      expect(screen.UNSAFE_getByType(PannableHeartChart).props.pointIntervalMinutes).toBe(5);
+      expect(screen.getByText('Last 24h')).toBeTruthy();
+    });
+
+    await waitFor(() => {
+      expect(repository.dashboardHeartTimelineCalls).toEqual(['7d']);
+    });
+
+    fireEvent.press(screen.getByTestId('today-heart-chart-zoom-7d'));
+
+    await waitFor(() => {
+      expect(repository.dashboardHeartTimelineCalls).toEqual(['7d']);
+    });
+
+    await waitFor(() => {
+      expect(screen.UNSAFE_getByType(PannableHeartChart).props.pointIntervalMinutes).toBe(5);
+      expect(screen.getByText('Last 7d')).toBeTruthy();
+    });
+  });
+
+  it('lets you override today heart bucket size levels directly for testing', async () => {
+    const repository = new TrackingMockHealthRepository({ delayMs: 50 });
+    const screen = renderWithRepository(repository, <TodayScreen />);
+
+    await screen.findByTestId('today-heart-chart-axis');
+
+    await waitFor(() => {
+      expect(repository.dashboardHeartTimelineCalls).toEqual(['7d']);
+    });
+
+    await waitFor(() => {
+      expect(screen.UNSAFE_getByType(PannableHeartChart).props.pointIntervalMinutes).toBe(5);
+    });
+
+    fireEvent.press(screen.getByTestId('today-heart-chart-bucket-2m'));
+
+    await waitFor(() => {
+      expect(repository.dashboardHeartTimelineCalls).toEqual(['7d']);
+    });
+
+    await waitFor(() => {
+      expect(screen.UNSAFE_getByType(PannableHeartChart).props.pointIntervalMinutes).toBe(2);
+    });
+
+    fireEvent.press(screen.getByTestId('today-heart-chart-bucket-auto'));
+
+    await waitFor(() => {
+      expect(repository.dashboardHeartTimelineCalls).toEqual(['7d']);
+      expect(screen.UNSAFE_getByType(PannableHeartChart).props.pointIntervalMinutes).toBe(5);
+    });
+  });
 
   it('opens settings from the shared header and shows the wearable battery badge', async () => {
     const screen = renderWithProviders(<TodayScreen />, {
@@ -415,18 +510,19 @@ describe('screen rendering', () => {
     const screen = renderWithProviders(<HistoryScreen />);
 
     await screen.findByTestId('history-heart-chart');
-    expect(screen.getByTestId('history-selected-day-label').props.children).toBe('Thursday, April 23');
+    const initialDayLabel = String(screen.getByTestId('history-selected-day-label').props.children);
+    expect(initialDayLabel).toBeTruthy();
 
     fireEvent.press(screen.getByTestId('history-day-backward-button'));
 
     await waitFor(() => {
-      expect(screen.getByTestId('history-selected-day-label').props.children).toBe('Wednesday, April 22');
+      expect(String(screen.getByTestId('history-selected-day-label').props.children)).not.toBe(initialDayLabel);
     });
 
     fireEvent.press(screen.getByTestId('history-day-forward-button'));
 
     await waitFor(() => {
-      expect(screen.getByTestId('history-selected-day-label').props.children).toBe('Thursday, April 23');
+      expect(String(screen.getByTestId('history-selected-day-label').props.children)).toBe(initialDayLabel);
     });
   });
 

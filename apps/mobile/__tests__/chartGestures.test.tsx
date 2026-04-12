@@ -14,7 +14,7 @@ jest.mock('@expo/vector-icons', () => {
 
 import { SleepStageChart } from '@/components/charts/SleepStageChart';
 import { TrendChart } from '@/components/charts/TrendChart';
-import { HeartSnapshotCard } from '@/components/dashboard/DashboardSnapshotCards';
+import { HeartCard } from '@/components/dashboard/DashboardCards';
 import {
   buildFocusedHeartMarkerWindow,
   buildHeartDomainAnimation,
@@ -37,6 +37,7 @@ import {
 } from '@/components/dashboard/PannableHeartChart';
 import { ScreenShell } from '@/components/layout/ScreenShell';
 import { colors } from '@/constants/theme';
+import type { FocusedHeartDetail, HeartIntradayMarker } from '@/types/health';
 import { formatAxisTime } from '@/utils/dateTime';
 
 function getScrollView(screen: ReturnType<typeof render>) {
@@ -377,7 +378,7 @@ describe('chart gesture ownership', () => {
     });
   });
 
-  it('restyles the heart snapshot card while a focused sleep session is active', async () => {
+  it('restyles the heart card while a focused sleep session is active', async () => {
     const sleepMarker = {
       id: 'sleep-focus',
       kind: 'sleep' as const,
@@ -401,9 +402,9 @@ describe('chart gesture ownership', () => {
       },
     };
     const screen = render(
-      <HeartSnapshotCard
+      <HeartCard
         chartTestID="heart-card"
-        snapshot={{
+        cardData={{
           restingHr: 48,
           averageHr: 69,
           maxHr: 131,
@@ -494,9 +495,9 @@ describe('chart gesture ownership', () => {
 
   it('keeps the focused activity gradient warm without the green primary stop', async () => {
     const screen = render(
-      <HeartSnapshotCard
+      <HeartCard
         chartTestID="heart-activity-card"
-        snapshot={{
+        cardData={{
           restingHr: 49,
           averageHr: 71,
           maxHr: 133,
@@ -600,7 +601,7 @@ describe('chart gesture ownership', () => {
     expect(body.props.onResponderTerminationRequest?.()).toBe(false);
   });
 
-  it('keeps the add new activity action visible after a same-length heart snapshot refresh', async () => {
+  it('keeps the add new activity action visible after a same-length heart card refresh', async () => {
     const activityReviewActions = {
       confirmActivity: jest.fn(async () => undefined),
       createManualActivity: jest.fn(async () => 'manual-1'),
@@ -631,10 +632,10 @@ describe('chart gesture ownership', () => {
       markers: [],
     };
     const screen = render(
-      <HeartSnapshotCard
+      <HeartCard
         activityReviewActions={activityReviewActions}
         chartTestID="heart-add-action"
-        snapshot={firstSnapshot}
+        cardData={firstSnapshot}
         trailingLabel="Last 12h"
         viewportKey="2026-04-23"
         windowPointCount={60}
@@ -654,10 +655,10 @@ describe('chart gesture ownership', () => {
 
     act(() => {
       screen.rerender(
-        <HeartSnapshotCard
+        <HeartCard
           activityReviewActions={activityReviewActions}
           chartTestID="heart-add-action"
-          snapshot={secondSnapshot}
+          cardData={secondSnapshot}
           trailingLabel="Last 12h"
           viewportKey="2026-04-23"
           windowPointCount={60}
@@ -671,7 +672,7 @@ describe('chart gesture ownership', () => {
     });
   });
 
-  it('restores the idle add action when a focused marker is no longer present in the current snapshot', async () => {
+  it('restores the idle add action when a focused marker is no longer present in the current card data', async () => {
     const activityReviewActions = {
       confirmActivity: jest.fn(async () => undefined),
       createManualActivity: jest.fn(async () => 'manual-1'),
@@ -716,10 +717,10 @@ describe('chart gesture ownership', () => {
       markers: [],
     };
     const screen = render(
-      <HeartSnapshotCard
+      <HeartCard
         activityReviewActions={activityReviewActions}
         chartTestID="heart-stale-focus"
-        snapshot={firstSnapshot}
+        cardData={firstSnapshot}
         trailingLabel="Apr 23"
         viewportKey="history-heart-card"
         windowPointCount={60}
@@ -746,10 +747,10 @@ describe('chart gesture ownership', () => {
 
     act(() => {
       screen.rerender(
-        <HeartSnapshotCard
+        <HeartCard
           activityReviewActions={activityReviewActions}
           chartTestID="heart-stale-focus"
-          snapshot={secondSnapshot}
+          cardData={secondSnapshot}
           trailingLabel="Apr 24"
           viewportKey="history-heart-card"
           windowPointCount={60}
@@ -764,11 +765,110 @@ describe('chart gesture ownership', () => {
     });
   });
 
+  it('swaps in denser focused heart detail when inspecting a short activity marker', async () => {
+    const focusStart = new Date(2026, 3, 23, 8, 0, 0, 0);
+    let resolveFocusedDetail: ((marker: HeartIntradayMarker) => void) | null = null;
+    const loadFocusedDetail = jest.fn<Promise<FocusedHeartDetail>, [HeartIntradayMarker]>(
+      (marker) =>
+        new Promise((resolve) => {
+          resolveFocusedDetail = (resolvedMarker) => {
+            resolve({
+              averageHr: 142,
+              maxHr: 168,
+              pointIntervalMinutes: 0.5,
+              series: Array.from({ length: 41 }, (_, index) => ({
+                label: formatAxisTime(new Date(focusStart.getTime() + index * 30_000), { includeSeconds: true }),
+                value: 132 + (index % 6),
+              })),
+              marker: {
+                ...resolvedMarker,
+                startFraction: 0,
+                endFraction: 1,
+              },
+            });
+          };
+        }),
+    );
+    const snapshot = {
+      restingHr: 48,
+      averageHr: 69,
+      maxHr: 131,
+      pointIntervalMinutes: 5,
+      series: Array.from({ length: 120 }, (_, index) => ({
+        label: formatAxisTime(new Date(2026, 3, 23, 0, index * 5, 0, 0)),
+        value: 58 + (index % 24),
+      })),
+      markers: [
+        {
+          id: 'focused-run',
+          kind: 'activity' as const,
+          label: 'Tempo Run',
+          timeLabel: '8:00 - 8:20',
+          startFraction: 0.33,
+          endFraction: 0.4,
+          startTimeMs: focusStart.getTime(),
+          endTimeMs: focusStart.getTime() + 20 * 60_000,
+          details: {
+            durationMinutes: 20,
+            reviewState: 'confirmed' as const,
+            source: 'manual' as const,
+          },
+        },
+      ],
+    };
+    const screen = render(
+      <HeartCard
+        chartTestID="heart-focused-detail"
+        loadFocusedDetail={loadFocusedDetail}
+        cardData={snapshot}
+        trailingLabel="Apr 23"
+        viewportKey="2026-04-23"
+        windowPointCount={60}
+      />,
+    );
+
+    const viewport = screen.getByTestId('heart-focused-detail-viewport');
+
+    act(() => {
+      viewport.props.onLayout?.({ nativeEvent: { layout: { width: 240, height: 150 } } });
+    });
+
+    expect(screen.UNSAFE_getByType(PannableHeartChart).props.pointIntervalMinutes).toBe(5);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('heart-focused-detail-marker-focused-run')).toBeTruthy();
+    });
+
+    fireEvent.press(screen.getByTestId('heart-focused-detail-marker-focused-run'));
+
+    await waitFor(() => {
+      expect(screen.getByText('Tempo Run')).toBeTruthy();
+      expect(screen.getByTestId('heart-focused-detail-return-button')).toBeTruthy();
+      expect(loadFocusedDetail).toHaveBeenCalledWith(expect.objectContaining({ id: 'focused-run' }));
+    });
+
+    expect(screen.UNSAFE_getByType(PannableHeartChart).props.pointIntervalMinutes).toBe(5);
+
+    await act(async () => {
+      resolveFocusedDetail?.(snapshot.markers[0]!);
+    });
+
+    await waitFor(() => {
+      const chart = screen.UNSAFE_getByType(PannableHeartChart);
+
+      expect(chart.props.pointIntervalMinutes).toBe(0.5);
+      expect(chart.props.points).toHaveLength(41);
+      expect(chart.props.points[0]?.label).toBe('8:00 AM');
+      expect(chart.props.points[1]?.label).toBe('8:00:30 AM');
+      expect(screen.getByTestId('heart-focused-detail-return-button')).toBeTruthy();
+    });
+  });
+
   it('derives heart metrics from the current visible window', async () => {
     const screen = render(
-      <HeartSnapshotCard
+      <HeartCard
         chartTestID="heart-window-metrics"
-        snapshot={{
+        cardData={{
           restingHr: 40,
           averageHr: 75,
           maxHr: 140,
@@ -850,10 +950,10 @@ describe('chart gesture ownership', () => {
       markers: [],
     };
     const screen = render(
-      <HeartSnapshotCard
+      <HeartCard
         activityReviewActions={activityReviewActions}
         chartTestID="heart-add-visible"
-        snapshot={firstSnapshot}
+        cardData={firstSnapshot}
         trailingLabel="Last 12h"
         viewportKey="2026-04-23"
         windowPointCount={60}
@@ -873,10 +973,10 @@ describe('chart gesture ownership', () => {
 
     act(() => {
       screen.rerender(
-        <HeartSnapshotCard
+        <HeartCard
           activityReviewActions={activityReviewActions}
           chartTestID="heart-add-visible"
-          snapshot={secondSnapshot}
+          cardData={secondSnapshot}
           trailingLabel="Last 12h"
           viewportKey="2026-04-23"
           windowPointCount={61}
@@ -911,10 +1011,10 @@ describe('chart gesture ownership', () => {
       markers: [],
     };
     const screen = render(
-      <HeartSnapshotCard
+      <HeartCard
         activityReviewActions={activityReviewActions}
         chartTestID="heart-history-idle"
-        snapshot={snapshot}
+        cardData={snapshot}
         trailingLabel="Apr 23"
         viewportKey="2026-04-23"
         windowPointCount={60}
@@ -935,10 +1035,10 @@ describe('chart gesture ownership', () => {
 
     act(() => {
       screen.rerender(
-        <HeartSnapshotCard
+        <HeartCard
           activityReviewActions={activityReviewActions}
           chartTestID="heart-history-idle"
-          snapshot={snapshot}
+          cardData={snapshot}
           trailingLabel="Apr 22"
           viewportKey="2026-04-22"
           windowPointCount={60}
@@ -964,10 +1064,10 @@ describe('chart gesture ownership', () => {
       updateSleep: jest.fn(async () => undefined),
     };
     const screen = render(
-      <HeartSnapshotCard
+      <HeartCard
         activityReviewActions={activityReviewActions}
         chartTestID="heart-draft-card"
-        snapshot={{
+        cardData={{
           restingHr: 48,
           averageHr: 69,
           maxHr: 131,

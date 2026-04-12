@@ -1,6 +1,12 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 
-import type { ActivityRescanResult, HealthCacheScope, HealthRepository, ManualActivityKind } from '@/data/HealthRepository';
+import type {
+  ActivityRescanResult,
+  DashboardHeartTimelineOptions,
+  HealthCacheScope,
+  HealthRepository,
+  ManualActivityKind,
+} from '@/data/HealthRepository';
 import {
   ACTIVITY_DETECTOR_DAYPARTS,
   DEFAULT_ACTIVITY_DETECTOR_THRESHOLDS,
@@ -22,27 +28,33 @@ import type {
   DashboardDayState,
   DashboardInsight,
   DerivedRefreshState,
-  DashboardSnapshot,
-  HeartCardSnapshot,
+  FocusedHeartDetail,
+  HeartCardData,
   HeartIntradayMarkerDetails,
   HeartIntradayMarker,
-  HeartHistorySnapshot,
+  HeartHistoryData,
+  HistoryOverview,
   HistoryRange,
   MetricSeries,
+  HeartTimelineSample,
+  HeartTimelineWindow,
   RecoveryBreakdown,
-  SleepCardSnapshot,
-  SleepHistorySnapshot,
-  SleepPlanSnapshot,
+  SleepCardData,
+  SleepHistoryData,
+  SleepPlan,
   SleepSession,
   SleepStage,
   SleepStageSegment,
-  TrendMetricSnapshot,
+  TodayOverview,
+  TrendMetric,
   TrendPoint,
-  TrendSnapshot,
-  WellnessSnapshot,
+  TrendData,
+  WellnessData,
 } from '@/types/health';
 import { addMinutes, dateKey, formatAxisTime, formatClock, formatClockMinutes, formatLongDate, formatShortDate, formatSqliteDateTime, hoursBetween, minutesBetween, parseSqliteDateTime } from '@/utils/dateTime';
 import { describeRecovery, describeSleepScore, formatMetricNumber } from '@/utils/formatters';
+import { selectFocusedHeartBucketMinutes } from '@/utils/heartChartDetail';
+import { buildHeartCardDataFromWindow } from '@/utils/heartTimeline';
 import {
   filterPlausibleRecordedBpms,
   isPlausibleRecordedBpm,
@@ -67,7 +79,7 @@ const dashboardAggregateEnsurePromises = new WeakMap<SQLiteDatabase, Promise<voi
 const heartIntradayEnsurePromises = new WeakMap<SQLiteDatabase, Promise<void>>();
 const wellnessDayEnsurePromises = new WeakMap<SQLiteDatabase, Promise<void>>();
 
-const DASHBOARD_LAYOUT_VERSION = 4;
+const DASHBOARD_LAYOUT_VERSION = 5;
 const MIN_SLEEP_DURATION_MINUTES = 60;
 const MAX_SLEEP_PAUSE_MINUTES = 60;
 const ACTIVITY_CHANGE_THRESHOLD_MINUTES = 15;
@@ -81,6 +93,15 @@ const DASHBOARD_HEART_BUCKET_MINUTES = 5;
 const DASHBOARD_DAY_METRIC_BUCKET_MINUTES = 60;
 const DASHBOARD_SLEEP_METRIC_BUCKET_MINUTES = 30;
 const HEART_INTRADAY_BUCKET_MINUTES = 5;
+const HEART_INTRADAY_BUCKET_SECONDS = HEART_INTRADAY_BUCKET_MINUTES * 60;
+const HEART_INTRADAY_METRIC_KEY = 'heart_bpm';
+const HEART_DETAIL_FINE_BUCKET_SECONDS = 15;
+const HEART_GRAPH_FINE_BUCKET_SECONDS = 30;
+const HEART_GRAPH_BUCKET_RESOLUTIONS_SECONDS = [
+  HEART_DETAIL_FINE_BUCKET_SECONDS,
+  HEART_GRAPH_FINE_BUCKET_SECONDS,
+  HEART_INTRADAY_BUCKET_SECONDS,
+] as const;
 const TODAY_HEART_WINDOW_HOURS = 12;
 const SLEEP_CONSISTENCY_WINDOW_NIGHTS = 7;
 const MIN_SLEEP_CONSISTENCY_NIGHTS = 3;
@@ -92,6 +113,30 @@ const SHOULD_LOG_MOBILE_PERF =
   typeof __DEV__ !== 'undefined' &&
   __DEV__ &&
   (typeof process === 'undefined' || process.env.NODE_ENV !== 'test');
+
+const HEART_RATE_FULL_SELECT_COLUMNS = `
+  id,
+  bpm,
+  time,
+  rr_intervals,
+  stress,
+  spo2,
+  skin_temp,
+  ppg_green,
+  ppg_red_ir,
+  spo2_red,
+  spo2_ir,
+  skin_temp_raw,
+  ambient_light,
+  led_drive_1,
+  led_drive_2,
+  resp_rate_raw,
+  signal_quality,
+  skin_contact,
+  accel_gravity_x,
+  accel_gravity_y,
+  accel_gravity_z
+`;
 
 interface SensorDataRow {
   ppg_green?: number;
@@ -116,7 +161,20 @@ interface HeartRateQueryRow {
   stress: number | null;
   spo2: number | null;
   skin_temp: number | null;
-  sensor_data: string | null;
+  ppg_green: number | null;
+  ppg_red_ir: number | null;
+  spo2_red: number | null;
+  spo2_ir: number | null;
+  skin_temp_raw: number | null;
+  ambient_light: number | null;
+  led_drive_1: number | null;
+  led_drive_2: number | null;
+  resp_rate_raw: number | null;
+  signal_quality: number | null;
+  skin_contact: number | null;
+  accel_gravity_x: number | null;
+  accel_gravity_y: number | null;
+  accel_gravity_z: number | null;
 }
 
 interface HeartRateRecord {
@@ -186,6 +244,39 @@ interface HeartIntradayBucketRow {
   max_triplet_avg: number | null;
 }
 
+interface HeartIntradayBucketSummaryRow extends HeartIntradayBucketRow {
+  min_bpm: number;
+  max_bpm: number;
+}
+
+interface IntradayMetricBucketRow {
+  metric_key: string;
+  bucket_seconds: number;
+  bucket_start: string;
+  sample_count: number;
+  min_value: number | null;
+  avg_value: number | null;
+  max_value: number | null;
+  first_value: number | null;
+  last_value: number | null;
+}
+
+interface HeartIntradayBucketDetailRow {
+  bucket_seconds: number;
+  bucket_start: string;
+  second_bpm: number | null;
+  penultimate_bpm: number | null;
+  max_triplet_avg: number | null;
+}
+
+interface IntradayMetricBucketStateRow {
+  metric_key: string;
+  bucket_seconds: number;
+  source_row_count: number;
+  source_last_sample_time: string | null;
+  refreshed_at: string;
+}
+
 interface BucketedHeartWindow {
   latestHeartDate: Date | null;
   intradayStart: Date | null;
@@ -193,6 +284,15 @@ interface BucketedHeartWindow {
   bucketSamples: HeartRateSample[];
   averageBpm: number | null;
   sustainedPeakBpm: number | null;
+}
+
+interface RawHeartWindow {
+  latestHeartDate: Date | null;
+  intradayStart: Date | null;
+  rawRowCount: number;
+  samples: HeartTimelineSample[];
+  averageHr: number | null;
+  maxHr: number | null;
 }
 
 interface SleepCycleRow {
@@ -383,16 +483,6 @@ interface HeartIntradayBucketStateRow {
   refreshed_at: string;
 }
 
-interface DashboardSnapshotCacheRow {
-  snapshot_json: string;
-  snapshot_kind: 'full' | 'post_sync_heart_only';
-  built_at: string;
-  source_heart_count: number;
-  source_last_heart_time: string | null;
-  derived_refreshed_at: string | null;
-  last_error: string | null;
-}
-
 interface PreparedDataBundle {
   heartRows: HeartRateRecord[];
   sleepCycles: SleepCycleRecord[];
@@ -557,20 +647,43 @@ function parseRrIntervals(value: string): number[] {
     .filter((part) => Number.isFinite(part) && part > 0);
 }
 
-function parseSensorData(value: string | null): SensorDataRow | null {
-  if (!value) {
-    return null;
+function buildAccelGravity(row: HeartRateQueryRow) {
+  if (
+    row.accel_gravity_x !== null &&
+    row.accel_gravity_y !== null &&
+    row.accel_gravity_z !== null
+  ) {
+    return [row.accel_gravity_x, row.accel_gravity_y, row.accel_gravity_z] as [number, number, number];
   }
 
-  try {
-    return JSON.parse(value) as SensorDataRow;
-  } catch {
-    return null;
-  }
+  return null;
+}
+
+function buildSensorDataFromRow(row: HeartRateQueryRow): SensorDataRow | null {
+  const accelGravity = buildAccelGravity(row);
+
+  const sensorData: SensorDataRow = {
+    ppg_green: row.ppg_green ?? undefined,
+    ppg_red_ir: row.ppg_red_ir ?? undefined,
+    spo2_red: row.spo2_red ?? undefined,
+    spo2_ir: row.spo2_ir ?? undefined,
+    skin_temp_raw: row.skin_temp_raw ?? undefined,
+    ambient_light: row.ambient_light ?? undefined,
+    led_drive_1: row.led_drive_1 ?? undefined,
+    led_drive_2: row.led_drive_2 ?? undefined,
+    resp_rate_raw: row.resp_rate_raw ?? undefined,
+    signal_quality: row.signal_quality ?? undefined,
+    skin_contact: row.skin_contact ?? undefined,
+    accel_gravity: accelGravity ?? undefined,
+  };
+
+  return Object.values(sensorData).some((value) => value !== undefined && value !== null)
+    ? sensorData
+    : null;
 }
 
 function toHeartRateRecord(row: HeartRateQueryRow): HeartRateRecord {
-  const sensorData = parseSensorData(row.sensor_data);
+  const sensorData = buildSensorDataFromRow(row);
 
   return {
     id: row.id,
@@ -582,10 +695,10 @@ function toHeartRateRecord(row: HeartRateQueryRow): HeartRateRecord {
     spo2: row.spo2,
     skinTemp: row.skin_temp,
     sensorData,
-    skinContact: sensorData?.skin_contact ?? null,
-    gravity: sensorData?.accel_gravity ?? null,
-    ppgGreen: sensorData?.ppg_green ?? null,
-    signalQuality: sensorData?.signal_quality ?? null,
+    skinContact: row.skin_contact ?? sensorData?.skin_contact ?? null,
+    gravity: buildAccelGravity(row),
+    ppgGreen: row.ppg_green ?? sensorData?.ppg_green ?? null,
+    signalQuality: row.signal_quality ?? sensorData?.signal_quality ?? null,
   };
 }
 
@@ -1081,7 +1194,7 @@ function createTimeBuckets<T extends { bpm: number; date: Date }>(
     const bucket = buckets.get(bucketStart);
     const bucketSummary = bucket ? summarizeHeartRows(bucket) : null;
     series.push({
-      label: formatAxisTime(new Date(bucketStart)),
+      label: formatAxisTime(new Date(bucketStart), { includeSeconds: bucketMinutes < 1 }),
       value: bucketSummary ? Math.round(bucketSummary.average) : null,
     });
   }
@@ -1439,12 +1552,12 @@ async function persistSleepPreferences(db: SQLiteDatabase, preferences: SleepPre
   );
 }
 
-function buildSleepPlanSnapshot(
+function buildSleepPlan(
   preferences: SleepPreferences,
   sleeps: SleepCycleRecord[],
   activities: ActivityRecord[],
   now = new Date(),
-): SleepPlanSnapshot {
+): SleepPlan {
   const latestSleep = sleeps.at(-1) ?? null;
   const recentSleepDurations = sleeps.map((sleep) => sleep.asleepMinutes ?? minutesBetween(sleep.start, sleep.end));
   const rawSleepDebtMinutes = calculateSleepDebtMinutes(recentSleepDurations);
@@ -2146,7 +2259,7 @@ function buildDashboardDayState(dayKey: string, availableDayKeys: readonly strin
   };
 }
 
-function buildTrendMetricSnapshot(metric: MetricSeries, id: TrendMetricSnapshot['id']): TrendMetricSnapshot {
+function buildTrendMetric(metric: MetricSeries, id: TrendMetric['id']): TrendMetric {
   return {
     ...metric,
     id,
@@ -2160,7 +2273,7 @@ function averageNullable(values: Array<number | null>) {
 
 function buildDashboardInsights(options: {
   recoveryScore: number | null;
-  sleepCard: SleepCardSnapshot;
+  sleepCard: SleepCardData;
   selectedStrain: number | null;
   stressCard: MetricSeries;
   activities: readonly ActivitySummary[];
@@ -2209,16 +2322,9 @@ function buildDashboardInsights(options: {
   return insights.slice(0, 3);
 }
 
-function buildEmptyDashboardSnapshot(now: Date, deviceState: DeviceStateRow | null): DashboardSnapshot {
+function buildEmptyHistoryOverview(now: Date): HistoryOverview {
   const dayKey = dateKey(now);
-  const defaultSleepNeedMinutes = BASE_SLEEP_NEED_MINUTES;
-  const defaultOptimalBedtimeMinutes = calculateOptimalBedtimeMinutes(
-    DEFAULT_TARGET_WAKE_MINUTES,
-    defaultSleepNeedMinutes,
-  );
   return {
-    layoutVersion: DASHBOARD_LAYOUT_VERSION,
-    greeting: greetingForHour(now.getHours()),
     dateLabel: formatLongDate(now),
     day: buildDashboardDayState(dayKey, [dayKey]),
     recovery: {
@@ -2228,26 +2334,11 @@ function buildEmptyDashboardSnapshot(now: Date, deviceState: DeviceStateRow | nu
       isEstimated: true,
       missingReason: NO_HISTORY_REASON,
     },
-    tonightPlan: {
-      targetWakeMinutes: DEFAULT_TARGET_WAKE_MINUTES,
-      targetWakeTime: formatClockMinutes(DEFAULT_TARGET_WAKE_MINUTES),
-      optimalBedtimeMinutes: defaultOptimalBedtimeMinutes,
-      optimalBedtime: formatClockMinutes(defaultOptimalBedtimeMinutes),
-      sleepNeedMinutes: defaultSleepNeedMinutes,
-      sleepDebtMinutes: 0,
-      napCreditMinutes: 0,
-      alarmEnabled: false,
-    },
-    summaryStats: [
-      { label: 'HRV', value: '-- ms', accent: 'green', missingReason: NO_HISTORY_REASON },
-      { label: 'RHR', value: '-- bpm', accent: 'cyan', missingReason: NO_HISTORY_REASON },
-      { label: 'Sleep', value: '--', accent: 'violet', missingReason: NO_SLEEP_REASON },
-      { label: 'Strain', value: '--', accent: 'heart', missingReason: NO_HISTORY_REASON },
-    ],
     heartCard: {
       restingHr: null,
       averageHr: null,
       maxHr: null,
+      pointIntervalMinutes: HEART_INTRADAY_BUCKET_MINUTES,
       series: [],
       markers: [],
       missingReason: NO_HISTORY_REASON,
@@ -2270,13 +2361,38 @@ function buildEmptyDashboardSnapshot(now: Date, deviceState: DeviceStateRow | nu
       isEstimated: true,
       missingReason: NO_HISTORY_REASON,
     },
-    hrvCard: emptyDashboardMetricSeries('HRV', 'green', 'ms', NO_SLEEP_REASON),
-    stressCard: emptyDashboardMetricSeries('Stress', 'alert', '', NO_HISTORY_REASON),
-    spo2Card: emptyDashboardMetricSeries('SpO2', 'cyan', '%', LIMITED_SENSOR_REASON),
-    skinTemperatureCard: emptyDashboardMetricSeries('Skin Temperature', 'heart', '°C', LIMITED_SENSOR_REASON),
     activitySummary: [],
     insights: [],
-    lastSyncLabel: deviceState?.last_synced_at ?? 'Local seed loaded',
+  };
+}
+
+function buildEmptyTodayOverview(now: Date, _deviceState: DeviceStateRow | null): TodayOverview {
+  const emptyHistory = buildEmptyHistoryOverview(now);
+  const defaultSleepNeedMinutes = BASE_SLEEP_NEED_MINUTES;
+  const defaultOptimalBedtimeMinutes = calculateOptimalBedtimeMinutes(
+    DEFAULT_TARGET_WAKE_MINUTES,
+    defaultSleepNeedMinutes,
+  );
+
+  return {
+    greeting: greetingForHour(now.getHours()),
+    dateLabel: emptyHistory.dateLabel,
+    day: emptyHistory.day,
+    recovery: emptyHistory.recovery,
+    tonightPlan: {
+      targetWakeMinutes: DEFAULT_TARGET_WAKE_MINUTES,
+      targetWakeTime: formatClockMinutes(DEFAULT_TARGET_WAKE_MINUTES),
+      optimalBedtimeMinutes: defaultOptimalBedtimeMinutes,
+      optimalBedtime: formatClockMinutes(defaultOptimalBedtimeMinutes),
+      sleepNeedMinutes: defaultSleepNeedMinutes,
+      sleepDebtMinutes: 0,
+      napCreditMinutes: 0,
+      alarmEnabled: false,
+    },
+    sleepCard: emptyHistory.sleepCard,
+    strainCard: emptyHistory.strainCard,
+    activitySummary: emptyHistory.activitySummary,
+    insights: emptyHistory.insights,
   };
 }
 
@@ -3149,6 +3265,8 @@ function buildHeartIntradayMarkers(
       timeLabel: `${formatClock(range.start)} - ${formatClock(range.end)}`,
       startFraction: range.startFraction,
       endFraction: range.endFraction,
+      startTimeMs: range.start.getTime(),
+      endTimeMs: range.end.getTime(),
       details: sleepDetailsBySleepId.get(sleep.sleepId),
     } satisfies HeartIntradayMarker];
   });
@@ -3166,6 +3284,8 @@ function buildHeartIntradayMarkers(
       timeLabel: `${formatClock(range.start)} - ${formatClock(range.end)}`,
       startFraction: range.startFraction,
       endFraction: range.endFraction,
+      startTimeMs: range.start.getTime(),
+      endTimeMs: range.end.getTime(),
       details: buildHeartIntradayActivityDetails(activity),
     } satisfies HeartIntradayMarker];
   });
@@ -3181,6 +3301,35 @@ function buildHeartIntradayMarkers(
 
     return left.label.localeCompare(right.label);
   });
+}
+
+function medianHeartSampleGapSeconds(rows: readonly HeartRateSampleRow[]) {
+  if (rows.length < 2) {
+    return null;
+  }
+
+  const gaps: number[] = [];
+
+  for (let index = 1; index < rows.length; index += 1) {
+    const gapSeconds =
+      (parseSqliteDateTime(rows[index].time).getTime() -
+        parseSqliteDateTime(rows[index - 1].time).getTime()) /
+      1000;
+
+    if (gapSeconds > 0) {
+      gaps.push(gapSeconds);
+    }
+  }
+
+  return gaps.length > 0 ? median(gaps) : null;
+}
+
+function buildFocusedHeartDetailMarker(marker: HeartIntradayMarker): HeartIntradayMarker {
+  return {
+    ...marker,
+    startFraction: 0,
+    endFraction: 1,
+  };
 }
 
 function summarizeSleepStages(
@@ -3238,7 +3387,7 @@ function axisLabelForMidpoint(start: Date, end: Date): string {
 
 async function loadPreparedData(db: SQLiteDatabase): Promise<PreparedDataBundle> {
   const [heartRows, sleepRows, activityRows, stageRows, deviceRows] = await Promise.all([
-    db.getAllAsync<HeartRateQueryRow>('SELECT id, bpm, time, rr_intervals, stress, spo2, skin_temp, sensor_data FROM heart_rate ORDER BY time ASC'),
+    db.getAllAsync<HeartRateQueryRow>(`SELECT ${HEART_RATE_FULL_SELECT_COLUMNS} FROM heart_rate ORDER BY time ASC`),
     db.getAllAsync<SleepCycleRow>('SELECT id, sleep_id, start, end, min_bpm, max_bpm, avg_bpm, min_hrv, max_hrv, avg_hrv, avg_skin_temp, score FROM sleep_cycles ORDER BY start ASC'),
     db.getAllAsync<ActivityRow>(`SELECT ${ACTIVITY_SELECT_COLUMNS} FROM activities WHERE review_state <> 'dismissed' ORDER BY start ASC`),
     db.getAllAsync<SleepStageRow>('SELECT id, sleep_id, start, end, stage, is_estimated FROM sleep_stage_segments ORDER BY start ASC'),
@@ -3282,7 +3431,7 @@ async function loadHeartRowsBetweenRange(db: SQLiteDatabase, start: Date, end: D
   return queryHeartRows(
     db,
     `
-      SELECT id, bpm, time, rr_intervals, stress, spo2, skin_temp, sensor_data
+      SELECT ${HEART_RATE_FULL_SELECT_COLUMNS}
       FROM heart_rate
       WHERE time >= ? AND time <= ?
       ORDER BY time ASC
@@ -3298,7 +3447,7 @@ async function loadHeartRowsForDay(db: SQLiteDatabase, dayKey: string) {
   return queryHeartRows(
     db,
     `
-      SELECT id, bpm, time, rr_intervals, stress, spo2, skin_temp, sensor_data
+      SELECT ${HEART_RATE_FULL_SELECT_COLUMNS}
       FROM heart_rate
       WHERE time >= ? AND time < ?
       ORDER BY time ASC
@@ -3415,61 +3564,6 @@ async function persistDerivedDataStateRow(
   );
 }
 
-async function loadDashboardSnapshotCacheRow(db: SQLiteDatabase) {
-  return db.getFirstAsync<DashboardSnapshotCacheRow>(
-    `
-      SELECT
-        snapshot_json,
-        snapshot_kind,
-        built_at,
-        source_heart_count,
-        source_last_heart_time,
-        derived_refreshed_at,
-        last_error
-      FROM dashboard_snapshot_cache
-      WHERE id = 1
-      LIMIT 1
-    `,
-  );
-}
-
-async function persistDashboardSnapshotCacheRow(
-  db: Pick<SQLiteDatabase, 'runAsync'>,
-  row: DashboardSnapshotCacheRow,
-) {
-  await db.runAsync(
-    `
-      INSERT INTO dashboard_snapshot_cache (
-        id,
-        snapshot_json,
-        snapshot_kind,
-        built_at,
-        source_heart_count,
-        source_last_heart_time,
-        derived_refreshed_at,
-        last_error
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        snapshot_json = excluded.snapshot_json,
-        snapshot_kind = excluded.snapshot_kind,
-        built_at = excluded.built_at,
-        source_heart_count = excluded.source_heart_count,
-        source_last_heart_time = excluded.source_last_heart_time,
-        derived_refreshed_at = excluded.derived_refreshed_at,
-        last_error = excluded.last_error
-    `,
-    1,
-    row.snapshot_json,
-    row.snapshot_kind,
-    row.built_at,
-    row.source_heart_count,
-    row.source_last_heart_time,
-    row.derived_refreshed_at,
-    row.last_error,
-  );
-}
-
 async function loadHeartGlobalStatsRow(db: SQLiteDatabase) {
   return db.getFirstAsync<HeartGlobalStatsRow>(
     `
@@ -3501,15 +3595,34 @@ async function persistHeartGlobalStatsRow(
   );
 }
 
-async function loadHeartIntradayBucketStateRow(db: SQLiteDatabase) {
-  return db.getFirstAsync<HeartIntradayBucketStateRow>(
+async function loadHeartIntradayBucketStateRow(
+  db: SQLiteDatabase,
+  bucketSeconds = HEART_INTRADAY_BUCKET_SECONDS,
+) {
+  const row = await db.getFirstAsync<{
+    source_row_count: number;
+    source_last_sample_time: string | null;
+    refreshed_at: string;
+  }>(
     `
-      SELECT source_heart_count, source_last_heart_time, refreshed_at
-      FROM heart_intraday_bucket_state
-      WHERE id = 1
+      SELECT source_row_count, source_last_sample_time, refreshed_at
+      FROM intraday_metric_bucket_state
+      WHERE metric_key = ? AND bucket_seconds = ?
       LIMIT 1
     `,
+    HEART_INTRADAY_METRIC_KEY,
+    bucketSeconds,
   );
+
+  if (!row) {
+    return null;
+  }
+
+  return {
+    source_heart_count: row.source_row_count,
+    source_last_heart_time: row.source_last_sample_time,
+    refreshed_at: row.refreshed_at,
+  } satisfies HeartIntradayBucketStateRow;
 }
 
 async function persistHeartIntradayBucketStateRow(
@@ -3540,93 +3653,30 @@ async function persistHeartIntradayBucketStateRow(
   );
 }
 
-function parseDashboardSnapshot(snapshotJson: string): DashboardSnapshot | null {
-  try {
-    const parsed = JSON.parse(snapshotJson) as DashboardSnapshot;
-    const now = new Date();
-    const fallbackDayKey = dateKey(now);
-    const fallbackDay = {
-      dayKey: fallbackDayKey,
-      shortLabel: formatShortDate(now),
-      longLabel: formatLongDate(now),
-      isToday: true,
-      olderDayKey: null,
-      olderDayLabel: null,
-      newerDayKey: null,
-      newerDayLabel: null,
-      availableDays: [
-        {
-          dayKey: fallbackDayKey,
-          shortLabel: formatShortDate(now),
-          longLabel: formatLongDate(now),
-        },
-      ],
-    } satisfies DashboardDayState;
-    const fallbackTonightPlan = {
-      targetWakeMinutes: DEFAULT_TARGET_WAKE_MINUTES,
-      targetWakeTime: formatClockMinutes(DEFAULT_TARGET_WAKE_MINUTES),
-      optimalBedtimeMinutes: calculateOptimalBedtimeMinutes(
-        DEFAULT_TARGET_WAKE_MINUTES,
-        BASE_SLEEP_NEED_MINUTES,
-      ),
-      optimalBedtime: formatClockMinutes(
-        calculateOptimalBedtimeMinutes(DEFAULT_TARGET_WAKE_MINUTES, BASE_SLEEP_NEED_MINUTES),
-      ),
-      sleepNeedMinutes: BASE_SLEEP_NEED_MINUTES,
-      sleepDebtMinutes: 0,
-      napCreditMinutes: 0,
-      alarmEnabled: false,
-    } satisfies SleepPlanSnapshot;
-    return {
-      ...parsed,
-      layoutVersion: parsed.layoutVersion ?? 1,
-      day: parsed.day
-        ? {
-            ...parsed.day,
-            availableDays:
-              parsed.day.availableDays && parsed.day.availableDays.length > 0
-                ? parsed.day.availableDays
-                : [
-                    {
-                      dayKey: parsed.day.dayKey,
-                      shortLabel: parsed.day.shortLabel,
-                      longLabel: parsed.day.longLabel,
-                    },
-                  ],
-          }
-        : fallbackDay,
-      tonightPlan: parsed.tonightPlan ?? fallbackTonightPlan,
-      heartCard: {
-        ...(parsed.heartCard ?? {}),
-        markers: parsed.heartCard?.markers ?? [],
-      },
-      hrvCard: parsed.hrvCard ?? emptyDashboardMetricSeries('HRV', 'green', 'ms', NO_SLEEP_REASON),
-      stressCard: parsed.stressCard ?? emptyDashboardMetricSeries('Stress', 'alert', '', NO_HISTORY_REASON),
-      spo2Card: parsed.spo2Card ?? emptyDashboardMetricSeries('SpO2', 'cyan', '%', LIMITED_SENSOR_REASON),
-      skinTemperatureCard:
-        parsed.skinTemperatureCard ??
-        emptyDashboardMetricSeries('Skin Temperature', 'heart', '°C', LIMITED_SENSOR_REASON),
-      activitySummary: parsed.activitySummary ?? [],
-      insights: parsed.insights ?? [],
-    } as DashboardSnapshot;
-  } catch {
-    return null;
-  }
-}
-
-function hasExpandedDashboardSnapshot(snapshot: DashboardSnapshot) {
-  return (
-    (snapshot.layoutVersion ?? 1) >= DASHBOARD_LAYOUT_VERSION &&
-    snapshot.summaryStats.length >= 4 &&
-    snapshot.day !== undefined &&
-    snapshot.day.availableDays !== undefined &&
-    snapshot.tonightPlan !== undefined &&
-    snapshot.hrvCard !== undefined &&
-    snapshot.stressCard !== undefined &&
-    snapshot.spo2Card !== undefined &&
-    snapshot.skinTemperatureCard !== undefined &&
-    snapshot.activitySummary !== undefined &&
-    snapshot.insights !== undefined
+async function persistIntradayMetricBucketStateRow(
+  db: Pick<SQLiteDatabase, 'runAsync'>,
+  row: IntradayMetricBucketStateRow,
+) {
+  await db.runAsync(
+    `
+      INSERT INTO intraday_metric_bucket_state (
+        metric_key,
+        bucket_seconds,
+        source_row_count,
+        source_last_sample_time,
+        refreshed_at
+      )
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(metric_key, bucket_seconds) DO UPDATE SET
+        source_row_count = excluded.source_row_count,
+        source_last_sample_time = excluded.source_last_sample_time,
+        refreshed_at = excluded.refreshed_at
+    `,
+    row.metric_key,
+    row.bucket_seconds,
+    row.source_row_count,
+    row.source_last_sample_time,
+    row.refreshed_at,
   );
 }
 
@@ -3636,34 +3686,60 @@ function normalizeTimeRange(fromTime: string, toTime: string) {
     : { fromTime: toTime, toTime: fromTime };
 }
 
+function bucketSecondsFromMinutes(bucketMinutes: number) {
+  return Math.max(Math.round(bucketMinutes * 60), 1);
+}
+
+function bucketStartForDateWithSeconds(date: Date, bucketSeconds: number) {
+  const bucketMs = bucketSeconds * 1000;
+  return formatSqliteDateTime(new Date(Math.floor(date.getTime() / bucketMs) * bucketMs));
+}
+
 function bucketStartForSqliteTime(value: string, bucketMinutes = DASHBOARD_HEART_BUCKET_MINUTES) {
-  const minute = Number.parseInt(value.slice(14, 16), 10);
-  const bucketMinute = minute - (minute % bucketMinutes);
-  return `${value.slice(0, 14)}${`${bucketMinute}`.padStart(2, '0')}:00`;
+  return bucketStartForDateWithSeconds(parseSqliteDateTime(value), bucketSecondsFromMinutes(bucketMinutes));
+}
+
+function bucketStartForSqliteTimeWithSeconds(value: string, bucketSeconds: number) {
+  return bucketStartForDateWithSeconds(parseSqliteDateTime(value), bucketSeconds);
 }
 
 function bucketStartForDate(date: Date, bucketMinutes = DASHBOARD_HEART_BUCKET_MINUTES) {
-  return bucketStartForSqliteTime(formatSqliteDateTime(date), bucketMinutes);
+  return bucketStartForDateWithSeconds(date, bucketSecondsFromMinutes(bucketMinutes));
 }
 
 function bucketEndExclusive(bucketStart: string, bucketMinutes = DASHBOARD_HEART_BUCKET_MINUTES) {
   return formatSqliteDateTime(addMinutes(parseSqliteDateTime(bucketStart), bucketMinutes));
 }
 
+function bucketEndExclusiveWithSeconds(bucketStart: string, bucketSeconds: number) {
+  return formatSqliteDateTime(new Date(parseSqliteDateTime(bucketStart).getTime() + bucketSeconds * 1000));
+}
+
 function summarizeIntradayBucketRows(
   bucketStart: string,
   rows: readonly HeartRateSampleRow[],
-): HeartIntradayBucketRow | null {
+): HeartIntradayBucketSummaryRow | null {
   const validRows = rows.filter((row) => sanitizeRecordedBpm(row.bpm) !== null);
   if (validRows.length === 0) {
     return null;
   }
 
   let total = 0;
+  let minBpm = validRows[0]!.bpm;
+  let maxBpm = validRows[0]!.bpm;
   let maxTripletAvg: number | null = null;
 
   for (let index = 0; index < validRows.length; index += 1) {
-    total += validRows[index].bpm;
+    const bpm = validRows[index].bpm;
+    total += bpm;
+
+    if (bpm < minBpm) {
+      minBpm = bpm;
+    }
+
+    if (bpm > maxBpm) {
+      maxBpm = bpm;
+    }
 
     if (index + 2 < validRows.length) {
       const tripletAvg = (validRows[index].bpm + validRows[index + 1].bpm + validRows[index + 2].bpm) / 3;
@@ -3680,17 +3756,19 @@ function summarizeIntradayBucketRows(
     penultimate_bpm: validRows.length > 1 ? validRows[validRows.length - 2]!.bpm : null,
     last_bpm: validRows[validRows.length - 1]!.bpm,
     max_triplet_avg: maxTripletAvg,
+    min_bpm: minBpm,
+    max_bpm: maxBpm,
   };
 }
 
 function buildIntradayBucketRows(
   rows: readonly HeartRateSampleRow[],
-  bucketMinutes = DASHBOARD_HEART_BUCKET_MINUTES,
+  bucketSeconds = bucketSecondsFromMinutes(DASHBOARD_HEART_BUCKET_MINUTES),
 ) {
   const grouped = new Map<string, HeartRateSampleRow[]>();
 
   for (const row of rows) {
-    const bucketStart = bucketStartForSqliteTime(row.time, bucketMinutes);
+    const bucketStart = bucketStartForSqliteTimeWithSeconds(row.time, bucketSeconds);
     const bucketRows = grouped.get(bucketStart);
 
     if (bucketRows) {
@@ -3738,13 +3816,6 @@ async function hasInvalidRecordedBpmRowsInRange(db: SQLiteDatabase, fromTime: st
   );
 
   return (row?.value ?? 0) > 0;
-}
-
-function shouldRepairCachedHeartCard(snapshot: DashboardSnapshot) {
-  return (
-    (snapshot.heartCard.maxHr !== null && !isPlausibleRecordedBpm(snapshot.heartCard.maxHr)) ||
-    (snapshot.heartCard.averageHr !== null && !isPlausibleRecordedBpm(snapshot.heartCard.averageHr))
-  );
 }
 
 function toHeartIntradayBucketSample(row: HeartIntradayBucketRow): HeartRateSample {
@@ -4390,29 +4461,49 @@ async function loadActivitiesForDay(db: SQLiteDatabase, dayKey: string, limit: n
   );
 }
 
-async function loadHeartBucketRowsBetweenRange(db: SQLiteDatabase, start: Date, end: Date) {
-  const startBucket = bucketStartForDate(start);
-  const endBucket = bucketStartForDate(end);
+async function loadHeartBucketRowsBetweenRange(
+  db: SQLiteDatabase,
+  start: Date,
+  end: Date,
+  bucketSeconds = HEART_INTRADAY_BUCKET_SECONDS,
+) {
+  const startBucket = bucketStartForDateWithSeconds(start, bucketSeconds);
+  const endBucket = bucketStartForDateWithSeconds(end, bucketSeconds);
 
-  return withAggregateReadLock(db, () =>
-    db.getAllAsync<HeartIntradayBucketRow>(
-      `
-        SELECT
-          bucket_start,
-          sample_count,
-          avg_bpm,
-          first_bpm,
-          second_bpm,
-          penultimate_bpm,
-          last_bpm,
-          max_triplet_avg
-        FROM heart_intraday_buckets
-        WHERE bucket_start >= ? AND bucket_start <= ?
-        ORDER BY bucket_start ASC
-      `,
-      startBucket,
-      endBucket,
-    ),
+  return withAggregateReadLock(db, () => loadStoredHeartIntradayBucketRows(db, startBucket, endBucket, bucketSeconds));
+}
+
+async function loadStoredHeartIntradayBucketRows(
+  db: Pick<SQLiteDatabase, 'getAllAsync'>,
+  startBucket: string,
+  endBucket: string,
+  bucketSeconds = HEART_INTRADAY_BUCKET_SECONDS,
+) {
+  return db.getAllAsync<HeartIntradayBucketRow>(
+    `
+      SELECT
+        buckets.bucket_start,
+        buckets.sample_count,
+        buckets.avg_value AS avg_bpm,
+        buckets.first_value AS first_bpm,
+        details.second_bpm,
+        details.penultimate_bpm,
+        buckets.last_value AS last_bpm,
+        details.max_triplet_avg
+      FROM intraday_metric_buckets AS buckets
+      LEFT JOIN heart_intraday_bucket_details AS details
+        ON details.bucket_seconds = buckets.bucket_seconds
+       AND details.bucket_start = buckets.bucket_start
+      WHERE buckets.metric_key = ?
+        AND buckets.bucket_seconds = ?
+        AND buckets.bucket_start >= ?
+        AND buckets.bucket_start <= ?
+      ORDER BY buckets.bucket_start ASC
+    `,
+    HEART_INTRADAY_METRIC_KEY,
+    bucketSeconds,
+    startBucket,
+    endBucket,
   );
 }
 
@@ -4557,6 +4648,147 @@ async function replaceHeartIntradayBucketRange(
   });
 }
 
+function toIntradayMetricBucketRow(
+  bucket: HeartIntradayBucketSummaryRow,
+  bucketSeconds: number,
+): IntradayMetricBucketRow {
+  return {
+    metric_key: HEART_INTRADAY_METRIC_KEY,
+    bucket_seconds: bucketSeconds,
+    bucket_start: bucket.bucket_start,
+    sample_count: bucket.sample_count,
+    min_value: bucket.min_bpm,
+    avg_value: bucket.avg_bpm,
+    max_value: bucket.max_bpm,
+    first_value: bucket.first_bpm,
+    last_value: bucket.last_bpm,
+  };
+}
+
+function toHeartIntradayBucketDetailRow(
+  bucket: HeartIntradayBucketRow,
+  bucketSeconds: number,
+): HeartIntradayBucketDetailRow {
+  return {
+    bucket_seconds: bucketSeconds,
+    bucket_start: bucket.bucket_start,
+    second_bpm: bucket.second_bpm,
+    penultimate_bpm: bucket.penultimate_bpm,
+    max_triplet_avg: bucket.max_triplet_avg,
+  };
+}
+
+async function replaceIntradayMetricBucketRange(
+  db: SQLiteDatabase,
+  bucketRangeStart: string,
+  bucketRangeEnd: string,
+  bucketSeconds: number,
+  bucketRows: readonly IntradayMetricBucketRow[],
+  options?: { replaceAll?: boolean },
+) {
+  await withExclusiveTransaction(db, async (tx) => {
+    if (options?.replaceAll) {
+      await tx.runAsync(
+        'DELETE FROM intraday_metric_buckets WHERE metric_key = ? AND bucket_seconds = ?',
+        HEART_INTRADAY_METRIC_KEY,
+        bucketSeconds,
+      );
+    } else {
+      await tx.runAsync(
+        `
+          DELETE FROM intraday_metric_buckets
+          WHERE metric_key = ?
+            AND bucket_seconds = ?
+            AND bucket_start >= ?
+            AND bucket_start <= ?
+        `,
+        HEART_INTRADAY_METRIC_KEY,
+        bucketSeconds,
+        bucketRangeStart,
+        bucketRangeEnd,
+      );
+    }
+
+    for (const bucket of bucketRows) {
+      await tx.runAsync(
+        `
+          INSERT INTO intraday_metric_buckets (
+            metric_key,
+            bucket_seconds,
+            bucket_start,
+            sample_count,
+            min_value,
+            avg_value,
+            max_value,
+            first_value,
+            last_value
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+        bucket.metric_key,
+        bucket.bucket_seconds,
+        bucket.bucket_start,
+        bucket.sample_count,
+        bucket.min_value,
+        bucket.avg_value,
+        bucket.max_value,
+        bucket.first_value,
+        bucket.last_value,
+      );
+    }
+  });
+}
+
+async function replaceHeartIntradayBucketDetailRange(
+  db: SQLiteDatabase,
+  bucketRangeStart: string,
+  bucketRangeEnd: string,
+  bucketSeconds: number,
+  bucketRows: readonly HeartIntradayBucketDetailRow[],
+  options?: { replaceAll?: boolean },
+) {
+  await withExclusiveTransaction(db, async (tx) => {
+    if (options?.replaceAll) {
+      await tx.runAsync(
+        'DELETE FROM heart_intraday_bucket_details WHERE bucket_seconds = ?',
+        bucketSeconds,
+      );
+    } else {
+      await tx.runAsync(
+        `
+          DELETE FROM heart_intraday_bucket_details
+          WHERE bucket_seconds = ?
+            AND bucket_start >= ?
+            AND bucket_start <= ?
+        `,
+        bucketSeconds,
+        bucketRangeStart,
+        bucketRangeEnd,
+      );
+    }
+
+    for (const bucket of bucketRows) {
+      await tx.runAsync(
+        `
+          INSERT INTO heart_intraday_bucket_details (
+            bucket_seconds,
+            bucket_start,
+            second_bpm,
+            penultimate_bpm,
+            max_triplet_avg
+          )
+          VALUES (?, ?, ?, ?, ?)
+        `,
+        bucket.bucket_seconds,
+        bucket.bucket_start,
+        bucket.second_bpm,
+        bucket.penultimate_bpm,
+        bucket.max_triplet_avg,
+      );
+    }
+  });
+}
+
 async function refreshHeartIntradayBucketsForRange(
   db: SQLiteDatabase,
   fromTime: string,
@@ -4571,28 +4803,49 @@ async function refreshHeartIntradayBucketsForRange(
         await tx.execAsync(`
           DELETE FROM heart_intraday_buckets;
           DELETE FROM heart_intraday_bucket_state;
+          DELETE FROM intraday_metric_buckets;
+          DELETE FROM intraday_metric_bucket_state;
+          DELETE FROM heart_intraday_bucket_details;
         `);
       });
       return;
     }
 
     const normalized = normalizeTimeRange(fromTime, toTime);
-    const bucketRangeStart = bucketStartForSqliteTime(normalized.fromTime);
-    const bucketRangeEnd = bucketStartForSqliteTime(normalized.toTime);
-    const bucketRows = buildIntradayBucketRows(
-      await queryHeartSampleRows(
-        db,
-        `
-          SELECT bpm, time
-          FROM heart_rate
-          WHERE time >= ? AND time < ?
-          ORDER BY time ASC
-        `,
-        [bucketRangeStart, bucketEndExclusive(bucketRangeEnd)],
-      ),
-    );
+    for (const bucketSeconds of HEART_GRAPH_BUCKET_RESOLUTIONS_SECONDS) {
+      const bucketRangeStart = bucketStartForSqliteTimeWithSeconds(normalized.fromTime, bucketSeconds);
+      const bucketRangeEnd = bucketStartForSqliteTimeWithSeconds(normalized.toTime, bucketSeconds);
+      const bucketRows = buildIntradayBucketRows(
+        await queryHeartSampleRows(
+          db,
+          `
+            SELECT bpm, time
+            FROM heart_rate
+            WHERE time >= ? AND time < ?
+            ORDER BY time ASC
+          `,
+          [bucketRangeStart, bucketEndExclusiveWithSeconds(bucketRangeEnd, bucketSeconds)],
+        ),
+        bucketSeconds,
+      );
 
-    await replaceHeartIntradayBucketRange(db, bucketRangeStart, bucketRangeEnd, bucketRows, options);
+      await replaceIntradayMetricBucketRange(
+        db,
+        bucketRangeStart,
+        bucketRangeEnd,
+        bucketSeconds,
+        bucketRows.map((bucket) => toIntradayMetricBucketRow(bucket, bucketSeconds)),
+        options,
+      );
+      await replaceHeartIntradayBucketDetailRange(
+        db,
+        bucketRangeStart,
+        bucketRangeEnd,
+        bucketSeconds,
+        bucketRows.map((bucket) => toHeartIntradayBucketDetailRow(bucket, bucketSeconds)),
+        options,
+      );
+    }
 
     const latestHeart = await db.getFirstAsync<TimeRow>(
       `
@@ -4602,11 +4855,15 @@ async function refreshHeartIntradayBucketsForRange(
         LIMIT 1
       `,
     );
-    await persistHeartIntradayBucketStateRow(db, {
-      source_heart_count: heartCount,
-      source_last_heart_time: latestHeart?.time ?? null,
-      refreshed_at: formatSqliteDateTime(new Date()),
-    });
+    for (const bucketSeconds of HEART_GRAPH_BUCKET_RESOLUTIONS_SECONDS) {
+      await persistIntradayMetricBucketStateRow(db, {
+        metric_key: HEART_INTRADAY_METRIC_KEY,
+        bucket_seconds: bucketSeconds,
+        source_row_count: heartCount,
+        source_last_sample_time: latestHeart?.time ?? null,
+        refreshed_at: formatSqliteDateTime(new Date()),
+      });
+    }
   });
 }
 
@@ -4802,7 +5059,7 @@ export async function refreshDerivedDataRange(
   const metricRows = await queryHeartRows(
     db,
     `
-      SELECT id, bpm, time, rr_intervals, stress, spo2, skin_temp, sensor_data
+      SELECT ${HEART_RATE_FULL_SELECT_COLUMNS}
       FROM heart_rate
       WHERE time >= ? AND time <= ?
       ORDER BY time ASC
@@ -4817,7 +5074,7 @@ export async function refreshDerivedDataRange(
   const detectionRows = await queryHeartRows(
     db,
     `
-      SELECT id, bpm, time, rr_intervals, stress, spo2, skin_temp, sensor_data
+      SELECT ${HEART_RATE_FULL_SELECT_COLUMNS}
       FROM heart_rate
       WHERE time >= ? AND time <= ?
       ORDER BY time ASC
@@ -4928,7 +5185,7 @@ export async function refreshDerivedData(db: SQLiteDatabase) {
   const queryStartedAt = Date.now();
   const heartRows = await queryHeartRows(
     db,
-    'SELECT id, bpm, time, rr_intervals, stress, spo2, skin_temp, sensor_data FROM heart_rate ORDER BY time ASC',
+    `SELECT ${HEART_RATE_FULL_SELECT_COLUMNS} FROM heart_rate ORDER BY time ASC`,
   );
   logMobilePerf('derived.full.queryHeartRows', queryStartedAt, {
     rows: heartRows.length,
@@ -5269,12 +5526,21 @@ async function ensureHeartIntradayBucketsReady(db: SQLiteDatabase) {
         LIMIT 1
       `,
     );
-    const state = await withAggregateReadLock(db, () => loadHeartIntradayBucketStateRow(db));
+    const states = await withAggregateReadLock(db, () =>
+      Promise.all(
+        HEART_GRAPH_BUCKET_RESOLUTIONS_SECONDS.map((bucketSeconds) =>
+          loadHeartIntradayBucketStateRow(db, bucketSeconds),
+        ),
+      ),
+    );
 
     if (
-      state &&
-      state.source_heart_count === heartCount &&
-      state.source_last_heart_time === (latestHeart?.time ?? null)
+      states.every(
+        (state) =>
+          state &&
+          state.source_heart_count === heartCount &&
+          state.source_last_heart_time === (latestHeart?.time ?? null),
+      )
     ) {
       logMobilePerf('dashboard.full.ensureIntradayBuckets.hit', ensureStartedAt, {
         heartCount,
@@ -5382,7 +5648,6 @@ async function loadDashboardIntradayRows(
 ) {
   return loadIntradayHeartWindow(db, latestHeartTime, {
     ...options,
-    useStoredBuckets: false,
     windowHours: TODAY_HEART_WINDOW_HOURS,
   });
 }
@@ -5390,7 +5655,7 @@ async function loadDashboardIntradayRows(
 async function loadIntradayHeartWindow(
   db: SQLiteDatabase,
   latestHeartTime: string | null,
-  options?: { ensureBuckets?: boolean; useStoredBuckets?: boolean; windowHours?: number },
+  options?: { bucketSeconds?: number; ensureBuckets?: boolean; useStoredBuckets?: boolean; windowHours?: number },
 ): Promise<BucketedHeartWindow> {
   if (!latestHeartTime) {
     return {
@@ -5404,11 +5669,12 @@ async function loadIntradayHeartWindow(
   }
 
   const latestHeartDate = parseSqliteDateTime(latestHeartTime);
+  const bucketSeconds = options?.bucketSeconds ?? HEART_INTRADAY_BUCKET_SECONDS;
   const windowHours = options?.windowHours ?? 24;
   const intradayStart = new Date(latestHeartDate.getTime() - windowHours * 3600000);
   const intradayStartSql = formatSqliteDateTime(intradayStart);
-  const firstBucketStart = bucketStartForDate(intradayStart);
-  const lastBucketStart = bucketStartForSqliteTime(latestHeartTime);
+  const firstBucketStart = bucketStartForDateWithSeconds(intradayStart, bucketSeconds);
+  const lastBucketStart = bucketStartForSqliteTimeWithSeconds(latestHeartTime, bucketSeconds);
 
   const loadRawWindow = async () => {
     const rawRows = await queryHeartSampleRows(
@@ -5434,7 +5700,7 @@ async function loadIntradayHeartWindow(
     } satisfies BucketedHeartWindow;
   };
 
-  if (options?.useStoredBuckets === false || (await hasInvalidRecordedBpmRowsInRange(db, intradayStartSql, latestHeartTime))) {
+  if (options?.useStoredBuckets === false) {
     return loadRawWindow();
   }
 
@@ -5442,59 +5708,18 @@ async function loadIntradayHeartWindow(
     await ensureHeartIntradayBucketsReady(db);
   }
 
-  let partialFirstBucket: HeartIntradayBucketRow[] = [];
-  let bucketQueryStart = firstBucketStart;
-
-  if (intradayStartSql > firstBucketStart) {
-    const firstBucketRows = await queryHeartSampleRows(
-      db,
-      `
-        SELECT bpm, time
-        FROM heart_rate
-        WHERE time >= ? AND time <= ?
-        ORDER BY time ASC
-      `,
-      [intradayStartSql, latestHeartTime < bucketEndExclusive(firstBucketStart) ? latestHeartTime : bucketEndExclusive(firstBucketStart)],
-    );
-
-    if (firstBucketRows.length > 0) {
-      const summary = summarizeIntradayBucketRows(firstBucketStart, firstBucketRows);
-      partialFirstBucket = summary ? [summary] : [];
-    }
-
-    bucketQueryStart = bucketEndExclusive(firstBucketStart);
-  }
-
   const storedBuckets =
-    bucketQueryStart > lastBucketStart
+    firstBucketStart > lastBucketStart
       ? []
       : await withAggregateReadLock(db, () =>
-          db.getAllAsync<HeartIntradayBucketRow>(
-            `
-              SELECT
-                bucket_start,
-                sample_count,
-                avg_bpm,
-                first_bpm,
-                second_bpm,
-                penultimate_bpm,
-                last_bpm,
-                max_triplet_avg
-              FROM heart_intraday_buckets
-              WHERE bucket_start >= ? AND bucket_start <= ?
-              ORDER BY bucket_start ASC
-            `,
-            bucketQueryStart,
-            lastBucketStart,
-          ),
+          loadStoredHeartIntradayBucketRows(db, firstBucketStart, lastBucketStart, bucketSeconds),
         );
 
-  if (options?.ensureBuckets === false && storedBuckets.length === 0 && bucketQueryStart <= lastBucketStart) {
+  if (options?.ensureBuckets === false && storedBuckets.length === 0 && firstBucketStart <= lastBucketStart) {
     return loadRawWindow();
   }
 
-  const bucketRows = [...partialFirstBucket, ...storedBuckets];
-  const summarizedWindow = summarizeBucketWindow(bucketRows);
+  const summarizedWindow = summarizeBucketWindow(storedBuckets);
 
   return {
     latestHeartDate,
@@ -5503,6 +5728,46 @@ async function loadIntradayHeartWindow(
     bucketSamples: summarizedWindow.bucketSamples,
     averageBpm: summarizedWindow.averageBpm,
     sustainedPeakBpm: summarizedWindow.sustainedPeakBpm,
+  };
+}
+
+async function loadRawHeartWindow(
+  db: SQLiteDatabase,
+  latestHeartTime: string | null,
+  windowHours: number,
+): Promise<RawHeartWindow> {
+  if (!latestHeartTime) {
+    return {
+      latestHeartDate: null,
+      intradayStart: null,
+      rawRowCount: 0,
+      samples: [],
+      averageHr: null,
+      maxHr: null,
+    };
+  }
+
+  const latestHeartDate = parseSqliteDateTime(latestHeartTime);
+  const intradayStart = new Date(latestHeartDate.getTime() - windowHours * 3600000);
+  const samples = await queryHeartSamples(
+    db,
+    `
+      SELECT bpm, time
+      FROM heart_rate
+      WHERE time >= ? AND time <= ?
+      ORDER BY time ASC
+    `,
+    [formatSqliteDateTime(intradayStart), latestHeartTime],
+  );
+  const summary = summarizeHeartRows(samples);
+
+  return {
+    latestHeartDate,
+    intradayStart,
+    rawRowCount: samples.length,
+    samples,
+    averageHr: summary ? Math.round(summary.average) : null,
+    maxHr: sustainedPeakBpm(filterPlausibleRecordedBpms(samples.map((sample) => sample.bpm))),
   };
 }
 
@@ -5566,7 +5831,7 @@ async function loadLatestSleepStagesForDashboard(db: SQLiteDatabase, latestSleep
   );
 }
 
-function buildDashboardSleepCard(latestSleep: SleepCycleRecord | null, stageRecords: SleepStageRecord[]): SleepCardSnapshot {
+function buildDashboardSleepCard(latestSleep: SleepCycleRecord | null, stageRecords: SleepStageRecord[]): SleepCardData {
   if (!latestSleep) {
     return {
       score: null,
@@ -5596,11 +5861,11 @@ function buildDashboardSleepCard(latestSleep: SleepCycleRecord | null, stageReco
   };
 }
 
-async function buildFullDashboardSnapshot(db: SQLiteDatabase): Promise<DashboardSnapshot> {
+async function buildTodayOverview(db: SQLiteDatabase): Promise<TodayOverview> {
   const buildStartedAt = Date.now();
   const now = new Date();
   await ensureDashboardAggregatesReady(db);
-  const baselineLoadStartedAt = Date.now();
+
   const [heartCount, heartState, heartDayStats, sleepCycles, deviceState] = await Promise.all([
     countHeartRows(db),
     loadLatestHeartState(db),
@@ -5608,17 +5873,12 @@ async function buildFullDashboardSnapshot(db: SQLiteDatabase): Promise<Dashboard
     loadRecentSleepCyclesForDashboard(db, 15),
     loadLatestDeviceStateRow(db),
   ]);
-  logMobilePerf('dashboard.full.loadBaseline', baselineLoadStartedAt, {
-    heartCount,
-    heartDays: heartDayStats.length,
-    sleepCycles: sleepCycles.length,
-  });
 
   if (heartCount === 0) {
-    logMobilePerf('dashboard.full.total', buildStartedAt, {
+    logMobilePerf('today.overview.total', buildStartedAt, {
       heartCount,
     });
-    return buildEmptyDashboardSnapshot(now, deviceState);
+    return buildEmptyTodayOverview(now, deviceState);
   }
 
   const rawLatestSleep = sleepCycles.at(-1) ?? null;
@@ -5646,12 +5906,12 @@ async function buildFullDashboardSnapshot(db: SQLiteDatabase): Promise<Dashboard
         )
       : Promise.resolve([]),
   ]);
+
   const latestHeartDate = heartState.latest_heart_time ? parseSqliteDateTime(heartState.latest_heart_time) : now;
   const selectedDayKey = dateKey(latestHeartDate);
   const selectedDayStart = startOfDayFromDayKey(selectedDayKey);
   const selectedDayEnd = endOfDashboardDayWindow(selectedDayKey, true, latestHeartDate);
-  const detailLoadStartedAt = Date.now();
-  const [selectedDayHeartRows, selectedSleepHeartRows, stageRecords, latestDashboardHeartCard] = await Promise.all([
+  const [selectedDayHeartRows, selectedSleepHeartRows, stageRecords] = await Promise.all([
     loadHeartRowsForDay(db, selectedDayKey),
     latestSleep ? loadHeartRowsBetweenRange(db, latestSleep.start, latestSleep.end) : Promise.resolve([]),
     Promise.resolve(
@@ -5659,20 +5919,13 @@ async function buildFullDashboardSnapshot(db: SQLiteDatabase): Promise<Dashboard
         ? allSleepStageRecords.filter((stage) => stage.sleepId === latestSleep.sleepId)
         : [],
     ),
-    loadLatestDashboardHeartCard(db, heartState.latest_heart_time, rescoredSleepCycles),
   ]);
-  logMobilePerf('dashboard.full.loadDetail', detailLoadStartedAt, {
-    dayRows: selectedDayHeartRows.length,
-    sleepRows: selectedSleepHeartRows.length,
-    stageRecords: stageRecords.length,
-  });
 
-  const computeStartedAt = Date.now();
   const dailyMinima = heartDayStats.map((stat) => stat.minBpm);
   const restingHr = personalizeRestingHr(rescoredSleepCycles, dailyMinima);
   const maxHr = personalizeMaxHrFromObservedPeak(heartState.observed_peak_bpm, restingHr);
   const recovery = estimateRecoveryScoreFromSleeps(latestSleep, rescoredSleepCycles, heartState.latest_stress);
-  const tonightPlan = buildSleepPlanSnapshot(sleepPreferences, rescoredSleepCycles, napActivities);
+  const tonightPlan = buildSleepPlan(sleepPreferences, rescoredSleepCycles, napActivities);
   const sleepCard = buildDashboardSleepCard(latestSleep, stageRecords);
   const dayStatsByDay = new Map(heartDayStats.map((stat) => [stat.day, stat]));
   const todayStrain = dayStatsByDay.get(selectedDayKey)?.strainScore ?? null;
@@ -5703,14 +5956,8 @@ async function buildFullDashboardSnapshot(db: SQLiteDatabase): Promise<Dashboard
     selectedDayHeartRows,
     selectedSleepHeartRows,
   });
-  logMobilePerf('dashboard.full.computeCards', computeStartedAt, {
-    intradayPoints: latestDashboardHeartCard.heartCardSeries.length,
-    strainPoints: strainSeries.length,
-    hasSleep: latestSleep !== null,
-  });
 
-  const snapshot = {
-    layoutVersion: DASHBOARD_LAYOUT_VERSION,
+  const overview = {
     greeting: supplement.day.isToday ? greetingForHour(now.getHours()) : 'Overview',
     dateLabel: formatLongDate(latestHeartDate),
     day: supplement.day,
@@ -5723,39 +5970,6 @@ async function buildFullDashboardSnapshot(db: SQLiteDatabase): Promise<Dashboard
       breakdown: recovery.breakdown,
     },
     tonightPlan,
-    summaryStats: [
-      {
-        label: 'HRV',
-        value: formatMetricNumber(latestSleep?.avgHrv ?? null, 'ms'),
-        accent: 'green',
-        missingReason: latestSleep ? null : NO_SLEEP_REASON,
-      },
-      {
-        label: 'RHR',
-        value: formatMetricNumber(restingHr, 'bpm'),
-        accent: 'cyan',
-      },
-      {
-        label: 'Sleep',
-        value: sleepCard.durationMinutes !== null ? formatMetricNumber(sleepCard.durationMinutes, '').replace(' ', '') : '--',
-        accent: 'violet',
-        missingReason: latestSleep ? null : NO_SLEEP_REASON,
-      },
-      {
-        label: 'Strain',
-        value: resolvedStrain === null ? '--' : formatMetricNumber(resolvedStrain, '').replace(' ', ''),
-        accent: 'heart',
-        missingReason: strainMissingReason,
-      },
-    ],
-    heartCard: {
-      restingHr,
-      averageHr: latestDashboardHeartCard.heartWindow.averageBpm,
-      maxHr: latestDashboardHeartCard.heartWindow.sustainedPeakBpm,
-      series: latestDashboardHeartCard.heartCardSeries,
-      markers: latestDashboardHeartCard.heartCardMarkers,
-      missingReason: latestDashboardHeartCard.heartCardSeries.length === 0 ? NO_HISTORY_REASON : null,
-    },
     sleepCard,
     strainCard: {
       score: resolvedStrain,
@@ -5771,151 +5985,18 @@ async function buildFullDashboardSnapshot(db: SQLiteDatabase): Promise<Dashboard
       isEstimated: true,
       missingReason: strainMissingReason,
     },
-    hrvCard: supplement.hrvCard,
-    stressCard: supplement.stressCard,
-    spo2Card: supplement.spo2Card,
-    skinTemperatureCard: supplement.skinTemperatureCard,
     activitySummary: supplement.activitySummary,
     insights: supplement.insights,
-    lastSyncLabel: supplement.day.isToday ? dashboardSyncLabel(deviceState) : `Showing ${supplement.day.shortLabel}`,
-  } satisfies DashboardSnapshot;
+  } satisfies TodayOverview;
 
-  logMobilePerf('dashboard.full.total', buildStartedAt, {
+  logMobilePerf('today.overview.total', buildStartedAt, {
+    activities: overview.activitySummary.length,
+    day: overview.day.dayKey,
+    insights: overview.insights.length,
     heartCount,
   });
 
-  return snapshot;
-}
-
-async function buildPostSyncHeartOnlySnapshot(db: SQLiteDatabase): Promise<DashboardSnapshot> {
-  const now = new Date();
-  const [heartCount, cached, deviceState, heartState, sleepCycles] = await Promise.all([
-    countHeartRows(db),
-    loadDashboardSnapshotCacheRow(db),
-    loadLatestDeviceStateRow(db),
-    loadLatestHeartState(db),
-    loadRecentSleepCyclesForDashboard(db, 15),
-  ]);
-
-  if (heartCount === 0) {
-    return buildEmptyDashboardSnapshot(now, deviceState);
-  }
-
-  const baseSnapshot = cached ? parseDashboardSnapshot(cached.snapshot_json) : null;
-  const baseline = baseSnapshot ?? buildEmptyDashboardSnapshot(now, deviceState);
-  const latestHeartDate = heartState.latest_heart_time ? parseSqliteDateTime(heartState.latest_heart_time) : now;
-  const selectedDayKey = dateKey(latestHeartDate);
-  const selectedDayStart = startOfDayFromDayKey(selectedDayKey);
-  const restingHr = baseline.heartCard.restingHr ?? 50;
-  const maxHr = personalizeMaxHrFromObservedPeak(heartState.observed_peak_bpm, restingHr);
-  const [selectedDayHeartSamples, latestDashboardHeartCard] = await Promise.all([
-    queryHeartSamples(
-      db,
-      `
-        SELECT bpm, time
-        FROM heart_rate
-        WHERE time >= ? AND time <= ?
-        ORDER BY time ASC
-      `,
-      [formatSqliteDateTime(selectedDayStart), formatSqliteDateTime(latestHeartDate)],
-    ),
-    loadLatestDashboardHeartCard(db, heartState.latest_heart_time, sleepCycles),
-  ]);
-  const strainSeries = buildCumulativeStrainSeries(
-    selectedDayHeartSamples,
-    selectedDayStart,
-    latestHeartDate,
-    DASHBOARD_HEART_BUCKET_MINUTES,
-    maxHr,
-    restingHr,
-  );
-  const resolvedStrain = trendValues(strainSeries).at(-1) ?? baseline.strainCard.score ?? null;
-  const strainMissingReason =
-    trendValues(strainSeries).length === 0
-      ? selectedDayHeartSamples.length > 0
-        ? LIMITED_LOAD_REASON
-        : baseline.strainCard.missingReason ?? NO_HISTORY_REASON
-      : null;
-
-  return {
-    ...baseline,
-    layoutVersion: DASHBOARD_LAYOUT_VERSION,
-    greeting: greetingForHour(now.getHours()),
-    dateLabel: formatLongDate(now),
-    heartCard: {
-      ...baseline.heartCard,
-      averageHr: latestDashboardHeartCard.heartWindow.averageBpm ?? baseline.heartCard.averageHr,
-      maxHr: latestDashboardHeartCard.heartWindow.sustainedPeakBpm ?? baseline.heartCard.maxHr,
-      series:
-        latestDashboardHeartCard.heartCardSeries.length > 0
-          ? latestDashboardHeartCard.heartCardSeries
-          : baseline.heartCard.series,
-      markers: latestDashboardHeartCard.heartCardMarkers,
-      missingReason:
-        latestDashboardHeartCard.heartCardSeries.length > 0 ? null : baseline.heartCard.missingReason,
-    },
-    summaryStats: baseline.summaryStats.map((stat) =>
-      stat.label === 'Strain'
-        ? {
-            ...stat,
-            value: resolvedStrain === null ? '--' : formatMetricNumber(resolvedStrain, '').replace(' ', ''),
-            missingReason: strainMissingReason,
-          }
-        : stat,
-    ),
-    strainCard: {
-      ...baseline.strainCard,
-      score: resolvedStrain,
-      label:
-        resolvedStrain === null
-          ? 'Waiting for effort'
-          : resolvedStrain >= 14
-            ? 'Loaded'
-            : resolvedStrain >= 8
-              ? 'Building'
-              : 'Light',
-      series: strainSeries,
-      missingReason: strainMissingReason,
-    },
-    lastSyncLabel: dashboardSyncLabel(deviceState),
-  };
-}
-
-export async function refreshDashboardSnapshot(
-  db: SQLiteDatabase,
-  mode: 'full' | 'post_sync_heart_only',
-): Promise<boolean> {
-  const refreshStartedAt = Date.now();
-  const heartCount = await countHeartRows(db);
-  if (heartCount === 0) {
-    return false;
-  }
-
-  const [snapshot, heartState, derivedState] = await Promise.all([
-    mode === 'full' ? buildFullDashboardSnapshot(db) : buildPostSyncHeartOnlySnapshot(db),
-    loadLatestHeartState(db),
-    loadDerivedDataStateRow(db),
-  ]);
-
-  const persistStartedAt = Date.now();
-  await persistDashboardSnapshotCacheRow(db, {
-    snapshot_json: JSON.stringify(snapshot),
-    snapshot_kind: mode,
-    built_at: formatSqliteDateTime(new Date()),
-    source_heart_count: heartCount,
-    source_last_heart_time: heartState.latest_heart_time,
-    derived_refreshed_at: derivedState?.refreshed_at ?? null,
-    last_error: null,
-  });
-  logMobilePerf(`dashboard.refresh.${mode}.persistCache`, persistStartedAt, {
-    heartCount,
-  });
-
-  logMobilePerf(`dashboard.refresh.${mode}`, refreshStartedAt, {
-    heartCount,
-  });
-
-  return true;
+  return overview;
 }
 
 export async function clearDashboardAggregatesForDebug(db: SQLiteDatabase) {
@@ -5925,6 +6006,9 @@ export async function clearDashboardAggregatesForDebug(db: SQLiteDatabase) {
       DELETE FROM heart_global_stats;
       DELETE FROM heart_intraday_buckets;
       DELETE FROM heart_intraday_bucket_state;
+      DELETE FROM intraday_metric_buckets;
+      DELETE FROM intraday_metric_bucket_state;
+      DELETE FROM heart_intraday_bucket_details;
       DELETE FROM wellness_day_stats;
     `);
   });
@@ -5974,53 +6058,12 @@ export async function rebuildAggregateTablesForDebug(db: SQLiteDatabase): Promis
   return true;
 }
 
-export async function primeDashboardSnapshot(db: SQLiteDatabase): Promise<boolean> {
-  const existing = await loadDashboardSnapshotCacheRow(db);
-  const heartCount = await countHeartRows(db);
-
-  if (heartCount === 0) {
-    return false;
-  }
-
-  const derivedState = await loadDerivedDataStateRow(db);
-  const canPrimeSupportingAggregates =
-    !derivedState ||
-    (derivedState.derived_schema_version === DERIVED_DATA_SCHEMA_VERSION &&
-      derivedState.rebuild_status === 'idle' &&
-      derivedState.pending_from_time === null &&
-      derivedState.pending_to_time === null);
-
-  if (existing && parseDashboardSnapshot(existing.snapshot_json)) {
-    if (canPrimeSupportingAggregates) {
-      await ensureWellnessDayStatsReady(db);
-    }
-
-    return false;
-  }
-
-  const mode =
-    derivedState &&
-    derivedState.derived_schema_version === DERIVED_DATA_SCHEMA_VERSION &&
-    derivedState.rebuild_status === 'idle' &&
-    derivedState.pending_from_time === null &&
-    derivedState.pending_to_time === null
-      ? 'full'
-      : 'post_sync_heart_only';
-
-  const primed = await refreshDashboardSnapshot(db, mode);
-
-  if (canPrimeSupportingAggregates) {
-    await ensureWellnessDayStatsReady(db);
-  }
-
-  return primed;
-}
-
 export class SQLiteHealthRepository implements HealthRepository {
   private preparePromise: Promise<void> | null = null;
   private mutationPromise: Promise<void> | null = null;
   private readonly snapshotCache = new Map<string, Promise<unknown>>();
   private readonly queryCache = new Map<string, Promise<unknown>>();
+  private readonly heartTimelineWindowCache = new Map<string, Promise<RawHeartWindow>>();
 
   constructor(private readonly db: SQLiteDatabase) {}
 
@@ -6071,12 +6114,28 @@ export class SQLiteHealthRepository implements HealthRepository {
     return this.readCached(this.queryCache, key, loader);
   }
 
+  private readHeartTimelineWindow(key: string, loader: () => Promise<RawHeartWindow>) {
+    const existing = this.heartTimelineWindowCache.get(key);
+    if (existing) {
+      return existing;
+    }
+
+    const pending = loader().catch((error) => {
+      this.heartTimelineWindowCache.delete(key);
+      throw error;
+    });
+
+    this.heartTimelineWindowCache.set(key, pending);
+    return pending;
+  }
+
   invalidateCaches(scope: HealthCacheScope | readonly HealthCacheScope[] = 'all') {
     const scopes = Array.isArray(scope) ? scope : [scope];
 
     if (scopes.includes('all')) {
       this.snapshotCache.clear();
       this.queryCache.clear();
+      this.heartTimelineWindowCache.clear();
       return;
     }
 
@@ -6090,6 +6149,141 @@ export class SQLiteHealthRepository implements HealthRepository {
     }
 
     this.queryCache.clear();
+
+    if (scopes.includes('dashboard') || scopes.includes('heart')) {
+      this.heartTimelineWindowCache.clear();
+    }
+  }
+
+  async getDashboardHeartTimelineWindow(range: HistoryRange): Promise<HeartTimelineWindow> {
+    return this.readSnapshot(`heart:dashboard:window:${range}`, async () => {
+      const startedAt = Date.now();
+
+      try {
+        await this.waitForRepositoryMutations();
+        await this.ensurePrepared();
+        await waitForAggregateMutations(this.db);
+
+        const [latestHeartDate, dailyMinimaRows, sleepCycles] = await Promise.all([
+          this.loadLatestHeartDate(),
+          this.loadDailyHeartMinima(),
+          this.loadRecentSleepCycles(Math.max(rangeDays(range), 14)),
+        ]);
+
+        if (!latestHeartDate || dailyMinimaRows.length === 0) {
+          logMobilePerf('repository.getDashboardHeartTimelineWindow.empty', startedAt, {
+            range,
+          });
+          return {
+            restingHr: null,
+            averageHr: null,
+            maxHr: null,
+            latestHeartDate: null,
+            intradayStart: null,
+            samples: [],
+            markers: [],
+            missingReason: NO_HISTORY_REASON,
+          } satisfies HeartTimelineWindow;
+        }
+
+        const windowHours = rangeDays(range) * 24;
+        const intradayWindowStart = new Date(latestHeartDate.getTime() - windowHours * 3600000);
+        const latestHeartTime = formatSqliteDateTime(latestHeartDate);
+        let rawWindowCacheMiss = false;
+        const windowStartedAt = Date.now();
+
+        const rawWindow = await this.readHeartTimelineWindow(
+          `heart:dashboard:raw:${range}:hours:${windowHours}:day:${dateKey(latestHeartDate)}`,
+          async () => {
+            rawWindowCacheMiss = true;
+            const bucketWindow = await loadIntradayHeartWindow(this.db, latestHeartTime, {
+              bucketSeconds: HEART_GRAPH_FINE_BUCKET_SECONDS,
+              windowHours,
+            });
+
+            return {
+              latestHeartDate: bucketWindow.latestHeartDate,
+              intradayStart: bucketWindow.intradayStart,
+              rawRowCount: bucketWindow.rawRowCount,
+              samples: bucketWindow.bucketSamples,
+              averageHr: bucketWindow.averageBpm,
+              maxHr: bucketWindow.sustainedPeakBpm,
+            } satisfies RawHeartWindow;
+          },
+        );
+
+        logMobilePerf('repository.getDashboardHeartTimelineWindow.window', windowStartedAt, {
+          cache: rawWindowCacheMiss ? 'miss' : 'hit',
+          range,
+          rows: rawWindow.rawRowCount,
+        });
+
+        const heartMarkerSleepDetails = await loadHeartMarkerSleepDetails(this.db, sleepCycles);
+        const intradayMarkers = buildHeartIntradayMarkers(
+          intradayWindowStart,
+          latestHeartDate,
+          sleepCycles,
+          await this.loadActivitiesOverlapping(intradayWindowStart, latestHeartDate),
+          heartMarkerSleepDetails,
+        );
+        const sanitizedDailyMinimaRows = dailyMinimaRows.map((row) => ({
+          day: row.day,
+          min_bpm: sanitizeRecordedBpm(row.min_bpm),
+        }));
+        const dailyMinima = sanitizedDailyMinimaRows
+          .map((row) => row.min_bpm)
+          .filter((value): value is number => value !== null);
+        const restingHr = personalizeRestingHr(sleepCycles, dailyMinima);
+
+        const snapshot = {
+          restingHr,
+          averageHr: rawWindow.averageHr,
+          maxHr: rawWindow.maxHr,
+          latestHeartDate: rawWindow.latestHeartDate,
+          intradayStart: rawWindow.intradayStart,
+          samples: rawWindow.samples,
+          markers: intradayMarkers,
+          missingReason: rawWindow.samples.length === 0 ? NO_HISTORY_REASON : null,
+        } satisfies HeartTimelineWindow;
+
+        logMobilePerf('repository.getDashboardHeartTimelineWindow', startedAt, {
+          cache: rawWindowCacheMiss ? 'miss' : 'hit',
+          range,
+          rows: snapshot.samples.length,
+        });
+
+        return snapshot;
+      } catch (error) {
+        logMobilePerfError('repository.getDashboardHeartTimelineWindow', error, {
+          range,
+        });
+        throw error;
+      }
+    });
+  }
+
+  async getTodayOverview(): Promise<TodayOverview> {
+    return this.readSnapshot('dashboard:todayOverview', async () => {
+      const startedAt = Date.now();
+
+      try {
+        await this.waitForRepositoryMutations();
+        await this.ensurePrepared();
+        await waitForAggregateMutations(this.db);
+
+        const overview = await buildTodayOverview(this.db);
+        logMobilePerf('repository.getTodayOverview', startedAt, {
+          activities: overview.activitySummary.length,
+          day: overview.day.dayKey,
+          insights: overview.insights.length,
+        });
+
+        return overview;
+      } catch (error) {
+        logMobilePerfError('repository.getTodayOverview', error);
+        throw error;
+      }
+    });
   }
 
   private async ensurePrepared() {
@@ -6104,7 +6298,6 @@ export class SQLiteHealthRepository implements HealthRepository {
         if (await shouldRefreshDerivedData(this.db)) {
           const processed = await processPendingDerivedRefresh(this.db);
           if (processed) {
-            await refreshDashboardSnapshot(this.db, 'full');
             this.invalidateCaches(['dashboard', 'sleep', 'wellness', 'trends', 'derived']);
           } else {
             this.invalidateCaches('derived');
@@ -6149,36 +6342,11 @@ export class SQLiteHealthRepository implements HealthRepository {
     });
   }
 
-  async primeDashboardSnapshot(): Promise<boolean> {
-    return this.runRepositoryMutation(async () => {
-      const primed = await primeDashboardSnapshot(this.db);
-
-      if (primed) {
-        this.invalidateCaches('dashboard');
-      }
-
-      return primed;
-    });
-  }
-
-  async refreshDashboardSnapshot(mode: 'full' | 'post_sync_heart_only'): Promise<boolean> {
-    return this.runRepositoryMutation(async () => {
-      const refreshed = await refreshDashboardSnapshot(this.db, mode);
-
-      if (refreshed) {
-        this.invalidateCaches(['dashboard', 'trends']);
-      }
-
-      return refreshed;
-    });
-  }
-
   async processPendingDerivedRefresh(): Promise<boolean> {
     return this.runRepositoryMutation(async () => {
       const processed = await processPendingDerivedRefresh(this.db);
 
       if (processed) {
-        await refreshDashboardSnapshot(this.db, 'full');
         this.invalidateCaches(['dashboard', 'sleep', 'wellness', 'trends', 'derived']);
       } else {
         this.invalidateCaches('derived');
@@ -6193,7 +6361,6 @@ export class SQLiteHealthRepository implements HealthRepository {
       const removedUnconfirmedActivities = await deleteUnconfirmedDetectedActivities(this.db);
 
       await refreshDerivedData(this.db);
-      await refreshDashboardSnapshot(this.db, 'full');
       this.invalidateCaches(['dashboard', 'sleep', 'heart', 'wellness', 'trends', 'derived']);
 
       return {
@@ -6244,8 +6411,6 @@ export class SQLiteHealthRepository implements HealthRepository {
       );
 
       await rebuildActivityDetectorPersonalization(this.db);
-
-      await refreshDashboardSnapshot(this.db, 'full');
       this.invalidateCaches(['dashboard', 'sleep', 'heart', 'wellness', 'trends']);
 
       return row ? `manual-${row.id}` : `manual-${startSql}`;
@@ -6321,8 +6486,6 @@ export class SQLiteHealthRepository implements HealthRepository {
           );
         }
       });
-
-      await refreshDashboardSnapshot(this.db, 'full');
       this.invalidateCaches(['dashboard', 'sleep', 'heart', 'wellness', 'trends']);
 
       return `sleep-${sleepId}`;
@@ -6358,8 +6521,6 @@ export class SQLiteHealthRepository implements HealthRepository {
       );
 
       await rebuildActivityDetectorPersonalization(this.db);
-
-      await refreshDashboardSnapshot(this.db, 'full');
       this.invalidateCaches(['dashboard', 'sleep', 'heart', 'wellness', 'trends']);
     });
   }
@@ -6464,8 +6625,6 @@ export class SQLiteHealthRepository implements HealthRepository {
           );
         }
       });
-
-      await refreshDashboardSnapshot(this.db, 'full');
       this.invalidateCaches(['dashboard', 'sleep', 'heart', 'wellness', 'trends']);
     });
   }
@@ -6487,8 +6646,6 @@ export class SQLiteHealthRepository implements HealthRepository {
       );
 
       await rebuildActivityDetectorPersonalization(this.db);
-
-      await refreshDashboardSnapshot(this.db, 'full');
       this.invalidateCaches(['dashboard', 'sleep', 'heart', 'wellness', 'trends']);
     });
   }
@@ -6510,8 +6667,6 @@ export class SQLiteHealthRepository implements HealthRepository {
       );
 
       await rebuildActivityDetectorPersonalization(this.db);
-
-      await refreshDashboardSnapshot(this.db, 'full');
       this.invalidateCaches(['dashboard', 'sleep', 'heart', 'wellness', 'trends']);
     });
   }
@@ -6553,8 +6708,6 @@ export class SQLiteHealthRepository implements HealthRepository {
       );
 
       await rebuildActivityDetectorPersonalization(this.db);
-
-      await refreshDashboardSnapshot(this.db, 'full');
       this.invalidateCaches(['dashboard', 'sleep', 'heart', 'wellness', 'trends']);
     });
   }
@@ -6570,7 +6723,7 @@ export class SQLiteHealthRepository implements HealthRepository {
     return this.readQuery('heart:all-rows', () =>
       queryHeartRows(
         this.db,
-        'SELECT id, bpm, time, rr_intervals, stress, spo2, skin_temp, sensor_data FROM heart_rate ORDER BY time ASC',
+        `SELECT ${HEART_RATE_FULL_SELECT_COLUMNS} FROM heart_rate ORDER BY time ASC`,
       ),
     );
   }
@@ -6581,7 +6734,7 @@ export class SQLiteHealthRepository implements HealthRepository {
       queryHeartRows(
         this.db,
         `
-          SELECT id, bpm, time, rr_intervals, stress, spo2, skin_temp, sensor_data
+          SELECT ${HEART_RATE_FULL_SELECT_COLUMNS}
           FROM heart_rate
           WHERE time >= ?
           ORDER BY time ASC
@@ -6709,24 +6862,7 @@ export class SQLiteHealthRepository implements HealthRepository {
 
     return this.readQuery(cacheKey, async () => {
       return withAggregateReadLock(this.db, () =>
-        this.db.getAllAsync<HeartIntradayBucketRow>(
-          `
-            SELECT
-              bucket_start,
-              sample_count,
-              avg_bpm,
-              first_bpm,
-              second_bpm,
-              penultimate_bpm,
-              last_bpm,
-              max_triplet_avg
-            FROM heart_intraday_buckets
-            WHERE bucket_start >= ? AND bucket_start <= ?
-            ORDER BY bucket_start ASC
-          `,
-          startBucket,
-          endBucket,
-        ),
+        loadStoredHeartIntradayBucketRows(this.db, startBucket, endBucket),
       );
     });
   }
@@ -6836,19 +6972,21 @@ export class SQLiteHealthRepository implements HealthRepository {
     );
   }
 
-  private async buildDashboardSnapshotForDay(dayKey: string): Promise<DashboardSnapshot> {
+  private async buildHistoryOverviewForDay(dayKey: string): Promise<HistoryOverview> {
     await this.ensurePrepared();
-    await ensureDashboardAggregatesReady(this.db);
+    await Promise.all([
+      ensureDashboardAggregatesReady(this.db),
+      ensureHeartIntradayBucketsReady(this.db),
+    ]);
 
-    const [deviceState, heartCount, availableDayKeys, heartState] = await Promise.all([
-      loadLatestDeviceStateRow(this.db),
+    const [heartCount, availableDayKeys, heartState] = await Promise.all([
       countHeartRows(this.db),
       loadDashboardDayKeys(this.db, 30),
       loadLatestHeartState(this.db),
     ]);
 
     if (heartCount === 0 || availableDayKeys.length === 0) {
-      return buildEmptyDashboardSnapshot(new Date(), deviceState);
+      return buildEmptyHistoryOverview(new Date());
     }
 
     const selectedDayKey = availableDayKeys.includes(dayKey) ? dayKey : availableDayKeys.at(-1)!;
@@ -6869,20 +7007,19 @@ export class SQLiteHealthRepository implements HealthRepository {
     const selectedSleep = selectedSleepRaw
       ? rescoredSleepCycles.find((sleep) => sleep.sleepId === selectedSleepRaw.sleepId) ?? selectedSleepRaw
       : null;
-    const latestSleepForPlan = rescoredSleepCycles.at(-1) ?? null;
-    const [sleepPreferences, napActivities] = await Promise.all([
-      loadSleepPreferences(this.db, rescoredSleepCycles),
-      latestSleepForPlan ? this.loadNapActivitiesSince(latestSleepForPlan.end) : Promise.resolve([]),
-    ]);
     const dailyMinima = heartDayStats.map((stat) => stat.minBpm);
     const restingHr = personalizeRestingHr(rescoredSleepCycles, dailyMinima);
     const maxHr = personalizeMaxHrFromObservedPeak(heartState.observed_peak_bpm, restingHr);
     const recovery = estimateRecoveryScoreFromSleeps(selectedSleep, rescoredSleepCycles, selectedHeartRow?.stress ?? null);
-    const tonightPlan = buildSleepPlanSnapshot(sleepPreferences, rescoredSleepCycles, napActivities);
     const selectedDayStart = startOfDayFromDayKey(selectedDayKey);
     const selectedDayLatestHeartDate = latestHeartTime ? parseSqliteDateTime(latestHeartTime) : null;
+    const selectedDayEnd = endOfDashboardDayWindow(
+      selectedDayKey,
+      selectedDayKey === dateKey(new Date()),
+      selectedDayLatestHeartDate,
+    );
 
-    const [selectedDayHeartRows, selectedSleepHeartRows, stageRecords] = await Promise.all([
+    const [selectedDayHeartRows, selectedSleepHeartRows, stageRecords, heartDayBucketRows] = await Promise.all([
       loadHeartRowsForDay(this.db, selectedDayKey),
       selectedSleep ? loadHeartRowsBetweenRange(this.db, selectedSleep.start, selectedSleep.end) : Promise.resolve([]),
       Promise.resolve(
@@ -6890,12 +7027,8 @@ export class SQLiteHealthRepository implements HealthRepository {
           ? allSleepStageRecords.filter((stage) => stage.sleepId === selectedSleep.sleepId)
           : [],
       ),
+      loadHeartBucketRowsBetweenRange(this.db, selectedDayStart, selectedDayEnd),
     ]);
-    const selectedDayEnd = endOfDashboardDayWindow(
-      selectedDayKey,
-      selectedDayKey === dateKey(new Date()),
-      selectedDayLatestHeartDate,
-    );
     const [heartMarkerActivities, supplement] = await Promise.all([
       this.loadActivitiesOverlapping(selectedDayStart, selectedDayEnd),
       buildDashboardSupplement({
@@ -6911,9 +7044,6 @@ export class SQLiteHealthRepository implements HealthRepository {
         selectedSleepHeartRows,
       }),
     ]);
-    const heartDayBucketRows = buildIntradayBucketRows(
-      selectedDayHeartRows.map((row) => ({ bpm: row.bpm, time: row.time })),
-    );
     const heartDayWindow = summarizeBucketWindow(heartDayBucketRows);
     const heartCardSeries =
       heartDayWindow.bucketSamples.length > 0
@@ -6962,8 +7092,6 @@ export class SQLiteHealthRepository implements HealthRepository {
         : null;
 
     return {
-      layoutVersion: DASHBOARD_LAYOUT_VERSION,
-      greeting: supplement.day.isToday ? greetingForHour(new Date().getHours()) : 'Overview',
       dateLabel: formatLongDate(selectedDate),
       day: supplement.day,
       recovery: {
@@ -6974,36 +7102,11 @@ export class SQLiteHealthRepository implements HealthRepository {
         missingReason: recovery.missingReason,
         breakdown: recovery.breakdown,
       },
-      tonightPlan,
-      summaryStats: [
-        {
-          label: 'HRV',
-          value: formatMetricNumber(selectedSleep?.avgHrv ?? null, 'ms'),
-          accent: 'green',
-          missingReason: selectedSleep ? null : NO_SLEEP_REASON,
-        },
-        {
-          label: 'RHR',
-          value: formatMetricNumber(restingHr, 'bpm'),
-          accent: 'cyan',
-        },
-        {
-          label: 'Sleep',
-          value: sleepCard.durationMinutes !== null ? formatMetricNumber(sleepCard.durationMinutes, '').replace(' ', '') : '--',
-          accent: 'violet',
-          missingReason: selectedSleep ? null : NO_SLEEP_REASON,
-        },
-        {
-          label: 'Strain',
-          value: resolvedStrain === null ? '--' : formatMetricNumber(resolvedStrain, '').replace(' ', ''),
-          accent: 'heart',
-          missingReason: strainMissingReason,
-        },
-      ],
       heartCard: {
         restingHr,
         averageHr: heartDayWindow.averageBpm,
         maxHr: heartDayWindow.sustainedPeakBpm,
+        pointIntervalMinutes: HEART_INTRADAY_BUCKET_MINUTES,
         series: heartCardSeries,
         markers: heartCardMarkers,
         missingReason: heartCardSeries.length === 0 ? NO_HISTORY_REASON : null,
@@ -7023,92 +7126,28 @@ export class SQLiteHealthRepository implements HealthRepository {
         isEstimated: true,
         missingReason: strainMissingReason,
       },
-      hrvCard: supplement.hrvCard,
-      stressCard: supplement.stressCard,
-      spo2Card: supplement.spo2Card,
-      skinTemperatureCard: supplement.skinTemperatureCard,
       activitySummary: supplement.activitySummary,
       insights: supplement.insights,
-      lastSyncLabel: supplement.day.isToday ? dashboardSyncLabel(deviceState) : `Showing ${supplement.day.shortLabel}`,
-    } satisfies DashboardSnapshot;
+    } satisfies HistoryOverview;
   }
 
-  async getDashboardSnapshot(dayKey?: string): Promise<DashboardSnapshot> {
-    if (dayKey) {
-      return this.readSnapshot(`dashboard:day:${dayKey}`, async () => {
-        const startedAt = Date.now();
-        try {
-          await this.waitForRepositoryMutations();
-          const snapshot = await this.buildDashboardSnapshotForDay(dayKey);
-          logMobilePerf('repository.getDashboardSnapshot.day', startedAt, {
-            dayKey,
-          });
-          return snapshot;
-        } catch (error) {
-          logMobilePerfError('repository.getDashboardSnapshot.day', error, {
-            dayKey,
-          });
-          throw error;
-        }
-      });
-    }
-
-    return this.readSnapshot('dashboard', async () => {
+  async getHistoryOverview(dayKey: string): Promise<HistoryOverview> {
+    return this.readSnapshot(`history:overview:${dayKey}`, async () => {
       const startedAt = Date.now();
+
       try {
         await this.waitForRepositoryMutations();
-
-        const cached = await loadDashboardSnapshotCacheRow(this.db);
-        const parsed = cached ? parseDashboardSnapshot(cached.snapshot_json) : null;
-        if (parsed) {
-          if (!hasExpandedDashboardSnapshot(parsed)) {
-            await refreshDashboardSnapshot(this.db, 'full');
-            const rebuilt = await loadDashboardSnapshotCacheRow(this.db);
-            const rebuiltSnapshot = rebuilt ? parseDashboardSnapshot(rebuilt.snapshot_json) : null;
-
-            if (rebuiltSnapshot) {
-              logMobilePerf('repository.getDashboardSnapshot.cacheUpgrade', startedAt, {
-                snapshotKind: rebuilt?.snapshot_kind ?? null,
-              });
-              return rebuiltSnapshot;
-            }
-          }
-
-          if (shouldRepairCachedHeartCard(parsed)) {
-            await refreshDashboardSnapshot(this.db, 'post_sync_heart_only');
-            const repaired = await loadDashboardSnapshotCacheRow(this.db);
-            const repairedSnapshot = repaired ? parseDashboardSnapshot(repaired.snapshot_json) : null;
-
-            if (repairedSnapshot) {
-              logMobilePerf('repository.getDashboardSnapshot.cacheRepair', startedAt, {
-                snapshotKind: repaired?.snapshot_kind ?? null,
-              });
-              return repairedSnapshot;
-            }
-          }
-
-          logMobilePerf('repository.getDashboardSnapshot.cacheHit', startedAt, {
-            snapshotKind: cached?.snapshot_kind ?? null,
-          });
-          return parsed;
-        }
-
-        const deviceState = await loadLatestDeviceStateRow(this.db);
-        const heartCount = await countHeartRows(this.db);
-        if (heartCount === 0) {
-          logMobilePerf('repository.getDashboardSnapshot.empty', startedAt);
-          return buildEmptyDashboardSnapshot(new Date(), deviceState);
-        }
-
-        await primeDashboardSnapshot(this.db);
-        const primed = await loadDashboardSnapshotCacheRow(this.db);
-        const primedSnapshot = primed ? parseDashboardSnapshot(primed.snapshot_json) : null;
-        logMobilePerf('repository.getDashboardSnapshot.primed', startedAt, {
-          snapshotKind: primed?.snapshot_kind ?? null,
+        const overview = await this.buildHistoryOverviewForDay(dayKey);
+        logMobilePerf('repository.getHistoryOverview', startedAt, {
+          dayKey: overview.day.dayKey,
+          markers: overview.heartCard.markers.length,
+          points: overview.heartCard.series.length,
         });
-        return primedSnapshot ?? buildEmptyDashboardSnapshot(new Date(), deviceState);
+        return overview;
       } catch (error) {
-        logMobilePerfError('repository.getDashboardSnapshot', error);
+        logMobilePerfError('repository.getHistoryOverview', error, {
+          dayKey,
+        });
         throw error;
       }
     });
@@ -7156,7 +7195,7 @@ export class SQLiteHealthRepository implements HealthRepository {
     });
   }
 
-  async getSleepHistory(range: HistoryRange): Promise<SleepHistorySnapshot> {
+  async getSleepHistory(range: HistoryRange): Promise<SleepHistoryData> {
     return this.readSnapshot(`sleep:${range}`, async () => {
       const startedAt = Date.now();
       try {
@@ -7173,7 +7212,7 @@ export class SQLiteHealthRepository implements HealthRepository {
         const preferences = await loadSleepPreferences(this.db, rescoredSleepCycles);
         const latestSleepForPlan = rescoredSleepCycles.at(-1) ?? null;
         const napActivities = latestSleepForPlan ? await this.loadNapActivitiesSince(latestSleepForPlan.end) : [];
-        const sleepPlan = buildSleepPlanSnapshot(preferences, rescoredSleepCycles, napActivities);
+        const sleepPlan = buildSleepPlan(preferences, rescoredSleepCycles, napActivities);
         const sessions = rescoredSleepCycles.slice(-rangeDays(range)).reverse();
         const latestSleep = sessions[0] ?? null;
 
@@ -7252,7 +7291,7 @@ export class SQLiteHealthRepository implements HealthRepository {
           sessions: mappedSessions,
           sleepPlan,
           isEstimated: true,
-        } satisfies SleepHistorySnapshot;
+        } satisfies SleepHistoryData;
         logMobilePerf('repository.getSleepHistory', startedAt, {
           range,
           sessions: snapshot.sessions.length,
@@ -7267,7 +7306,7 @@ export class SQLiteHealthRepository implements HealthRepository {
     });
   }
 
-  async getHeartHistory(range: HistoryRange): Promise<HeartHistorySnapshot> {
+  async getHeartHistory(range: HistoryRange): Promise<HeartHistoryData> {
     return this.readSnapshot(`heart:${range}`, async () => {
       const startedAt = Date.now();
       try {
@@ -7333,7 +7372,7 @@ export class SQLiteHealthRepository implements HealthRepository {
           intradayMarkers,
           weeklyResting,
           recoveryShift: previousMedian === null ? null : restingHr - previousMedian,
-        } satisfies HeartHistorySnapshot;
+        } satisfies HeartHistoryData;
         logMobilePerf('repository.getHeartHistory', startedAt, {
           range,
           intradayPoints: snapshot.intraday.length,
@@ -7348,85 +7387,83 @@ export class SQLiteHealthRepository implements HealthRepository {
     });
   }
 
-  async getDashboardHeartTimeline(range: HistoryRange): Promise<HeartCardSnapshot> {
-    return this.readSnapshot(`heart:dashboard:${range}`, async () => {
+  async getDashboardHeartTimeline(
+    range: HistoryRange,
+    options?: DashboardHeartTimelineOptions,
+  ): Promise<HeartCardData> {
+    const bucketMinutes = options?.bucketMinutes ?? HEART_INTRADAY_BUCKET_MINUTES;
+
+    return this.readSnapshot(`heart:dashboard:${range}:bucket:${bucketMinutes}`, async () => {
+      const window = await this.getDashboardHeartTimelineWindow(range);
+      return buildHeartCardDataFromWindow(window, bucketMinutes);
+    });
+  }
+
+  async getFocusedHeartDetail(marker: HeartIntradayMarker): Promise<FocusedHeartDetail> {
+    const startTimeMs = marker.startTimeMs ?? null;
+    const endTimeMs = marker.endTimeMs ?? null;
+    const cacheKey = `heart:focus:${marker.id}:${startTimeMs ?? 'missing'}:${endTimeMs ?? 'missing'}`;
+
+    return this.readSnapshot(cacheKey, async () => {
       const startedAt = Date.now();
+
       try {
         await this.waitForRepositoryMutations();
         await this.ensurePrepared();
         await waitForAggregateMutations(this.db);
+        await ensureHeartIntradayBucketsReady(this.db);
 
-        const [latestHeartDate, dailyMinimaRows, sleepCycles] = await Promise.all([
-          this.loadLatestHeartDate(),
-          this.loadDailyHeartMinima(),
-          this.loadRecentSleepCycles(Math.max(rangeDays(range), 14)),
-        ]);
-
-        if (!latestHeartDate || dailyMinimaRows.length === 0) {
-          logMobilePerf('repository.getDashboardHeartTimeline.empty', startedAt, {
-            range,
-          });
+        if (startTimeMs === null || endTimeMs === null || endTimeMs <= startTimeMs) {
           return {
-            restingHr: null,
             averageHr: null,
             maxHr: null,
+            pointIntervalMinutes: HEART_INTRADAY_BUCKET_MINUTES,
             series: [],
-            markers: [],
+            marker: buildFocusedHeartDetailMarker(marker),
             missingReason: NO_HISTORY_REASON,
-          } satisfies HeartCardSnapshot;
+          } satisfies FocusedHeartDetail;
         }
 
-        const windowHours = rangeDays(range) * 24;
-        const intraday = await loadIntradayHeartWindow(this.db, formatSqliteDateTime(latestHeartDate), {
-          windowHours,
-        });
-        const intradayWindowStart =
-          intraday.intradayStart ?? new Date(latestHeartDate.getTime() - windowHours * 3600000);
-        const heartMarkerSleepDetails = await loadHeartMarkerSleepDetails(this.db, sleepCycles);
-        const intradayMarkers = buildHeartIntradayMarkers(
-          intradayWindowStart,
-          latestHeartDate,
-          sleepCycles,
-          await this.loadActivitiesOverlapping(intradayWindowStart, latestHeartDate),
-          heartMarkerSleepDetails,
+        const startDate = new Date(startTimeMs);
+        const endDate = new Date(endTimeMs);
+        const bucketMinutes = selectFocusedHeartBucketMinutes(
+          exactMinutesBetween(startDate, endDate),
+          null,
         );
-        const sanitizedDailyMinimaRows = dailyMinimaRows.map((row) => ({
-          day: row.day,
-          min_bpm: sanitizeRecordedBpm(row.min_bpm),
-        }));
-        const dailyMinima = sanitizedDailyMinimaRows
-          .map((row) => row.min_bpm)
-          .filter((value): value is number => value !== null);
-        const restingHr = personalizeRestingHr(sleepCycles, dailyMinima);
+        const sourceBucketSeconds = bucketMinutes <= 0.25
+          ? HEART_DETAIL_FINE_BUCKET_SECONDS
+          : HEART_GRAPH_FINE_BUCKET_SECONDS;
+        const bucketRows = await loadHeartBucketRowsBetweenRange(this.db, startDate, endDate, sourceBucketSeconds);
+        const bucketSamples = bucketRows.map(toHeartIntradayBucketSample);
+        const summary = summarizeBucketWindow(bucketRows);
+        const series = createTimeBuckets(bucketSamples, bucketMinutes, startDate, endDate);
 
         const snapshot = {
-          restingHr,
-          averageHr: intraday.averageBpm,
-          maxHr: intraday.sustainedPeakBpm,
-          series: createTimeBuckets(
-            intraday.bucketSamples,
-            HEART_INTRADAY_BUCKET_MINUTES,
-            intradayWindowStart,
-            latestHeartDate,
-          ),
-          markers: intradayMarkers,
-          missingReason: intraday.bucketSamples.length === 0 ? NO_HISTORY_REASON : null,
-        } satisfies HeartCardSnapshot;
-        logMobilePerf('repository.getDashboardHeartTimeline', startedAt, {
-          range,
+          averageHr: summary.averageBpm,
+          maxHr: summary.sustainedPeakBpm,
+          pointIntervalMinutes: bucketMinutes,
+          series,
+          marker: buildFocusedHeartDetailMarker(marker),
+          missingReason: series.length === 0 ? NO_HISTORY_REASON : null,
+        } satisfies FocusedHeartDetail;
+
+        logMobilePerf('repository.getFocusedHeartDetail', startedAt, {
+          markerId: marker.id,
           points: snapshot.series.length,
+          pointIntervalMinutes: snapshot.pointIntervalMinutes,
         });
+
         return snapshot;
       } catch (error) {
-        logMobilePerfError('repository.getDashboardHeartTimeline', error, {
-          range,
+        logMobilePerfError('repository.getFocusedHeartDetail', error, {
+          markerId: marker.id,
         });
         throw error;
       }
     });
   }
 
-  async getWellnessSnapshot(range: HistoryRange): Promise<WellnessSnapshot> {
+  async getWellnessData(range: HistoryRange): Promise<WellnessData> {
     return this.readSnapshot(`wellness:${range}`, async () => {
       const startedAt = Date.now();
       try {
@@ -7445,7 +7482,7 @@ export class SQLiteHealthRepository implements HealthRepository {
         const latestHeartDate = heartState.latest_heart_time
           ? parseSqliteDateTime(heartState.latest_heart_time)
           : null;
-        logMobilePerf('repository.getWellnessSnapshot.loadBaseline', baselineStartedAt, {
+        logMobilePerf('repository.getWellnessData.loadBaseline', baselineStartedAt, {
           range,
           heartDays: dailyMinimaRows.length,
           sleepCycles: recentSleepCycles.length,
@@ -7465,7 +7502,7 @@ export class SQLiteHealthRepository implements HealthRepository {
             missingReason: NO_HISTORY_REASON,
           });
 
-          logMobilePerf('repository.getWellnessSnapshot.empty', startedAt, {
+          logMobilePerf('repository.getWellnessData.empty', startedAt, {
             range,
           });
           return {
@@ -7514,7 +7551,7 @@ export class SQLiteHealthRepository implements HealthRepository {
             `wellness:metric-recent:skin_temp:${range}:${earliestRelevantSql}`,
           ),
         ]);
-        logMobilePerf('repository.getWellnessSnapshot.loadMetricRows', metricRowsStartedAt, {
+        logMobilePerf('repository.getWellnessData.loadMetricRows', metricRowsStartedAt, {
           range,
           dayRows: metricDayAggregates.length,
         });
@@ -7530,7 +7567,7 @@ export class SQLiteHealthRepository implements HealthRepository {
             ),
           ),
         );
-        logMobilePerf('repository.getWellnessSnapshot.loadActivityRows', activityRowsStartedAt, {
+        logMobilePerf('repository.getWellnessData.loadActivityRows', activityRowsStartedAt, {
           range,
           activities: recentActivities.length,
           bucketRows: activityHeartBuckets.reduce((sum, rows) => sum + rows.length, 0),
@@ -7576,7 +7613,7 @@ export class SQLiteHealthRepository implements HealthRepository {
         });
 
         const recovery = estimateRecoveryScoreFromSleeps(latestSleep, recentSleepCycles, latestStress);
-        const snapshot = {
+        const data = {
           stress: buildWellnessMetricSeries({
             title: 'Stress',
             unit: '',
@@ -7631,19 +7668,19 @@ export class SQLiteHealthRepository implements HealthRepository {
             missingReason: recovery.score === null ? NO_SLEEP_REASON : null,
           },
           activities,
-        } satisfies WellnessSnapshot;
-        logMobilePerf('repository.getWellnessSnapshot.compute', computeStartedAt, {
+        } satisfies WellnessData;
+        logMobilePerf('repository.getWellnessData.compute', computeStartedAt, {
           range,
           dayRows: metricDayAggregates.length,
-          activities: snapshot.activities.length,
+          activities: data.activities.length,
         });
-        logMobilePerf('repository.getWellnessSnapshot', startedAt, {
+        logMobilePerf('repository.getWellnessData', startedAt, {
           range,
-          activities: snapshot.activities.length,
+          activities: data.activities.length,
         });
-        return snapshot;
+        return data;
       } catch (error) {
-        logMobilePerfError('repository.getWellnessSnapshot', error, {
+        logMobilePerfError('repository.getWellnessData', error, {
           range,
         });
         throw error;
@@ -7651,7 +7688,7 @@ export class SQLiteHealthRepository implements HealthRepository {
     });
   }
 
-  async getTrendSnapshot(range: HistoryRange): Promise<TrendSnapshot> {
+  async getTrendData(range: HistoryRange): Promise<TrendData> {
     return this.readSnapshot(`trends:${range}`, async () => {
       const startedAt = Date.now();
       try {
@@ -7663,7 +7700,7 @@ export class SQLiteHealthRepository implements HealthRepository {
         const [sleep, heart, wellness, latestHeartDate] = await Promise.all([
           this.getSleepHistory(range),
           this.getHeartHistory(range),
-          this.getWellnessSnapshot(range),
+          this.getWellnessData(range),
           this.loadLatestHeartDate(),
         ]);
         const trendSleepCycles = await this.loadRecentSleepCycles(
@@ -7673,13 +7710,13 @@ export class SQLiteHealthRepository implements HealthRepository {
         const latestTrendSleep = selectedSleepCycles.at(-1) ?? null;
 
         const emptyMetric = (
-          id: TrendMetricSnapshot['id'],
+          id: TrendMetric['id'],
           title: string,
-          accent: TrendMetricSnapshot['accent'],
+          accent: TrendMetric['accent'],
           unit: string,
           missingReason: string,
-        ): TrendMetricSnapshot =>
-          buildTrendMetricSnapshot(
+        ): TrendMetric =>
+          buildTrendMetric(
             {
               title,
               latest: null,
@@ -7711,7 +7748,7 @@ export class SQLiteHealthRepository implements HealthRepository {
               emptyMetric('skinTemperatureDeviation', 'Skin Temp Deviation', 'heart', '°C', BUILDING_TEMPERATURE_BASELINE_REASON),
             ],
             missingReason: NO_HISTORY_REASON,
-          } satisfies TrendSnapshot;
+          } satisfies TrendData;
         }
 
         const sleepScoreValues = trendValues(sleep.scoreTrend);
@@ -7772,11 +7809,11 @@ export class SQLiteHealthRepository implements HealthRepository {
         const consistencyMissingReason = selectedSleepCycles.length === 0 ? NO_SLEEP_REASON : BUILDING_SLEEP_CONSISTENCY_REASON;
         const temperatureMissingReason = selectedSleepCycles.length === 0 ? NO_SLEEP_REASON : BUILDING_TEMPERATURE_BASELINE_REASON;
 
-        const snapshot = {
+        const data = {
           range,
           latestLabel: formatLongDate(latestHeartDate),
           primaryMetrics: [
-            buildTrendMetricSnapshot(
+            buildTrendMetric(
               {
                 ...wellness.recoveryIndex,
                 title: 'Recovery',
@@ -7784,7 +7821,7 @@ export class SQLiteHealthRepository implements HealthRepository {
               },
               'recovery',
             ),
-            buildTrendMetricSnapshot(
+            buildTrendMetric(
               buildTrendMetricSeries({
                 title: 'HRV',
                 unit: 'ms',
@@ -7796,7 +7833,7 @@ export class SQLiteHealthRepository implements HealthRepository {
               }),
               'hrv',
             ),
-            buildTrendMetricSnapshot(
+            buildTrendMetric(
               {
                 title: 'Resting HR',
                 latest: heart.restingHr,
@@ -7816,7 +7853,7 @@ export class SQLiteHealthRepository implements HealthRepository {
               },
               'restingHr',
             ),
-            buildTrendMetricSnapshot(
+            buildTrendMetric(
               {
                 title: 'Sleep Score',
                 latest: sleep.headlineScore,
@@ -7838,7 +7875,7 @@ export class SQLiteHealthRepository implements HealthRepository {
             ),
           ],
           secondaryMetrics: [
-            buildTrendMetricSnapshot(
+            buildTrendMetric(
               buildTrendMetricSeries({
                 title: 'Sleep Duration',
                 unit: 'h',
@@ -7851,7 +7888,7 @@ export class SQLiteHealthRepository implements HealthRepository {
               }),
               'sleepDuration',
             ),
-            buildTrendMetricSnapshot(
+            buildTrendMetric(
               buildTrendMetricSeries({
                 title: 'Sleep Consistency',
                 unit: '%',
@@ -7863,14 +7900,14 @@ export class SQLiteHealthRepository implements HealthRepository {
               }),
               'sleepConsistency',
             ),
-            buildTrendMetricSnapshot(
+            buildTrendMetric(
               {
                 ...wellness.stress,
                 title: 'Stress',
               },
               'stress',
             ),
-            buildTrendMetricSnapshot(
+            buildTrendMetric(
               buildTrendMetricSeries({
                 title: 'Skin Temp Deviation',
                 unit: '°C',
@@ -7884,15 +7921,15 @@ export class SQLiteHealthRepository implements HealthRepository {
               'skinTemperatureDeviation',
             ),
           ],
-        } satisfies TrendSnapshot;
+        } satisfies TrendData;
 
-        logMobilePerf('repository.getTrendSnapshot', startedAt, {
+        logMobilePerf('repository.getTrendData', startedAt, {
           range,
-          primaryMetrics: snapshot.primaryMetrics.length,
+          primaryMetrics: data.primaryMetrics.length,
         });
-        return snapshot;
+        return data;
       } catch (error) {
-        logMobilePerfError('repository.getTrendSnapshot', error, {
+        logMobilePerfError('repository.getTrendData', error, {
           range,
         });
         throw error;

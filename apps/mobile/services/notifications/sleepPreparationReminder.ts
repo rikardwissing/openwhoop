@@ -4,7 +4,7 @@ import { brand } from '@/constants/brand';
 import { syncNotificationPermissionFromSystem } from '@/services/notifications/notificationPermissions';
 import { NOTIFICATION_ROUTE_KEY } from '@/services/notifications/notificationRouting';
 import type { NotificationPermissionState } from '@/types/device';
-import type { SleepPlanSnapshot } from '@/types/health';
+import type { SleepPlan } from '@/types/health';
 import { nextUpcomingClockDate, normalizeClockMinutes } from '@/utils/sleepPlan';
 
 export const SLEEP_PREPARATION_REMINDER_NOTIFICATION_ID = 'sleep-preparation-reminder';
@@ -28,7 +28,7 @@ function isPermissionGranted(permission: NotificationPermissionState) {
 }
 
 export async function syncSleepPreparationReminder(
-  plan: SleepPlanSnapshot,
+  plan: SleepPlan,
   options?: {
     now?: Date;
     requestPermission?: boolean;

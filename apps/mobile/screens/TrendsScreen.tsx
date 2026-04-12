@@ -7,9 +7,9 @@ import { TrendMetricCard } from '@/components/dashboard/TrendMetricCard';
 import { ScreenShell } from '@/components/layout/ScreenShell';
 import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
 import { colors, typography } from '@/constants/theme';
-import { useTrendSnapshot } from '@/hooks/useHealthData';
+import { useTrendData } from '@/hooks/useHealthData';
 import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
-import type { HistoryRange, TrendMetricSnapshot } from '@/types/health';
+import type { HistoryRange, TrendMetric } from '@/types/health';
 
 const trendRanges: Array<{ label: string; value: HistoryRange }> = [
   { label: '7d', value: '7d' },
@@ -17,7 +17,7 @@ const trendRanges: Array<{ label: string; value: HistoryRange }> = [
   { label: '30d', value: '30d' },
 ];
 
-function routeForMetric(metric: TrendMetricSnapshot['id']) {
+function routeForMetric(metric: TrendMetric['id']) {
   switch (metric) {
     case 'hrv':
     case 'sleepScore':
@@ -34,7 +34,7 @@ function routeForMetric(metric: TrendMetricSnapshot['id']) {
 export function TrendsScreen() {
   const router = useRouter();
   const [range, setRange] = useState<HistoryRange>('14d');
-  const state = useTrendSnapshot(range);
+  const state = useTrendData(range);
   const { onRefresh, refreshing } = useWearableRefreshControl();
   const data = state.data;
 

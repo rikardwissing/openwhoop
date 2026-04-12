@@ -8,7 +8,7 @@ import { useHealthRepository } from '@/providers/HealthDataProvider';
 import { useRefreshHealthData } from '@/providers/HealthDataProvider';
 import { useWearableSyncActions, useWearableSyncState } from '@/providers/WearableSyncProvider';
 import { syncSleepPreparationReminder } from '@/services/notifications/sleepPreparationReminder';
-import type { SleepPlanSnapshot } from '@/types/health';
+import type { SleepPlan } from '@/types/health';
 import { formatDuration } from '@/utils/formatters';
 import { nextUpcomingClockDate } from '@/utils/sleepPlan';
 
@@ -17,7 +17,7 @@ export function TonightPlanCard({
   plan,
 }: {
   onOpenSleep: () => void;
-  plan: SleepPlanSnapshot;
+  plan: SleepPlan;
 }) {
   const repository = useHealthRepository();
   const refreshHealthData = useRefreshHealthData();

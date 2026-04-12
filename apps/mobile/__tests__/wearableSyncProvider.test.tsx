@@ -9,8 +9,6 @@ const mockAppState = {
 };
 const mockHealthRepository = {
   invalidateCaches: jest.fn(),
-  primeDashboardSnapshot: jest.fn(async () => false),
-  refreshDashboardSnapshot: jest.fn(async () => true),
   getDerivedRefreshState: jest.fn(async () => ({
     status: 'idle',
     pendingFromTime: null,
@@ -319,8 +317,6 @@ describe('WearableSyncProvider live events', () => {
     jest.restoreAllMocks();
     mockRefreshHealthData.mockClear();
     mockHealthRepository.invalidateCaches.mockClear();
-    mockHealthRepository.primeDashboardSnapshot.mockClear();
-    mockHealthRepository.refreshDashboardSnapshot.mockClear();
     mockHealthRepository.getDerivedRefreshState.mockClear();
     mockHealthRepository.processPendingDerivedRefresh.mockClear();
     mockUseSQLiteContext.mockClear();

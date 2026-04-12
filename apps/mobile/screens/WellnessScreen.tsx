@@ -9,7 +9,7 @@ import { GlassCard } from '@/components/ui/GlassCard';
 import { StatChip } from '@/components/ui/StatChip';
 import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
 import { colors, typography } from '@/constants/theme';
-import { useDerivedRefreshState, useWellnessSnapshot } from '@/hooks/useHealthData';
+import { useDerivedRefreshState, useWellnessData } from '@/hooks/useHealthData';
 import { useHealthRepository, useRefreshHealthData } from '@/providers/HealthDataProvider';
 import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
 import type { ActivitySummary, MetricSeries } from '@/types/health';
@@ -205,7 +205,7 @@ function WellnessMetricCard({ metric }: { metric: MetricSeries }) {
 export function WellnessScreen() {
   const repository = useHealthRepository();
   const refreshHealthData = useRefreshHealthData();
-  const state = useWellnessSnapshot('14d');
+  const state = useWellnessData('14d');
   const derivedRefresh = useDerivedRefreshState();
   const { onRefresh, refreshing } = useWearableRefreshControl();
   const [pendingActionKey, setPendingActionKey] = useState<string | null>(null);

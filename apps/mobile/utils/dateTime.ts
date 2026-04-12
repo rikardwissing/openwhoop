@@ -19,6 +19,12 @@ const axisTimeFormatter = new Intl.DateTimeFormat('en-US', {
   minute: '2-digit',
 });
 
+const axisTimeWithSecondsFormatter = new Intl.DateTimeFormat('en-US', {
+  hour: 'numeric',
+  minute: '2-digit',
+  second: '2-digit',
+});
+
 export function parseSqliteDateTime(value: string): Date {
   const normalized = value.includes('T') ? value : value.replace(' ', 'T');
   return new Date(normalized);
@@ -53,8 +59,13 @@ export function formatClockMinutes(minutes: number): string {
   return formatClock(date);
 }
 
-export function formatAxisTime(date: Date): string {
-  const result = axisTimeFormatter.format(date);
+export function formatAxisTime(date: Date, options?: { includeSeconds?: boolean }): string {
+  const result = options?.includeSeconds
+    ? axisTimeWithSecondsFormatter.format(date)
+    : axisTimeFormatter.format(date);
+  if (options?.includeSeconds) {
+    return result.replace(/:00(?=\s*[AP]M$)/, '');
+  }
   return result.replace(':00', '');
 }
 

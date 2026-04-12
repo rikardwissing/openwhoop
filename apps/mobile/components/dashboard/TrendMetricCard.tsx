@@ -6,7 +6,7 @@ import { SectionHeader } from '@/components/layout/SectionHeader';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { StatChip } from '@/components/ui/StatChip';
 import { colors, typography } from '@/constants/theme';
-import type { TrendMetricSnapshot } from '@/types/health';
+import type { TrendMetric } from '@/types/health';
 import {
   formatDuration,
   formatMetricNumber,
@@ -16,7 +16,7 @@ import {
 } from '@/utils/formatters';
 import { getMetricToneColor, getRecoveryMetricTone, getSleepMetricTone } from '@/utils/metricTone';
 
-function accentColorFor(metric: TrendMetricSnapshot) {
+function accentColorFor(metric: TrendMetric) {
   switch (metric.accent) {
     case 'alert':
       return colors.alert;
@@ -31,7 +31,7 @@ function accentColorFor(metric: TrendMetricSnapshot) {
   }
 }
 
-function barColorForMetric(metric: TrendMetricSnapshot, value: number | null) {
+function barColorForMetric(metric: TrendMetric, value: number | null) {
   if (value === null) {
     return undefined;
   }
@@ -46,7 +46,7 @@ function barColorForMetric(metric: TrendMetricSnapshot, value: number | null) {
   }
 }
 
-function formatSelectionValue(metric: TrendMetricSnapshot, value: number | null, digits: number) {
+function formatSelectionValue(metric: TrendMetric, value: number | null, digits: number) {
   if (value === null) {
     return 'No data';
   }
@@ -74,7 +74,7 @@ export function TrendMetricCard({
   openTestID,
   testID,
 }: {
-  metric: TrendMetricSnapshot;
+  metric: TrendMetric;
   onOpen?: () => void;
   openLabel?: string;
   openTestID?: string;

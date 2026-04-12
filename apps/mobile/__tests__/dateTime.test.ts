@@ -5,4 +5,10 @@ describe('dateTime', () => {
     expect(formatAxisTime(new Date(2026, 3, 2, 18, 0, 0, 0))).toBe('6 PM');
     expect(formatAxisTime(new Date(2026, 3, 2, 18, 15, 0, 0))).toBe('6:15 PM');
   });
+
+  it('preserves sub-minute precision at exact hour boundaries', () => {
+    expect(formatAxisTime(new Date(2026, 3, 2, 18, 0, 0, 0), { includeSeconds: true })).toBe('6:00 PM');
+    expect(formatAxisTime(new Date(2026, 3, 2, 18, 0, 30, 0), { includeSeconds: true })).toBe('6:00:30 PM');
+    expect(formatAxisTime(new Date(2026, 3, 2, 18, 15, 0, 0), { includeSeconds: true })).toBe('6:15 PM');
+  });
 });

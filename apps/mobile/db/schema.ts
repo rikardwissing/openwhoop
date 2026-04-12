@@ -28,6 +28,20 @@ export async function migrateLegacyHeartRateTable(db: SQLiteDatabase) {
         stress REAL,
         synced INTEGER NOT NULL DEFAULT 0,
         sensor_data TEXT,
+        ppg_green INTEGER,
+        ppg_red_ir INTEGER,
+        spo2_red INTEGER,
+        spo2_ir INTEGER,
+        skin_temp_raw INTEGER,
+        ambient_light INTEGER,
+        led_drive_1 INTEGER,
+        led_drive_2 INTEGER,
+        resp_rate_raw INTEGER,
+        signal_quality INTEGER,
+        skin_contact INTEGER,
+        accel_gravity_x REAL,
+        accel_gravity_y REAL,
+        accel_gravity_z REAL,
         spo2 REAL,
         skin_temp REAL
       );
@@ -68,6 +82,20 @@ export async function initializeDatabase(db: SQLiteDatabase) {
       stress REAL,
       synced INTEGER NOT NULL DEFAULT 0,
       sensor_data TEXT,
+      ppg_green INTEGER,
+      ppg_red_ir INTEGER,
+      spo2_red INTEGER,
+      spo2_ir INTEGER,
+      skin_temp_raw INTEGER,
+      ambient_light INTEGER,
+      led_drive_1 INTEGER,
+      led_drive_2 INTEGER,
+      resp_rate_raw INTEGER,
+      signal_quality INTEGER,
+      skin_contact INTEGER,
+      accel_gravity_x REAL,
+      accel_gravity_y REAL,
+      accel_gravity_z REAL,
       spo2 REAL,
       skin_temp REAL
     );
@@ -154,16 +182,7 @@ export async function initializeDatabase(db: SQLiteDatabase) {
       last_error TEXT
     );
 
-    CREATE TABLE IF NOT EXISTS dashboard_snapshot_cache (
-      id INTEGER PRIMARY KEY NOT NULL CHECK (id = 1),
-      snapshot_json TEXT NOT NULL,
-      snapshot_kind TEXT NOT NULL,
-      built_at TEXT NOT NULL,
-      source_heart_count INTEGER NOT NULL,
-      source_last_heart_time TEXT,
-      derived_refreshed_at TEXT,
-      last_error TEXT
-    );
+    DROP TABLE IF EXISTS dashboard_snapshot_cache;
 
     CREATE TABLE IF NOT EXISTS heart_day_stats (
       day TEXT PRIMARY KEY NOT NULL,
@@ -196,6 +215,40 @@ export async function initializeDatabase(db: SQLiteDatabase) {
       source_heart_count INTEGER NOT NULL,
       source_last_heart_time TEXT,
       refreshed_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS intraday_metric_buckets (
+      metric_key TEXT NOT NULL,
+      bucket_seconds INTEGER NOT NULL,
+      bucket_start TEXT NOT NULL,
+      sample_count INTEGER NOT NULL,
+      min_value REAL,
+      avg_value REAL,
+      max_value REAL,
+      first_value REAL,
+      last_value REAL,
+      PRIMARY KEY (metric_key, bucket_seconds, bucket_start)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_intraday_metric_buckets_lookup
+      ON intraday_metric_buckets(metric_key, bucket_seconds, bucket_start);
+
+    CREATE TABLE IF NOT EXISTS intraday_metric_bucket_state (
+      metric_key TEXT NOT NULL,
+      bucket_seconds INTEGER NOT NULL,
+      source_row_count INTEGER NOT NULL,
+      source_last_sample_time TEXT,
+      refreshed_at TEXT NOT NULL,
+      PRIMARY KEY (metric_key, bucket_seconds)
+    );
+
+    CREATE TABLE IF NOT EXISTS heart_intraday_bucket_details (
+      bucket_seconds INTEGER NOT NULL,
+      bucket_start TEXT NOT NULL,
+      second_bpm INTEGER,
+      penultimate_bpm INTEGER,
+      max_triplet_avg REAL,
+      PRIMARY KEY (bucket_seconds, bucket_start)
     );
 
     CREATE TABLE IF NOT EXISTS wellness_day_stats (
@@ -283,6 +336,34 @@ export async function initializeDatabase(db: SQLiteDatabase) {
 
   const sleepPreferenceColumns = await db.getAllAsync<{ name: string }>('PRAGMA table_info(sleep_preferences)');
   const sleepPreferenceColumnNames = new Set(sleepPreferenceColumns.map((column) => column.name));
+
+  const heartRateColumns = await db.getAllAsync<{ name: string }>('PRAGMA table_info(heart_rate)');
+  const heartRateColumnNames = new Set(heartRateColumns.map((column) => column.name));
+  const heartRateSensorColumnDefinitions = {
+    ppg_green: 'INTEGER',
+    ppg_red_ir: 'INTEGER',
+    spo2_red: 'INTEGER',
+    spo2_ir: 'INTEGER',
+    skin_temp_raw: 'INTEGER',
+    ambient_light: 'INTEGER',
+    led_drive_1: 'INTEGER',
+    led_drive_2: 'INTEGER',
+    resp_rate_raw: 'INTEGER',
+    signal_quality: 'INTEGER',
+    skin_contact: 'INTEGER',
+    accel_gravity_x: 'REAL',
+    accel_gravity_y: 'REAL',
+    accel_gravity_z: 'REAL',
+  } as const;
+
+  for (const [columnName, columnType] of Object.entries(heartRateSensorColumnDefinitions)) {
+    if (heartRateColumnNames.has(columnName)) {
+      continue;
+    }
+
+    await db.execAsync(`ALTER TABLE heart_rate ADD COLUMN ${columnName} ${columnType};`);
+    heartRateColumnNames.add(columnName);
+  }
 
   if (!sleepPreferenceColumnNames.has('alarm_enabled')) {
     await db.execAsync('ALTER TABLE sleep_preferences ADD COLUMN alarm_enabled INTEGER NOT NULL DEFAULT 0;');

@@ -5,10 +5,12 @@ import { colors, typography } from '@/constants/theme';
 export function RangeSegmentedControl<T extends string>({
   options,
   selectedValue,
+  testIDPrefix,
   onChange,
 }: {
   options: Array<{ label: string; value: T }>;
   selectedValue: T;
+  testIDPrefix?: string;
   onChange: (value: T) => void;
 }) {
   return (
@@ -24,7 +26,8 @@ export function RangeSegmentedControl<T extends string>({
               styles.option,
               selected ? styles.optionSelected : null,
               pressed ? styles.optionPressed : null,
-            ]}>
+            ]}
+            testID={testIDPrefix ? `${testIDPrefix}-${option.value}` : undefined}>
             <Text style={[styles.optionLabel, selected ? styles.optionLabelSelected : null]}>
               {option.label}
             </Text>

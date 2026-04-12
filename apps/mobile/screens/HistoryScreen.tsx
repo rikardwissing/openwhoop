@@ -1,22 +1,23 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { DashboardHeroMetricCard } from '@/components/dashboard/DashboardHeroMetricCard';
 import {
-  ActivitySnapshotCard,
-  HeartSnapshotCard,
+  ActivityCard,
+  HeartCard,
   InsightsCard,
-  SleepSnapshotCard,
-} from '@/components/dashboard/DashboardSnapshotCards';
+  SleepCard,
+} from '@/components/dashboard/DashboardCards';
 import { ScreenShell } from '@/components/layout/ScreenShell';
 import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
 import { colors, typography } from '@/constants/theme';
 import type { ManualActivityKind } from '@/data/HealthRepository';
-import { useDashboardSnapshot } from '@/hooks/useHealthData';
+import { useHistoryOverview } from '@/hooks/useHealthData';
 import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
 import { useHealthRepository, useRefreshHealthData } from '@/providers/HealthDataProvider';
+import { logMobilePerf, logMobilePerfError } from '@/utils/mobilePerf';
 import { getRecoveryMetricTone, getSleepMetricTone, getStrainMetricTone } from '@/utils/metricTone';
 import { dateKey } from '@/utils/dateTime';
 
@@ -83,22 +84,62 @@ function HistoryHeaderAccessory({
 
 export function HistoryScreen() {
   const router = useRouter();
-  const [selectedDayKey, setSelectedDayKey] = useState<string | undefined>(() => dateKey(new Date()));
+  const [selectedDayKey, setSelectedDayKey] = useState(() => dateKey(new Date()));
   const [pickerVisible, setPickerVisible] = useState(false);
-  const state = useDashboardSnapshot(selectedDayKey);
+  const state = useHistoryOverview(selectedDayKey);
   const { onRefresh, refreshing } = useWearableRefreshControl();
   const repository = useHealthRepository();
   const refreshHealthData = useRefreshHealthData();
   const data = state.data;
+  const heartGraphLoadRef = useRef<{ dayKey: string; startedAt: number } | null>({
+    dayKey: selectedDayKey,
+    startedAt: Date.now(),
+  });
 
   const availableDays = useMemo(
     () => [...(data?.day.availableDays ?? [])].reverse(),
     [data?.day.availableDays],
   );
 
+  useEffect(() => {
+    heartGraphLoadRef.current = {
+      dayKey: selectedDayKey,
+      startedAt: Date.now(),
+    };
+  }, [selectedDayKey]);
+
+  useEffect(() => {
+    const pendingLoad = heartGraphLoadRef.current;
+
+    if (!pendingLoad) {
+      return;
+    }
+
+    if (state.status === 'ready' && data && data.day.dayKey === pendingLoad.dayKey) {
+      logMobilePerf('screen.history.heartGraph.load', pendingLoad.startedAt, {
+        day: data.day.dayKey,
+        markers: data.heartCard.markers.length,
+        points: data.heartCard.series.length,
+      });
+      heartGraphLoadRef.current = null;
+      return;
+    }
+
+    if (state.status === 'error') {
+      logMobilePerfError('screen.history.heartGraph.load', state.error, {
+        day: pendingLoad.dayKey,
+      });
+      heartGraphLoadRef.current = null;
+    }
+  }, [data, state.error, state.status]);
+
   const refreshAfterActivityMutation = useCallback(() => {
     refreshHealthData(HEART_ACTIVITY_REFRESH_SCOPES);
   }, [refreshHealthData]);
+  const loadFocusedHeartDetail = useCallback(
+    repository.getFocusedHeartDetail.bind(repository),
+    [repository],
+  );
   const handleConfirmHeartActivity = useCallback(async (activityId: string) => {
     await repository.confirmActivity(activityId);
     refreshAfterActivityMutation();
@@ -141,7 +182,7 @@ export function HistoryScreen() {
   if (!data && state.status === 'error') {
     return (
       <ScreenShell headerIcon="history" headerTitle="History" onRefresh={onRefresh} refreshing={refreshing}>
-        <ErrorState message="Unable to load historical snapshots right now." variant="inline" />
+        <ErrorState message="Unable to load historical data right now." variant="inline" />
       </ScreenShell>
     );
   }
@@ -162,8 +203,8 @@ export function HistoryScreen() {
             canGoForward={Boolean(data.day.newerDayKey)}
             currentLabel={data.dateLabel}
             onOpenPicker={() => setPickerVisible(true)}
-            onPressBack={() => setSelectedDayKey(data.day.olderDayKey ?? undefined)}
-            onPressForward={() => setSelectedDayKey(data.day.newerDayKey ?? undefined)}
+            onPressBack={() => setSelectedDayKey(data.day.olderDayKey ?? data.day.dayKey)}
+            onPressForward={() => setSelectedDayKey(data.day.newerDayKey ?? data.day.dayKey)}
           />
         }
         headerIcon="history"
@@ -171,13 +212,13 @@ export function HistoryScreen() {
         onRefresh={onRefresh}
         refreshing={refreshing}>
         {state.status === 'error' ? (
-          <ErrorState message="Showing the last historical snapshot while refresh catches up." variant="inline" />
+          <ErrorState message="Showing the last historical overview while refresh catches up." variant="inline" />
         ) : null}
 
         <View>
           <Text style={styles.screenTitle}>{data.dateLabel}</Text>
           <Text style={styles.screenSubtitle}>
-            Day-based snapshot of recovery, sleep, load, and context for the selected date.
+            Day-based overview of recovery, sleep, load, and context for the selected date.
           </Text>
         </View>
 
@@ -211,7 +252,7 @@ export function HistoryScreen() {
           />
         </View>
 
-        <HeartSnapshotCard
+        <HeartCard
           activityReviewActions={{
             confirmActivity: handleConfirmHeartActivity,
             createManualActivity: handleCreateManualHeartActivity,
@@ -222,20 +263,21 @@ export function HistoryScreen() {
             updateSleep: handleUpdateHeartSleep,
           }}
           chartTestID="history-heart-chart"
-          snapshot={data.heartCard}
+          loadFocusedDetail={loadFocusedHeartDetail}
+          cardData={data.heartCard}
           trailingLabel={data.day.shortLabel}
           viewportKey={data.day.dayKey}
         />
 
-        <SleepSnapshotCard
+        <SleepCard
           chartTestID="history-sleep-stage-chart"
           onOpen={openSleep}
           openTestID="history-open-sleep-button"
-          snapshot={data.sleepCard}
+          cardData={data.sleepCard}
           trailingLabel={data.day.shortLabel}
         />
 
-        <ActivitySnapshotCard
+        <ActivityCard
           activities={data.activitySummary}
           chartTestID="history-strain-chart"
           onOpen={openWellness}

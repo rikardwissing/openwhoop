@@ -764,7 +764,7 @@ export function SettingsScreen() {
           <View>
             <Text style={styles.settingTitle}>Run full performance sweep</Text>
             <Text style={styles.settingSubtitle}>
-              Measure a full derived rebuild, warm and cache-cold screen reads, aggregate rebuilds, and dashboard snapshot rebuilds in one pass. The latest recorded sync summary is attached when available.
+              Measure a full derived rebuild, warm and cache-cold today/history reads, and aggregate rebuilds in one pass. The latest recorded sync summary is attached when available.
             </Text>
           </View>
 

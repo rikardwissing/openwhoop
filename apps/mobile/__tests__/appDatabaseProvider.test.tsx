@@ -4,6 +4,16 @@ import { useEffect, useState } from 'react';
 
 const mockSeedBundledAppDatabaseAsync = jest.fn(async (_currentDb?: unknown) => {});
 const mockClearLocalAppDatabaseAsync = jest.fn(async (_currentDb?: unknown) => {});
+const mockInspectRequiredStartupMigration = jest.fn(async (_db?: unknown) => ({
+  heartRateHasImuColumn: false,
+  pendingSensorDataBackfillRows: 0,
+  needsMigration: false,
+}));
+const mockRunRequiredStartupMigration = jest.fn(async (_db?: unknown, _options?: unknown) => ({
+  ran: false,
+  migratedLegacyHeartRate: false,
+  backfilledSensorDataRows: 0,
+}));
 
 let mockNextDatabaseId = 0;
 let mockBlockNextDatabaseMount = false;
@@ -65,6 +75,11 @@ jest.mock('expo-sqlite', () => {
 jest.mock('@/db/appDatabase', () => ({
   clearLocalAppDatabaseAsync: (currentDb?: unknown) => mockClearLocalAppDatabaseAsync(currentDb),
   seedBundledAppDatabaseAsync: (currentDb?: unknown) => mockSeedBundledAppDatabaseAsync(currentDb),
+}));
+
+jest.mock('@/db/maintenance', () => ({
+  inspectRequiredStartupMigration: (db: unknown) => mockInspectRequiredStartupMigration(db),
+  runRequiredStartupMigration: (db: unknown, options?: unknown) => mockRunRequiredStartupMigration(db, options),
 }));
 
 jest.mock('@/db/schema', () => ({
@@ -144,6 +159,18 @@ describe('AppDatabaseProvider', () => {
   beforeEach(() => {
     mockSeedBundledAppDatabaseAsync.mockClear();
     mockClearLocalAppDatabaseAsync.mockClear();
+    mockInspectRequiredStartupMigration.mockClear();
+    mockRunRequiredStartupMigration.mockClear();
+    mockInspectRequiredStartupMigration.mockImplementation(async (_db?: unknown) => ({
+      heartRateHasImuColumn: false,
+      pendingSensorDataBackfillRows: 0,
+      needsMigration: false,
+    }));
+    mockRunRequiredStartupMigration.mockImplementation(async (_db?: unknown) => ({
+      ran: false,
+      migratedLegacyHeartRate: false,
+      backfilledSensorDataRows: 0,
+    }));
     mockNextDatabaseId = 0;
     mockBlockNextDatabaseMount = false;
     mockReleaseBlockedDatabaseMount = null;
@@ -157,9 +184,12 @@ describe('AppDatabaseProvider', () => {
 
     const screen = render(<SeededDataTestShell />);
 
-  expect(mockLastProviderOptions).toEqual({ useNewConnection: true });
-  expect(mockLastUseSuspense).toBeUndefined();
-    expect(screen.getByTestId('database-id').props.children).toBe('1');
+    expect(mockLastProviderOptions).toEqual({ useNewConnection: true });
+    expect(mockLastUseSuspense).toBeUndefined();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('database-id').props.children).toBe('1');
+    });
 
     mockBlockNextDatabaseMount = true;
 
@@ -191,6 +221,96 @@ describe('AppDatabaseProvider', () => {
     await waitFor(() => {
       expect(screen.getByTestId('database-id').props.children).toBe('2');
       expect(screen.getByTestId('seed-status').props.children).toBe('complete');
+    });
+  });
+
+  it('shows a visible startup status screen while migration requirements are being inspected', async () => {
+    const deferredInspection = createDeferredPromise();
+    mockInspectRequiredStartupMigration.mockImplementationOnce(async (_db?: unknown) => {
+      await deferredInspection.promise;
+      return {
+        heartRateHasImuColumn: false,
+        pendingSensorDataBackfillRows: 0,
+        needsMigration: false,
+      };
+    });
+
+    const screen = render(<SeededDataTestShell />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Preparing local data')).toBeTruthy();
+      expect(screen.getByText('Checking your saved data before the app starts.')).toBeTruthy();
+    });
+
+    expect(screen.getByTestId('database-id').props.children).toBe('none');
+
+    await act(async () => {
+      deferredInspection.resolve();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('database-id').props.children).toBe('1');
+    });
+  });
+
+  it('blocks children behind the migration screen until startup migration completes', async () => {
+    const deferredMigration = createDeferredPromise();
+    mockInspectRequiredStartupMigration.mockImplementationOnce(async (_db?: unknown) => ({
+      heartRateHasImuColumn: false,
+      pendingSensorDataBackfillRows: 3,
+      needsMigration: true,
+    }));
+    mockRunRequiredStartupMigration.mockImplementationOnce(
+      async (_db?: unknown, options?: unknown) => {
+        const progressOptions = options as
+          | {
+              onProgress?: (progress: {
+                stage: 'legacy_heart_rate' | 'sensor_data_backfill' | 'complete';
+                completedUnits: number;
+                totalUnits: number;
+                backfilledSensorDataRows: number;
+                totalSensorDataRows: number;
+              }) => void;
+            }
+          | undefined;
+
+        progressOptions?.onProgress?.({
+          stage: 'sensor_data_backfill',
+          completedUnits: 1,
+          totalUnits: 3,
+          backfilledSensorDataRows: 1,
+          totalSensorDataRows: 3,
+        });
+        await deferredMigration.promise;
+        return {
+          ran: true,
+          migratedLegacyHeartRate: false,
+          backfilledSensorDataRows: 3,
+        };
+      },
+    );
+
+    const screen = render(<SeededDataTestShell />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Migrating local data')).toBeTruthy();
+      expect(screen.getByText('1 / 3 samples updated')).toBeTruthy();
+    });
+
+    expect(screen.getByTestId('database-id').props.children).toBe('none');
+    expect(mockRunRequiredStartupMigration).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 1 }),
+      expect.any(Object),
+    );
+
+    await act(async () => {
+      deferredMigration.resolve();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('database-id').props.children).toBe('1');
     });
   });
 });

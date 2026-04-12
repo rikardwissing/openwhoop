@@ -8,9 +8,17 @@ import {
   useState,
   type ReactNode,
 } from 'react';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { SQLiteProvider, useSQLiteContext, type SQLiteDatabase } from 'expo-sqlite';
 
+import { colors, typography } from '@/constants/theme';
 import { clearLocalAppDatabaseAsync, seedBundledAppDatabaseAsync } from '@/db/appDatabase';
+import {
+  inspectRequiredStartupMigration,
+  runRequiredStartupMigration,
+  type StartupMigrationInspection,
+  type StartupMigrationProgress,
+} from '@/db/maintenance';
 import { APP_DATABASE_NAME, initializeDatabase } from '@/db/schema';
 
 const AppDatabaseContext = createContext<SQLiteDatabase | null>(null);
@@ -21,12 +29,223 @@ interface AppDatabaseControlsValue {
 
 const AppDatabaseControlsContext = createContext<AppDatabaseControlsValue | null>(null);
 
+function AppDatabaseStatusScreen({
+  actionLabel,
+  message,
+  onAction,
+  progress,
+  title,
+}: {
+  actionLabel?: string;
+  message: string;
+  onAction?: () => void;
+  progress?: {
+    label: string;
+    value: number;
+  };
+  title: string;
+}) {
+  return (
+    <View style={styles.statusScreen}>
+      <View style={styles.statusCard}>
+        <Text accessibilityRole="header" style={styles.statusTitle}>
+          {title}
+        </Text>
+        <Text style={styles.statusMessage}>{message}</Text>
+        {progress ? (
+          <View style={styles.progressSection}>
+            <View style={styles.progressTrack}>
+              <View
+                style={[
+                  styles.progressFill,
+                  {
+                    width: `${Math.max(0, Math.min(progress.value, 1)) * 100}%`,
+                  },
+                ]}
+              />
+            </View>
+            <Text style={styles.progressLabel}>{progress.label}</Text>
+          </View>
+        ) : null}
+        {actionLabel && onAction ? (
+          <Pressable accessibilityRole="button" onPress={onAction} style={styles.statusActionButton}>
+            <Text style={styles.statusActionLabel}>{actionLabel}</Text>
+          </Pressable>
+        ) : null}
+      </View>
+    </View>
+  );
+}
+
+function buildMigrationProgressState(
+  inspection: StartupMigrationInspection,
+  progress?: Pick<StartupMigrationProgress, 'completedUnits' | 'backfilledSensorDataRows' | 'totalSensorDataRows'>,
+) {
+  const totalUnits = Math.max(
+    (inspection.heartRateHasImuColumn ? 1 : 0) + inspection.pendingSensorDataBackfillRows,
+    1,
+  );
+  const totalSensorDataRows = progress?.totalSensorDataRows ?? inspection.pendingSensorDataBackfillRows;
+  const completedUnits = progress?.completedUnits ?? 0;
+  const backfilledSensorDataRows = progress?.backfilledSensorDataRows ?? 0;
+  const isLegacyStepActive = inspection.heartRateHasImuColumn && completedUnits === 0;
+
+  if (isLegacyStepActive) {
+    return {
+      message: 'Preparing older saved heart data for the new storage format before the app starts.',
+      progress: {
+        label: `Step 1 of ${totalUnits}`,
+        value: totalUnits > 0 ? completedUnits / totalUnits : 0,
+      },
+    };
+  }
+
+  if (totalSensorDataRows > 0) {
+    return {
+      message: `Updating ${totalSensorDataRows} saved heart samples to the new storage format before the app starts.`,
+      progress: {
+        label: `${backfilledSensorDataRows} / ${totalSensorDataRows} samples updated`,
+        value: totalUnits > 0 ? completedUnits / totalUnits : 0,
+      },
+    };
+  }
+
+  return {
+    message: 'Updating the local database before the app starts.',
+    progress: {
+      label: `${completedUnits} / ${totalUnits} steps completed`,
+      value: totalUnits > 0 ? completedUnits / totalUnits : 0,
+    },
+  };
+}
+
+function AppDatabaseMigrationGate({
+  children,
+  db,
+  onReady,
+}: {
+  children: ReactNode;
+  db: SQLiteDatabase;
+  onReady: (db: SQLiteDatabase) => void;
+}) {
+  const [retryToken, setRetryToken] = useState(0);
+  const [state, setState] = useState<
+    | { status: 'checking' }
+    | {
+        status: 'migrating';
+        message: string;
+        progress: {
+          label: string;
+          value: number;
+        };
+      }
+    | { status: 'ready' }
+    | { status: 'error'; message: string }
+  >({ status: 'checking' });
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const run = async () => {
+      setState({ status: 'checking' });
+
+      const inspection = await inspectRequiredStartupMigration(db);
+      if (cancelled) {
+        return;
+      }
+
+      if (!inspection.needsMigration) {
+        setState({ status: 'ready' });
+        onReady(db);
+        return;
+      }
+
+      setState({
+        status: 'migrating',
+        ...buildMigrationProgressState(inspection),
+      });
+
+      await runRequiredStartupMigration(db, {
+        onProgress: (progress) => {
+          if (cancelled) {
+            return;
+          }
+
+          setState({
+            status: 'migrating',
+            ...buildMigrationProgressState(inspection, progress),
+          });
+        },
+      });
+      if (cancelled) {
+        return;
+      }
+
+      setState({ status: 'ready' });
+      onReady(db);
+    };
+
+    run().catch((error) => {
+      if (cancelled) {
+        return;
+      }
+
+      setState({
+        status: 'error',
+        message: error instanceof Error ? error.message : 'Startup migration failed.',
+      });
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [db, onReady, retryToken]);
+
+  if (state.status === 'ready') {
+    return <>{children}</>;
+  }
+
+  if (state.status === 'checking') {
+    return (
+      <AppDatabaseStatusScreen
+        message="Checking your saved data before the app starts."
+        title="Preparing local data"
+      />
+    );
+  }
+
+  if (state.status === 'migrating') {
+    return (
+      <AppDatabaseStatusScreen
+        message={state.message}
+        progress={state.progress}
+        title="Migrating local data"
+      />
+    );
+  }
+
+  if (state.status === 'error') {
+    return (
+      <AppDatabaseStatusScreen
+        actionLabel="Retry migration"
+        message={state.message}
+        onAction={() => setRetryToken((value) => value + 1)}
+        title="Migration failed"
+      />
+    );
+  }
+
+  return null;
+}
+
 function AppDatabaseBridge({
   children,
   onDatabaseChange,
+  onDatabaseReady,
 }: {
   children: ReactNode;
   onDatabaseChange: (db: SQLiteDatabase | null) => void;
+  onDatabaseReady: (db: SQLiteDatabase) => void;
 }) {
   const db = useSQLiteContext();
 
@@ -39,9 +258,11 @@ function AppDatabaseBridge({
   }, [db, onDatabaseChange]);
 
   return (
-    <AppDatabaseContext.Provider value={db}>
-      {children}
-    </AppDatabaseContext.Provider>
+    <AppDatabaseMigrationGate db={db} onReady={onDatabaseReady}>
+      <AppDatabaseContext.Provider value={db}>
+        {children}
+      </AppDatabaseContext.Provider>
+    </AppDatabaseMigrationGate>
   );
 }
 
@@ -55,15 +276,20 @@ export function AppDatabaseProvider({ children }: { children: ReactNode }) {
   const handleDatabaseChange = useCallback((db: SQLiteDatabase | null) => {
     currentDatabaseRef.current = db;
 
-    if (db) {
-      const waiters = pendingDatabaseReadyWaitersRef.current;
-      pendingDatabaseReadyWaitersRef.current = [];
+    if (!db) {
+      const waiters = pendingDatabaseDetachedWaitersRef.current;
+      pendingDatabaseDetachedWaitersRef.current = [];
       waiters.forEach((resolve) => resolve());
+    }
+  }, []);
+
+  const handleDatabaseReady = useCallback((db: SQLiteDatabase) => {
+    if (currentDatabaseRef.current !== db) {
       return;
     }
 
-    const waiters = pendingDatabaseDetachedWaitersRef.current;
-    pendingDatabaseDetachedWaitersRef.current = [];
+    const waiters = pendingDatabaseReadyWaitersRef.current;
+    pendingDatabaseReadyWaitersRef.current = [];
     waiters.forEach((resolve) => resolve());
   }, []);
 
@@ -133,7 +359,9 @@ export function AppDatabaseProvider({ children }: { children: ReactNode }) {
           databaseName={APP_DATABASE_NAME}
           options={{ useNewConnection: true }}
           onInit={initializeDatabase}>
-          <AppDatabaseBridge onDatabaseChange={handleDatabaseChange}>{children}</AppDatabaseBridge>
+          <AppDatabaseBridge onDatabaseChange={handleDatabaseChange} onDatabaseReady={handleDatabaseReady}>
+            {children}
+          </AppDatabaseBridge>
         </SQLiteProvider>
       )}
     </AppDatabaseControlsContext.Provider>
@@ -157,3 +385,72 @@ export function useAppDatabaseControls() {
 
   return value;
 }
+
+const styles = StyleSheet.create({
+  statusScreen: {
+    alignItems: 'center',
+    backgroundColor: colors.background,
+    flex: 1,
+    justifyContent: 'center',
+    padding: 24,
+  },
+  statusCard: {
+    alignItems: 'center',
+    backgroundColor: colors.surfaceStrong,
+    borderColor: colors.border,
+    borderRadius: 20,
+    borderWidth: 1,
+    gap: 12,
+    maxWidth: 420,
+    paddingHorizontal: 24,
+    paddingVertical: 28,
+    width: '100%',
+  },
+  statusTitle: {
+    color: colors.text,
+    fontFamily: typography.heading,
+    fontSize: 24,
+    textAlign: 'center',
+  },
+  statusMessage: {
+    color: colors.muted,
+    fontFamily: typography.body,
+    fontSize: 15,
+    lineHeight: 22,
+    textAlign: 'center',
+  },
+  progressSection: {
+    gap: 8,
+    width: '100%',
+  },
+  progressTrack: {
+    backgroundColor: colors.surfaceMuted,
+    borderRadius: 999,
+    height: 10,
+    overflow: 'hidden',
+    width: '100%',
+  },
+  progressFill: {
+    backgroundColor: colors.primary,
+    borderRadius: 999,
+    height: '100%',
+  },
+  progressLabel: {
+    color: colors.text,
+    fontFamily: typography.bodySemiBold,
+    fontSize: 13,
+    textAlign: 'center',
+  },
+  statusActionButton: {
+    backgroundColor: colors.primary,
+    borderRadius: 999,
+    marginTop: 4,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+  },
+  statusActionLabel: {
+    color: colors.background,
+    fontFamily: typography.bodyBold,
+    fontSize: 15,
+  },
+});

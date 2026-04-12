@@ -1,4 +1,9 @@
-import type { ActivityRescanResult, HealthRepository, ManualActivityKind } from '@/data/HealthRepository';
+import type {
+  ActivityRescanResult,
+  DashboardHeartTimelineOptions,
+  HealthRepository,
+  ManualActivityKind,
+} from '@/data/HealthRepository';
 import type {
   DerivedRefreshState,
   ActivitySummary,
@@ -7,23 +12,29 @@ import type {
   DashboardDayOption,
   DashboardDayState,
   DashboardInsight,
-  DashboardSnapshot,
-  HeartCardSnapshot,
+  FocusedHeartDetail,
+  HeartCardData,
   HeartIntradayMarker,
-  HeartHistorySnapshot,
+  HeartHistoryData,
+  HistoryOverview,
+  HeartTimelineSample,
+  HeartTimelineWindow,
   HistoryRange,
   MetricSeries,
-  SleepHistorySnapshot,
-  SleepPlanSnapshot,
+  SleepHistoryData,
+  SleepPlan,
   SleepSession,
-  TrendMetricSnapshot,
+  TodayOverview,
+  TrendMetric,
   TrendPoint,
-  TrendSnapshot,
-  WellnessSnapshot,
+  TrendData,
+  WellnessData,
 } from '@/types/health';
 import { formatAxisTime, formatClockMinutes } from '@/utils/dateTime';
 import { describeRecovery } from '@/utils/formatters';
+import { selectFocusedHeartBucketMinutes } from '@/utils/heartChartDetail';
 import { sustainedPeakBpm } from '@/utils/heartRate';
+import { buildHeartCardDataFromWindow } from '@/utils/heartTimeline';
 import { BASE_SLEEP_NEED_MINUTES, calculateOptimalBedtimeMinutes, calculateSleepDebtMinutes, roundClockMinutes } from '@/utils/sleepPlan';
 
 function delay(ms: number) {
@@ -77,8 +88,23 @@ function buildIntradayHeartSeries(
     const time = new Date(startDate.getTime() + index * stepMinutes * 60000);
 
     return {
-      label: formatAxisTime(time),
+      label: formatAxisTime(time, { includeSeconds: stepMinutes < 1 }),
       value: heartRateForTime(time),
+    };
+  });
+}
+
+function buildHeartTimelineSamples(
+  stepMinutes: number,
+  startDate = new Date(2026, 3, 23, 0, 0, 0, 0),
+  pointCount = (24 * 60) / stepMinutes,
+): HeartTimelineSample[] {
+  return Array.from({ length: pointCount }, (_, index) => {
+    const date = new Date(startDate.getTime() + index * stepMinutes * 60000);
+
+    return {
+      date,
+      bpm: heartRateForTime(date),
     };
   });
 }
@@ -111,10 +137,6 @@ function rangeHours(range: HistoryRange): number {
 
 function takeTail<T>(items: T[], range: HistoryRange): T[] {
   return items.slice(-rangeLength(range));
-}
-
-function fractionOfDay(minutes: number) {
-  return clamp(minutes / (24 * 60), 0, 1);
 }
 
 function fractionOfWindow(date: Date, windowStart: Date, windowEnd: Date) {
@@ -481,7 +503,7 @@ function parseSleepMarkerId(sleepId: string) {
   return match?.[1] ?? null;
 }
 
-function buildSleepPlanSnapshot(sleepSessions: readonly MockSleepRecord[], targetWakeMinutes: number, alarmEnabled: boolean): SleepPlanSnapshot {
+function buildSleepPlan(sleepSessions: readonly MockSleepRecord[], targetWakeMinutes: number, alarmEnabled: boolean): SleepPlan {
   const chronologicalSessions = [...sleepSessions].reverse();
   const sleepDebtMinutes = calculateSleepDebtMinutes(
     chronologicalSessions.map((session) => session.durationMinutes),
@@ -501,7 +523,7 @@ function buildSleepPlanSnapshot(sleepSessions: readonly MockSleepRecord[], targe
   };
 }
 
-function buildTrendMetricSnapshot(metric: MetricSeries, id: TrendMetricSnapshot['id']): TrendMetricSnapshot {
+function buildTrendMetric(metric: MetricSeries, id: TrendMetric['id']): TrendMetric {
   return {
     ...metric,
     id,
@@ -532,6 +554,8 @@ function buildMockSleepMarker(
     timeLabel: `${session.bedtime} - ${session.wakeTime}`,
     startFraction: fractionOfWindow(session.start, windowStart, windowEnd),
     endFraction: fractionOfWindow(session.end, windowStart, windowEnd),
+    startTimeMs: session.start.getTime(),
+    endTimeMs: session.end.getTime(),
     details: buildMockSleepMarkerDetails(session),
   };
 }
@@ -545,18 +569,37 @@ function buildMockActivityMarkerDetails(activity: MockActivityRecord): HeartIntr
   };
 }
 
-function buildIntradayActivityMarkers(activities: MockActivityRecord[]): HeartIntradayMarker[] {
+function buildIntradayActivityMarkers(
+  activities: MockActivityRecord[],
+  windowStart = new Date(2026, 3, 23, 0, 0, 0, 0),
+  windowEnd = new Date(2026, 3, 24, 0, 0, 0, 0),
+): HeartIntradayMarker[] {
   return activities
     .filter((activity) => activity.reviewState !== 'dismissed')
-    .map((activity) => ({
-      id: activity.id,
-      kind: activity.title === 'Nap' ? 'nap' as const : 'activity' as const,
-      label: activity.title,
-      timeLabel: `${formatClockMinutes(activity.startMinutes)} - ${formatClockMinutes(activity.startMinutes + activity.durationMinutes)}`,
-      startFraction: fractionOfDay(activity.startMinutes),
-      endFraction: fractionOfDay(activity.startMinutes + activity.durationMinutes),
-      details: buildMockActivityMarkerDetails(activity),
-    }));
+    .map((activity) => {
+      const startTime = new Date(2026, 3, 23, Math.floor(activity.startMinutes / 60), activity.startMinutes % 60, 0, 0);
+      const endTime = new Date(
+        2026,
+        3,
+        23,
+        Math.floor((activity.startMinutes + activity.durationMinutes) / 60),
+        (activity.startMinutes + activity.durationMinutes) % 60,
+        0,
+        0,
+      );
+
+      return {
+        id: activity.id,
+        kind: activity.title === 'Nap' ? 'nap' as const : 'activity' as const,
+        label: activity.title,
+        timeLabel: `${formatClockMinutes(activity.startMinutes)} - ${formatClockMinutes(activity.startMinutes + activity.durationMinutes)}`,
+        startFraction: fractionOfWindow(startTime, windowStart, windowEnd),
+        endFraction: fractionOfWindow(endTime, windowStart, windowEnd),
+        startTimeMs: startTime.getTime(),
+        endTimeMs: endTime.getTime(),
+        details: buildMockActivityMarkerDetails(activity),
+      };
+    });
 }
 
 function activitiesOverlap(left: MockActivityRecord, right: MockActivityRecord) {
@@ -627,6 +670,8 @@ export class MockHealthRepository implements HealthRepository {
           todayDashboardHeartWindowStart,
           todayDashboardHeartWindowEnd,
         ),
+        startTimeMs: new Date(2026, 3, 23, startHour, startMinute, 0, 0).getTime(),
+        endTimeMs: new Date(2026, 3, 23, endHour, endMinute, 0, 0).getTime(),
         details: buildMockActivityMarkerDetails(activity),
       };
     });
@@ -660,14 +705,6 @@ export class MockHealthRepository implements HealthRepository {
     }
 
     return session;
-  }
-
-  async primeDashboardSnapshot(): Promise<boolean> {
-    return false;
-  }
-
-  async refreshDashboardSnapshot(): Promise<boolean> {
-    return true;
   }
 
   async getDerivedRefreshState(): Promise<DerivedRefreshState> {
@@ -820,7 +857,7 @@ export class MockHealthRepository implements HealthRepository {
     await delay(this.options.delayMs ?? 180);
   }
 
-  async getDashboardSnapshot(dayKey?: string): Promise<DashboardSnapshot> {
+  private async buildOverviewSeed(dayKey?: string) {
     await this.wait();
 
     const resolvedIndex = dayKey ? dashboardDayKeys.indexOf(dayKey) : dashboardDayKeys.length - 1;
@@ -875,7 +912,7 @@ export class MockHealthRepository implements HealthRepository {
       0,
       selectedIndex >= dashboardDayKeys.length - 2 ? 3 : selectedIndex >= dashboardDayKeys.length - 4 ? 2 : 1,
     );
-    const tonightPlan = buildSleepPlanSnapshot(this.sleepSessions, this.targetWakeMinutes, this.alarmEnabled);
+    const tonightPlan = buildSleepPlan(this.sleepSessions, this.targetWakeMinutes, this.alarmEnabled);
 
     return {
       layoutVersion: 2,
@@ -898,6 +935,7 @@ export class MockHealthRepository implements HealthRepository {
         restingHr: restingHrTrend[selectedIndex] ?? 48,
         averageHr: useRollingTodayHeartWindow ? todayDashboardAverageHr : intradayAverageHr - dayOffset,
         maxHr: useRollingTodayHeartWindow ? todayDashboardMaxHr : intradayMaxHr - dayOffset * 2,
+        pointIntervalMinutes: 5,
         series: useRollingTodayHeartWindow ? todayDashboardHeartSeries : dashboardHeartSeries,
         markers: useRollingTodayHeartWindow ? this.getTodayIntradayMarkers() : this.getIntradayMarkers(selectedSession),
       },
@@ -925,7 +963,38 @@ export class MockHealthRepository implements HealthRepository {
     };
   }
 
-  async getSleepHistory(range: HistoryRange): Promise<SleepHistorySnapshot> {
+  async getHistoryOverview(dayKey: string): Promise<HistoryOverview> {
+    const overview = await this.buildOverviewSeed(dayKey);
+
+    return {
+      dateLabel: overview.dateLabel,
+      day: overview.day,
+      recovery: overview.recovery,
+      heartCard: overview.heartCard,
+      sleepCard: overview.sleepCard,
+      strainCard: overview.strainCard,
+      activitySummary: overview.activitySummary,
+      insights: overview.insights,
+    };
+  }
+
+  async getTodayOverview(): Promise<TodayOverview> {
+    const overview = await this.buildOverviewSeed();
+
+    return {
+      greeting: overview.greeting,
+      dateLabel: overview.dateLabel,
+      day: overview.day,
+      recovery: overview.recovery,
+      tonightPlan: overview.tonightPlan,
+      sleepCard: overview.sleepCard,
+      strainCard: overview.strainCard,
+      activitySummary: overview.activitySummary,
+      insights: overview.insights,
+    };
+  }
+
+  async getSleepHistory(range: HistoryRange): Promise<SleepHistoryData> {
     await this.wait();
 
     const latestSleep = this.sleepSessions[0] ?? null;
@@ -942,11 +1011,11 @@ export class MockHealthRepository implements HealthRepository {
       scoreTrend: takeTail(series(scoreLabels, sleepScores), range),
       durationTrend: takeTail(series(scoreLabels, sleepDurations), range),
       sessions: this.sleepSessions.slice(0, 3),
-      sleepPlan: buildSleepPlanSnapshot(this.sleepSessions, this.targetWakeMinutes, this.alarmEnabled),
+      sleepPlan: buildSleepPlan(this.sleepSessions, this.targetWakeMinutes, this.alarmEnabled),
     };
   }
 
-  async getHeartHistory(range: HistoryRange): Promise<HeartHistorySnapshot> {
+  async getHeartHistory(range: HistoryRange): Promise<HeartHistoryData> {
     await this.wait();
 
     return {
@@ -960,26 +1029,85 @@ export class MockHealthRepository implements HealthRepository {
     };
   }
 
-  async getDashboardHeartTimeline(range: HistoryRange): Promise<HeartCardSnapshot> {
+  async getDashboardHeartTimeline(
+    range: HistoryRange,
+    options?: DashboardHeartTimelineOptions,
+  ): Promise<HeartCardData> {
+    const window = await this.getDashboardHeartTimelineWindow(range);
+    const pointIntervalMinutes = options?.bucketMinutes ?? 5;
+
+    return buildHeartCardDataFromWindow(window, pointIntervalMinutes);
+  }
+
+  async getDashboardHeartTimelineWindow(range: HistoryRange): Promise<HeartTimelineWindow> {
     await this.wait();
 
-    const pointCount = Math.max(2, Math.floor((rangeHours(range) * 60) / 5));
     const endDate = todayDashboardHeartWindowEnd;
     const startDate = new Date(endDate.getTime() - rangeHours(range) * 3600000);
-    const series = buildIntradayHeartSeries(5, startDate, pointCount);
-    const values = series.map((point) => point.value).filter((value): value is number => value !== null);
+    const samples = buildHeartTimelineSamples(1, startDate, rangeHours(range) * 60 + 1);
+    const values = samples.map((sample) => sample.bpm).filter((value): value is number => value !== null);
+    const latestSession = this.sleepSessions[0] ?? this.sleepSessions.at(-1) ?? null;
+    const markers = [
+      ...(latestSession ? [buildMockSleepMarker(latestSession, startDate, endDate)] : []),
+      ...buildIntradayActivityMarkers(this.getVisibleActivities(), startDate, endDate),
+    ];
 
     return {
       restingHr: 48,
       averageHr: Math.round(mean(values)),
-      maxHr: sustainedPeakBpm(values) ?? Math.max(...values),
-      series,
-      markers: this.getIntradayMarkers(),
-      missingReason: series.length === 0 ? 'No local history yet. Sync the wearable from Settings to unlock this view.' : null,
+      maxHr: sustainedPeakBpm(values),
+      latestHeartDate: endDate,
+      intradayStart: startDate,
+      samples,
+      markers,
+      missingReason: samples.length === 0 ? 'No local history yet. Sync the wearable from Settings to unlock this view.' : null,
     };
   }
 
-  async getWellnessSnapshot(range: HistoryRange): Promise<WellnessSnapshot> {
+  async getFocusedHeartDetail(marker: HeartIntradayMarker): Promise<FocusedHeartDetail> {
+    await this.wait();
+
+    const startTimeMs = marker.startTimeMs ?? null;
+    const endTimeMs = marker.endTimeMs ?? null;
+
+    if (startTimeMs === null || endTimeMs === null || endTimeMs <= startTimeMs) {
+      return {
+        averageHr: null,
+        maxHr: null,
+        pointIntervalMinutes: 5,
+        series: [],
+        marker: {
+          ...marker,
+          startFraction: 0,
+          endFraction: 1,
+        },
+        missingReason: 'Focused heart detail is unavailable for this marker.',
+      };
+    }
+
+    const startDate = new Date(startTimeMs);
+    const endDate = new Date(endTimeMs);
+    const durationMinutes = Math.max((endTimeMs - startTimeMs) / 60000, 1 / 60);
+    const pointIntervalMinutes = selectFocusedHeartBucketMinutes(durationMinutes, 5);
+    const pointCount = Math.max(2, Math.floor(durationMinutes / pointIntervalMinutes) + 1);
+    const series = buildIntradayHeartSeries(pointIntervalMinutes, startDate, pointCount);
+    const values = series.map((point) => point.value).filter((value): value is number => value !== null);
+
+    return {
+      averageHr: values.length > 0 ? Math.round(mean(values)) : null,
+      maxHr: values.length > 0 ? sustainedPeakBpm(values) ?? Math.max(...values) : null,
+      pointIntervalMinutes,
+      series,
+      marker: {
+        ...marker,
+        startFraction: 0,
+        endFraction: 1,
+      },
+      missingReason: series.length === 0 ? 'Focused heart detail is unavailable for this marker.' : null,
+    };
+  }
+
+  async getWellnessData(range: HistoryRange): Promise<WellnessData> {
     await this.wait();
 
     return {
@@ -1097,7 +1225,7 @@ export class MockHealthRepository implements HealthRepository {
     };
   }
 
-  async getTrendSnapshot(range: HistoryRange): Promise<TrendSnapshot> {
+  async getTrendData(range: HistoryRange): Promise<TrendData> {
     await this.wait();
 
     const recoveryMetric = {
@@ -1240,16 +1368,16 @@ export class MockHealthRepository implements HealthRepository {
       range,
       latestLabel: buildDashboardDayState(dashboardDayKeys.length - 1).longLabel,
       primaryMetrics: [
-        buildTrendMetricSnapshot(recoveryMetric, 'recovery'),
-        buildTrendMetricSnapshot(hrvMetric, 'hrv'),
-        buildTrendMetricSnapshot(restingMetric, 'restingHr'),
-        buildTrendMetricSnapshot(sleepScoreMetric, 'sleepScore'),
+        buildTrendMetric(recoveryMetric, 'recovery'),
+        buildTrendMetric(hrvMetric, 'hrv'),
+        buildTrendMetric(restingMetric, 'restingHr'),
+        buildTrendMetric(sleepScoreMetric, 'sleepScore'),
       ],
       secondaryMetrics: [
-        buildTrendMetricSnapshot(sleepDurationMetric, 'sleepDuration'),
-        buildTrendMetricSnapshot(sleepConsistencyMetric, 'sleepConsistency'),
-        buildTrendMetricSnapshot(stressMetric, 'stress'),
-        buildTrendMetricSnapshot(skinTemperatureDeviationMetric, 'skinTemperatureDeviation'),
+        buildTrendMetric(sleepDurationMetric, 'sleepDuration'),
+        buildTrendMetric(sleepConsistencyMetric, 'sleepConsistency'),
+        buildTrendMetric(stressMetric, 'stress'),
+        buildTrendMetric(skinTemperatureDeviationMetric, 'skinTemperatureDeviation'),
       ],
     };
   }

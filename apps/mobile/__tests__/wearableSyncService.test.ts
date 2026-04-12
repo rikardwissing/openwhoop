@@ -843,9 +843,12 @@ describe('WearableSyncService battery refresh', () => {
       const stored = await db.getFirstAsync<{
         bpm: number;
         rr_intervals: string;
-        sensor_data: string | null;
+        ppg_green: number | null;
+        spo2_red: number | null;
+        spo2_ir: number | null;
+        skin_temp_raw: number | null;
       }>(
-        'SELECT bpm, rr_intervals, sensor_data FROM heart_rate WHERE time = ?',
+        'SELECT bpm, rr_intervals, ppg_green, spo2_red, spo2_ir, skin_temp_raw FROM heart_rate WHERE time = ?',
         formatSqliteDateTime(new Date(unixSeconds * 1000)),
       );
       const rowCount = await db.getFirstAsync<{ count: number }>('SELECT COUNT(*) AS count FROM heart_rate');
@@ -854,7 +857,10 @@ describe('WearableSyncService battery refresh', () => {
       expect(rowCount?.count).toBe(1);
       expect(stored?.bpm).toBe(69);
       expect(stored?.rr_intervals).toBe('820');
-      expect(stored?.sensor_data).not.toBeNull();
+      expect(stored?.ppg_green).toBe(15_500);
+      expect(stored?.spo2_red).toBe(5_400);
+      expect(stored?.spo2_ir).toBe(7_800);
+      expect(stored?.skin_temp_raw).toBe(312);
     } finally {
       db.close();
     }

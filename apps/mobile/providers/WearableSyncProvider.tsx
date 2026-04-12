@@ -257,19 +257,7 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const triggerDerivedRefresh = useCallback(() => {
-    const heartSnapshotStartedAt = Date.now();
-    refreshHealthData(['heart', 'trends', 'derived']);
-    void healthRepository
-      .refreshDashboardSnapshot('post_sync_heart_only')
-      .then((refreshed) => {
-        logMobileSyncPerf('foreground.refreshDashboard.postSyncHeartOnly', heartSnapshotStartedAt, {
-          refreshed,
-        });
-        if (refreshed) {
-          refreshHealthData(['dashboard', 'trends']);
-        }
-      })
-      .catch(() => {});
+    refreshHealthData(['dashboard', 'heart', 'trends', 'derived']);
 
     const derivedRefreshStartedAt = Date.now();
     void healthRepository

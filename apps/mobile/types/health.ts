@@ -12,6 +12,11 @@ export interface TrendPoint {
   value: number | null;
 }
 
+export interface HeartTimelineSample {
+  bpm: number;
+  date: Date;
+}
+
 export interface TrendSelection {
   index: number;
   point: TrendPoint;
@@ -55,15 +60,34 @@ export interface SummaryStat extends EstimatedValueMeta {
   accent: AccentTone;
 }
 
-export interface HeartCardSnapshot extends EstimatedValueMeta {
+export interface HeartCardData extends EstimatedValueMeta {
   restingHr: number | null;
   averageHr: number | null;
   maxHr: number | null;
+  pointIntervalMinutes?: number;
   series: TrendPoint[];
   markers: HeartIntradayMarker[];
 }
 
-export interface SleepCardSnapshot extends EstimatedValueMeta {
+export interface HeartTimelineWindow extends EstimatedValueMeta {
+  restingHr: number | null;
+  averageHr: number | null;
+  maxHr: number | null;
+  latestHeartDate: Date | null;
+  intradayStart: Date | null;
+  samples: HeartTimelineSample[];
+  markers: HeartIntradayMarker[];
+}
+
+export interface FocusedHeartDetail extends EstimatedValueMeta {
+  averageHr: number | null;
+  maxHr: number | null;
+  pointIntervalMinutes: number;
+  series: TrendPoint[];
+  marker: HeartIntradayMarker;
+}
+
+export interface SleepCardData extends EstimatedValueMeta {
   score: number | null;
   durationMinutes: number | null;
   timeInBedMinutes: number | null;
@@ -73,7 +97,7 @@ export interface SleepCardSnapshot extends EstimatedValueMeta {
   endLabel: string;
 }
 
-export interface StrainCardSnapshot extends EstimatedValueMeta {
+export interface StrainCardData extends EstimatedValueMeta {
   score: number | null;
   label: string;
   series: TrendPoint[];
@@ -104,24 +128,27 @@ export interface DashboardInsight {
   accent: AccentTone;
 }
 
-export interface DashboardSnapshot {
-  layoutVersion?: number;
+export interface HistoryOverview {
+  dateLabel: string;
+  day: DashboardDayState;
+  recovery: RecoverySnapshot;
+  heartCard: HeartCardData;
+  sleepCard: SleepCardData;
+  strainCard: StrainCardData;
+  activitySummary: ActivitySummary[];
+  insights: DashboardInsight[];
+}
+
+export interface TodayOverview {
   greeting: string;
   dateLabel: string;
   day: DashboardDayState;
   recovery: RecoverySnapshot;
-  tonightPlan: SleepPlanSnapshot;
-  summaryStats: SummaryStat[];
-  heartCard: HeartCardSnapshot;
-  sleepCard: SleepCardSnapshot;
-  strainCard: StrainCardSnapshot;
-  hrvCard: MetricSeries;
-  stressCard: MetricSeries;
-  spo2Card: MetricSeries;
-  skinTemperatureCard: MetricSeries;
+  tonightPlan: SleepPlan;
+  sleepCard: SleepCardData;
+  strainCard: StrainCardData;
   activitySummary: ActivitySummary[];
   insights: DashboardInsight[];
-  lastSyncLabel?: string | null;
 }
 
 export interface SleepSession extends EstimatedValueMeta {
@@ -142,7 +169,7 @@ export interface SleepSession extends EstimatedValueMeta {
   avgHrv?: number | null;
 }
 
-export interface SleepPlanSnapshot {
+export interface SleepPlan {
   targetWakeMinutes: number;
   targetWakeTime: string;
   optimalBedtimeMinutes: number;
@@ -153,7 +180,7 @@ export interface SleepPlanSnapshot {
   alarmEnabled: boolean;
 }
 
-export interface SleepHistorySnapshot extends EstimatedValueMeta {
+export interface SleepHistoryData extends EstimatedValueMeta {
   headlineScore: number | null;
   headlineLabel: string;
   bedtime: string;
@@ -165,10 +192,10 @@ export interface SleepHistorySnapshot extends EstimatedValueMeta {
   scoreTrend: TrendPoint[];
   durationTrend: TrendPoint[];
   sessions: SleepSession[];
-  sleepPlan: SleepPlanSnapshot;
+  sleepPlan: SleepPlan;
 }
 
-export interface HeartHistorySnapshot extends EstimatedValueMeta {
+export interface HeartHistoryData extends EstimatedValueMeta {
   restingHr: number | null;
   averageHr: number | null;
   maxHr: number | null;
@@ -226,10 +253,12 @@ export interface HeartIntradayMarker {
   timeLabel: string;
   startFraction: number;
   endFraction: number;
+  startTimeMs?: number;
+  endTimeMs?: number;
   details?: HeartIntradayMarkerDetails;
 }
 
-export interface WellnessSnapshot extends EstimatedValueMeta {
+export interface WellnessData extends EstimatedValueMeta {
   stress: MetricSeries;
   spo2: MetricSeries;
   skinTemperature: MetricSeries;
@@ -247,15 +276,15 @@ export type TrendMetricId =
   | 'stress'
   | 'skinTemperatureDeviation';
 
-export interface TrendMetricSnapshot extends MetricSeries {
+export interface TrendMetric extends MetricSeries {
   id: TrendMetricId;
 }
 
-export interface TrendSnapshot extends EstimatedValueMeta {
+export interface TrendData extends EstimatedValueMeta {
   range: HistoryRange;
   latestLabel: string;
-  primaryMetrics: TrendMetricSnapshot[];
-  secondaryMetrics: TrendMetricSnapshot[];
+  primaryMetrics: TrendMetric[];
+  secondaryMetrics: TrendMetric[];
 }
 
 export interface DerivedRefreshState {

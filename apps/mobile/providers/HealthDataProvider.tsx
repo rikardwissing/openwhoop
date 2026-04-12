@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useState, type ReactNode } from 'react';
 import { useSQLiteContext } from 'expo-sqlite';
 
 import type { HealthRefreshScope, HealthRepository } from '@/data/HealthRepository';
@@ -76,23 +76,6 @@ function HealthRepositoryProvider({
     },
     [repository],
   );
-
-  useEffect(() => {
-    let cancelled = false;
-
-    void repository
-      .primeDashboardSnapshot()
-      .then((primed) => {
-        if (!cancelled && primed) {
-          setVersions((current) => bumpVersions(current, ['dashboard']));
-        }
-      })
-      .catch(() => {});
-
-    return () => {
-      cancelled = true;
-    };
-  }, [repository]);
 
   return (
     <HealthRepositoryContext.Provider value={repository}>

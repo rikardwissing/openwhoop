@@ -20,9 +20,9 @@ import {
   SLEEP_PREPARATION_REMINDER_NOTIFICATION_ID,
   syncSleepPreparationReminder,
 } from '@/services/notifications/sleepPreparationReminder';
-import type { SleepPlanSnapshot } from '@/types/health';
+import type { SleepPlan } from '@/types/health';
 
-const basePlan: SleepPlanSnapshot = {
+const basePlan: SleepPlan = {
   targetWakeMinutes: 7 * 60,
   targetWakeTime: '7:00 AM',
   optimalBedtimeMinutes: 22 * 60 + 30,
