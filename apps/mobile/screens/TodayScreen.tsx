@@ -23,9 +23,9 @@ import type { HeartCardData, HeartTimelineWindow } from '@/types/health';
 import { hasFreshLiveHeartRate } from '@/types/device';
 import {
   HEART_TIMELINE_POINT_INTERVAL_MINUTES,
-  HEART_TIMELINE_ZOOM_PRESETS,
   getHeartTimelineWindowPointCount,
   getHeartTimelineZoomPreset,
+  getHeartTimelineZoomSteps,
   type HeartTimelineZoomLevel,
 } from '@/utils/heartTimelineZoom';
 import { buildHeartCardDataFromWindow } from '@/utils/heartTimeline';
@@ -78,6 +78,16 @@ export function TodayScreen() {
 
     return fallbackHeartCardData;
   }, [fallbackHeartCardData, heartTimelineWindow]);
+  const heartPinchZoomSteps = useMemo(
+    () =>
+      displayedHeartCardData
+        ? getHeartTimelineZoomSteps(
+            displayedHeartCardData.pointIntervalMinutes,
+            displayedHeartCardData.series.length,
+          )
+        : [],
+    [displayedHeartCardData],
+  );
 
   useEffect(() => {
     if (!heartDayKey) {
@@ -306,14 +316,13 @@ export function TodayScreen() {
           isRefreshing={isHeartCardRefreshing}
           liveHeartRateLabel={liveHeartRateLabel}
           latestWindowLabel={selectedHeartZoomPreset.latestLabel}
-          onZoomChange={handleHeartZoomChange}
-          selectedZoomValue={selectedHeartZoom}
+          onPinchZoomStepChange={handleHeartZoomChange}
+          pinchZoomSteps={heartPinchZoomSteps}
           showLiveHeartRate={showLiveHeartRate}
           cardData={displayedHeartCardData}
           trailingLabel={selectedHeartZoomPreset.latestLabel}
           viewportKey={data.day.dayKey}
           windowPointCount={heartChartWindowPointCount}
-          zoomOptions={HEART_TIMELINE_ZOOM_PRESETS}
         />
       ) : heartCardState.status === 'error' ? (
         <HeartCardStatus

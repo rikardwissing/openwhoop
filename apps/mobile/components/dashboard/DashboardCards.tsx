@@ -20,8 +20,12 @@ import Animated, {
 
 import { SleepStageChart } from '@/components/charts/SleepStageChart';
 import { TrendChart } from '@/components/charts/TrendChart';
-import { PannableHeartChart, type HeartActivityDraft, type HeartMarkerDraftKind } from './PannableHeartChart';
-import { RangeSegmentedControl } from './RangeSegmentedControl';
+import {
+  PannableHeartChart,
+  type HeartActivityDraft,
+  type HeartMarkerDraftKind,
+  type HeartPinchZoomStep,
+} from './PannableHeartChart';
 import { SectionHeader } from '@/components/layout/SectionHeader';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { PulsingHeartIcon } from '@/components/ui/PulsingHeartIcon';
@@ -106,11 +110,6 @@ interface HeartActivityReviewActions {
 interface HeartChartViewportState {
   windowPointCount: number;
   windowStart: number;
-}
-
-interface HeartZoomOption {
-  label: string;
-  value: string;
 }
 
 function accentColorForInsight(accent: DashboardInsight['accent']) {
@@ -612,16 +611,14 @@ export function HeartCard({
   loadFocusedDetail,
   onLoadMore,
   onOpen,
-  onPresetZoomTransitionStateChange,
-  onZoomChange,
+  onPinchZoomStepChange,
   openTestID,
-  selectedZoomValue,
   showLiveHeartRate = false,
   cardData: cardData,
   trailingLabel,
   viewportKey,
   windowPointCount,
-  zoomOptions,
+  pinchZoomSteps,
 }: {
   activityReviewActions?: HeartActivityReviewActions;
   canLoadMore?: boolean;
@@ -633,16 +630,14 @@ export function HeartCard({
   loadFocusedDetail?: (marker: HeartIntradayMarker) => Promise<FocusedHeartDetail>;
   onLoadMore?: () => void;
   onOpen?: () => void;
-  onPresetZoomTransitionStateChange?: (isTransitioning: boolean) => void;
-  onZoomChange?: (value: string) => void;
+  onPinchZoomStepChange?: (value: string) => void;
   openTestID?: string;
-  selectedZoomValue?: string;
   showLiveHeartRate?: boolean;
   cardData: HeartCardData;
   trailingLabel: string;
   viewportKey?: string;
   windowPointCount?: number;
-  zoomOptions?: readonly HeartZoomOption[];
+  pinchZoomSteps?: readonly HeartPinchZoomStep[];
 }) {
   const resolvedWindowPointCount = windowPointCount ?? cardData.series.length;
   const basePointIntervalMinutes = cardData.pointIntervalMinutes ?? DEFAULT_HEART_CHART_POINT_INTERVAL_MINUTES;
@@ -845,7 +840,6 @@ export function HeartCard({
     .map((chip) => `${chip.label}:${chip.value}:${chip.accentColor}`)
     .join('|');
   const sleepStagePanelVisible = isSleepFocused && sleepStageChips.length > 0;
-  const showZoomControls = Boolean(zoomOptions && selectedZoomValue && onZoomChange) && !displayedFocusedCardContent && !isPresentedDraftEditing;
   const activityDetailPanelVisible =
     showIdleCreateGraphActivity ||
     isDraftEditing ||
@@ -1944,21 +1938,6 @@ export function HeartCard({
       </Animated.View>
 
       <Animated.View style={animatedCardChipsStageStyle}>
-        {showZoomControls ? (
-          <View style={styles.controlStack}>
-            {showZoomControls ? (
-              <View style={styles.zoomControlWrap}>
-                <Text style={styles.controlLabel}>Zoom</Text>
-                <RangeSegmentedControl
-                  onChange={onZoomChange!}
-                  options={[...zoomOptions!]}
-                  selectedValue={selectedZoomValue!}
-                  testIDPrefix={chartTestID ? `${chartTestID}-zoom` : undefined}
-                />
-              </View>
-            ) : null}
-          </View>
-        ) : null}
         {displayedFocusedCardContent?.chips.length && !isActivityFocused ? (
           <View style={styles.cardChipRow}>
             {displayedFocusedCardContent.chips.map((chip) => (
@@ -1986,9 +1965,10 @@ export function HeartCard({
         onFocusedMarkerChange={handleFocusedMarkerChange}
         onFocusTransitionStateChange={handleFocusTransitionStateChange}
         onLoadMore={onLoadMore}
-        onPresetZoomTransitionStateChange={onPresetZoomTransitionStateChange}
+        onPinchZoomStepChange={onPinchZoomStepChange}
         onViewportWindowChange={setChartViewportState}
         onViewingLatestWindowChange={setIsViewingLatestWindow}
+        pinchZoomSteps={pinchZoomSteps}
         pointIntervalMinutes={displayedChartSnapshot.pointIntervalMinutes ?? basePointIntervalMinutes}
         points={displayedChartSnapshot.series}
         resetKey={chartResetKey}
@@ -2640,19 +2620,6 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: 10,
     marginBottom: 10,
-  },
-  controlStack: {
-    gap: 8,
-    marginBottom: 10,
-  },
-  controlLabel: {
-    color: colors.muted,
-    fontFamily: typography.bodySemiBold,
-    fontSize: 11,
-    marginBottom: 6,
-  },
-  zoomControlWrap: {
-    marginBottom: 0,
   },
   activityDetailContent: {
     gap: 12,
