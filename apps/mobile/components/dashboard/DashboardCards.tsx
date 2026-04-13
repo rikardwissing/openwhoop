@@ -610,14 +610,11 @@ export function HeartCard({
   latestWindowLabel,
   liveHeartRateLabel,
   loadFocusedDetail,
-  bucketOptions,
   onLoadMore,
-  onBucketChange,
   onOpen,
   onPresetZoomTransitionStateChange,
   onZoomChange,
   openTestID,
-  selectedBucketValue,
   selectedZoomValue,
   showLiveHeartRate = false,
   cardData: cardData,
@@ -629,19 +626,16 @@ export function HeartCard({
   activityReviewActions?: HeartActivityReviewActions;
   canLoadMore?: boolean;
   chartTestID: string;
-  bucketOptions?: readonly HeartZoomOption[];
   isLoadingMore?: boolean;
   isRefreshing?: boolean;
   latestWindowLabel?: string;
   liveHeartRateLabel?: string | null;
   loadFocusedDetail?: (marker: HeartIntradayMarker) => Promise<FocusedHeartDetail>;
-  onBucketChange?: (value: string) => void;
   onLoadMore?: () => void;
   onOpen?: () => void;
   onPresetZoomTransitionStateChange?: (isTransitioning: boolean) => void;
   onZoomChange?: (value: string) => void;
   openTestID?: string;
-  selectedBucketValue?: string;
   selectedZoomValue?: string;
   showLiveHeartRate?: boolean;
   cardData: HeartCardData;
@@ -852,8 +846,6 @@ export function HeartCard({
     .join('|');
   const sleepStagePanelVisible = isSleepFocused && sleepStageChips.length > 0;
   const showZoomControls = Boolean(zoomOptions && selectedZoomValue && onZoomChange) && !displayedFocusedCardContent && !isPresentedDraftEditing;
-  const showBucketControls =
-    Boolean(bucketOptions && selectedBucketValue && onBucketChange) && !displayedFocusedCardContent && !isPresentedDraftEditing;
   const activityDetailPanelVisible =
     showIdleCreateGraphActivity ||
     isDraftEditing ||
@@ -1952,7 +1944,7 @@ export function HeartCard({
       </Animated.View>
 
       <Animated.View style={animatedCardChipsStageStyle}>
-        {showZoomControls || showBucketControls ? (
+        {showZoomControls ? (
           <View style={styles.controlStack}>
             {showZoomControls ? (
               <View style={styles.zoomControlWrap}>
@@ -1962,17 +1954,6 @@ export function HeartCard({
                   options={[...zoomOptions!]}
                   selectedValue={selectedZoomValue!}
                   testIDPrefix={chartTestID ? `${chartTestID}-zoom` : undefined}
-                />
-              </View>
-            ) : null}
-            {showBucketControls ? (
-              <View style={styles.zoomControlWrap}>
-                <Text style={styles.controlLabel}>Bucket</Text>
-                <RangeSegmentedControl
-                  onChange={onBucketChange!}
-                  options={[...bucketOptions!]}
-                  selectedValue={selectedBucketValue!}
-                  testIDPrefix={chartTestID ? `${chartTestID}-bucket` : undefined}
                 />
               </View>
             ) : null}

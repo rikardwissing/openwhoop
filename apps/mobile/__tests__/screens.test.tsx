@@ -322,7 +322,7 @@ describe('screen rendering', () => {
     );
   }, 10000);
 
-  it('derives today heart zoom presets from the cached raw heart window', async () => {
+  it('keeps today heart zoom presets on the cached 5 minute heart window', async () => {
     const repository = new TrackingMockHealthRepository({ delayMs: 50 });
     const screen = renderWithRepository(repository, <TodayScreen />);
 
@@ -337,6 +337,7 @@ describe('screen rendering', () => {
     });
 
     await waitFor(() => {
+      expect(screen.queryByTestId('today-heart-chart-bucket-auto')).toBeNull();
       expect(screen.UNSAFE_getByType(PannableHeartChart).props.pointIntervalMinutes).toBe(5);
       expect(screen.getByText('Last 12h')).toBeTruthy();
     });
@@ -344,7 +345,7 @@ describe('screen rendering', () => {
     fireEvent.press(screen.getByTestId('today-heart-chart-zoom-6h'));
 
     await waitFor(() => {
-      expect(screen.UNSAFE_getByType(PannableHeartChart).props.pointIntervalMinutes).toBe(2);
+      expect(screen.UNSAFE_getByType(PannableHeartChart).props.pointIntervalMinutes).toBe(5);
       expect(screen.getByText('Last 6h')).toBeTruthy();
     });
 
@@ -355,7 +356,7 @@ describe('screen rendering', () => {
     fireEvent.press(screen.getByTestId('today-heart-chart-zoom-3h'));
 
     await waitFor(() => {
-      expect(screen.UNSAFE_getByType(PannableHeartChart).props.pointIntervalMinutes).toBe(2);
+      expect(screen.UNSAFE_getByType(PannableHeartChart).props.pointIntervalMinutes).toBe(5);
       expect(screen.getByText('Last 3h')).toBeTruthy();
     });
 
@@ -379,38 +380,6 @@ describe('screen rendering', () => {
     await waitFor(() => {
       expect(screen.UNSAFE_getByType(PannableHeartChart).props.pointIntervalMinutes).toBe(5);
       expect(screen.getByText('Last 7d')).toBeTruthy();
-    });
-  });
-
-  it('lets you override today heart bucket size levels directly for testing', async () => {
-    const repository = new TrackingMockHealthRepository({ delayMs: 50 });
-    const screen = renderWithRepository(repository, <TodayScreen />);
-
-    await screen.findByTestId('today-heart-chart-axis');
-
-    await waitFor(() => {
-      expect(repository.dashboardHeartTimelineCalls).toEqual(['7d']);
-    });
-
-    await waitFor(() => {
-      expect(screen.UNSAFE_getByType(PannableHeartChart).props.pointIntervalMinutes).toBe(5);
-    });
-
-    fireEvent.press(screen.getByTestId('today-heart-chart-bucket-2m'));
-
-    await waitFor(() => {
-      expect(repository.dashboardHeartTimelineCalls).toEqual(['7d']);
-    });
-
-    await waitFor(() => {
-      expect(screen.UNSAFE_getByType(PannableHeartChart).props.pointIntervalMinutes).toBe(2);
-    });
-
-    fireEvent.press(screen.getByTestId('today-heart-chart-bucket-auto'));
-
-    await waitFor(() => {
-      expect(repository.dashboardHeartTimelineCalls).toEqual(['7d']);
-      expect(screen.UNSAFE_getByType(PannableHeartChart).props.pointIntervalMinutes).toBe(5);
     });
   });
 

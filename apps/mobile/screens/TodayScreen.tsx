@@ -22,12 +22,10 @@ import type { ManualActivityKind } from '@/data/HealthRepository';
 import type { HeartCardData, HeartTimelineWindow } from '@/types/health';
 import { hasFreshLiveHeartRate } from '@/types/device';
 import {
-  HEART_TIMELINE_BUCKET_PRESETS,
+  HEART_TIMELINE_POINT_INTERVAL_MINUTES,
   HEART_TIMELINE_ZOOM_PRESETS,
-  getHeartTimelineBucketMinutes,
   getHeartTimelineWindowPointCount,
   getHeartTimelineZoomPreset,
-  type HeartTimelineBucketLevel,
   type HeartTimelineZoomLevel,
 } from '@/utils/heartTimelineZoom';
 import { buildHeartCardDataFromWindow } from '@/utils/heartTimeline';
@@ -36,7 +34,6 @@ import { getRecoveryMetricTone, getSleepMetricTone, getStrainMetricTone } from '
 
 const HEART_PREFETCH_RANGE = '7d';
 const HEART_ACTIVITY_REFRESH_SCOPES = ['dashboard', 'sleep', 'heart', 'wellness', 'trends'] as const;
-const DEFAULT_HEART_TIMELINE_BUCKET: HeartTimelineBucketLevel = 'auto';
 const DEFAULT_HEART_TIMELINE_ZOOM: HeartTimelineZoomLevel = '12h';
 
 export function TodayScreen() {
@@ -49,11 +46,7 @@ export function TodayScreen() {
   const { deviceState } = useWearableSyncState();
   const { onRefresh, refreshing } = useWearableRefreshControl();
   const data = state.data;
-  const [selectedHeartBucketLevel, setSelectedHeartBucketLevel] = useState<HeartTimelineBucketLevel>(
-    DEFAULT_HEART_TIMELINE_BUCKET,
-  );
-  const [requestedHeartZoom, setRequestedHeartZoom] = useState<HeartTimelineZoomLevel>(DEFAULT_HEART_TIMELINE_ZOOM);
-  const [appliedHeartZoom, setAppliedHeartZoom] = useState<HeartTimelineZoomLevel>(DEFAULT_HEART_TIMELINE_ZOOM);
+  const [selectedHeartZoom, setSelectedHeartZoom] = useState<HeartTimelineZoomLevel>(DEFAULT_HEART_TIMELINE_ZOOM);
   const [heartTimelineWindow, setHeartTimelineWindow] = useState<HeartTimelineWindow | null>(null);
   const [heartCardState, setHeartCardState] = useState<{
     dayKey: string | null;
@@ -72,23 +65,19 @@ export function TodayScreen() {
     showLiveHeartRate && deviceState.liveHeartRate !== null ? `${deviceState.liveHeartRate} bpm` : null;
 
   const heartDayKey = data?.day.dayKey ?? null;
-  const appliedHeartZoomPreset = useMemo(
-    () => getHeartTimelineZoomPreset(appliedHeartZoom),
-    [appliedHeartZoom],
-  );
-  const requestedHeartBucketMinutes = useMemo(
-    () => getHeartTimelineBucketMinutes(selectedHeartBucketLevel, requestedHeartZoom),
-    [requestedHeartZoom, selectedHeartBucketLevel],
+  const selectedHeartZoomPreset = useMemo(
+    () => getHeartTimelineZoomPreset(selectedHeartZoom),
+    [selectedHeartZoom],
   );
   const fallbackHeartCardData =
     heartCardState.cardData && heartCardState.dayKey === heartDayKey ? heartCardState.cardData : null;
   const displayedHeartCardData = useMemo(() => {
     if (heartTimelineWindow) {
-      return buildHeartCardDataFromWindow(heartTimelineWindow, requestedHeartBucketMinutes);
+      return buildHeartCardDataFromWindow(heartTimelineWindow, HEART_TIMELINE_POINT_INTERVAL_MINUTES);
     }
 
     return fallbackHeartCardData;
-  }, [fallbackHeartCardData, heartTimelineWindow, requestedHeartBucketMinutes]);
+  }, [fallbackHeartCardData, heartTimelineWindow]);
 
   useEffect(() => {
     if (!heartDayKey) {
@@ -135,7 +124,7 @@ export function TodayScreen() {
       .getDashboardHeartTimelineWindow(HEART_PREFETCH_RANGE)
       .then((window) => {
         if (!cancelled) {
-          const cardData = buildHeartCardDataFromWindow(window, requestedHeartBucketMinutes);
+          const cardData = buildHeartCardDataFromWindow(window, HEART_TIMELINE_POINT_INTERVAL_MINUTES);
 
           logMobilePerf('screen.today.heartGraph.load', loadStartedAt, {
             day: heartDayKey,
@@ -178,27 +167,13 @@ export function TodayScreen() {
     (zoomLevel: string) => {
       const nextZoom = zoomLevel as HeartTimelineZoomLevel;
 
-      if (nextZoom === requestedHeartZoom && nextZoom === appliedHeartZoom) {
+      if (nextZoom === selectedHeartZoom) {
         return;
       }
 
-      setRequestedHeartZoom(nextZoom);
-      setAppliedHeartZoom(nextZoom);
+      setSelectedHeartZoom(nextZoom);
     },
-    [appliedHeartZoom, requestedHeartZoom],
-  );
-
-  const handleHeartBucketLevelChange = useCallback(
-    (bucketLevel: string) => {
-      const nextBucketLevel = bucketLevel as HeartTimelineBucketLevel;
-
-      if (nextBucketLevel === selectedHeartBucketLevel) {
-        return;
-      }
-
-      setSelectedHeartBucketLevel(nextBucketLevel);
-    },
-    [selectedHeartBucketLevel],
+    [selectedHeartZoom],
   );
 
   const refreshAfterActivityMutation = useCallback(() => {
@@ -258,7 +233,7 @@ export function TodayScreen() {
   const isHeartCardRefreshing = heartCardState.dayKey === heartDayKey ? heartCardState.isRefreshing : false;
   const heartChartWindowPointCount = displayedHeartCardData
     ? getHeartTimelineWindowPointCount(
-        appliedHeartZoom,
+        selectedHeartZoom,
         displayedHeartCardData.pointIntervalMinutes,
         displayedHeartCardData.series.length,
       )
@@ -328,17 +303,14 @@ export function TodayScreen() {
             updateSleep: handleUpdateHeartSleep,
           }}
           chartTestID="today-heart-chart"
-          bucketOptions={HEART_TIMELINE_BUCKET_PRESETS}
           isRefreshing={isHeartCardRefreshing}
           liveHeartRateLabel={liveHeartRateLabel}
-          onBucketChange={handleHeartBucketLevelChange}
-          latestWindowLabel={appliedHeartZoomPreset.latestLabel}
+          latestWindowLabel={selectedHeartZoomPreset.latestLabel}
           onZoomChange={handleHeartZoomChange}
-          selectedBucketValue={selectedHeartBucketLevel}
-          selectedZoomValue={appliedHeartZoom}
+          selectedZoomValue={selectedHeartZoom}
           showLiveHeartRate={showLiveHeartRate}
           cardData={displayedHeartCardData}
-          trailingLabel={appliedHeartZoomPreset.latestLabel}
+          trailingLabel={selectedHeartZoomPreset.latestLabel}
           viewportKey={data.day.dayKey}
           windowPointCount={heartChartWindowPointCount}
           zoomOptions={HEART_TIMELINE_ZOOM_PRESETS}
@@ -350,7 +322,7 @@ export function TodayScreen() {
           liveHeartRateLabel={liveHeartRateLabel}
           message="Unable to load 7 day heart history right now."
           showLiveHeartRate={showLiveHeartRate}
-          trailingLabel={appliedHeartZoomPreset.latestLabel}
+          trailingLabel={selectedHeartZoomPreset.latestLabel}
         />
       ) : (
         <HeartCardStatus
@@ -358,7 +330,7 @@ export function TodayScreen() {
           liveHeartRateLabel={liveHeartRateLabel}
           message="Loading 7 day heart history..."
           showLiveHeartRate={showLiveHeartRate}
-          trailingLabel={appliedHeartZoomPreset.latestLabel}
+          trailingLabel={selectedHeartZoomPreset.latestLabel}
         />
       )}
 
