@@ -2,7 +2,6 @@ import type { SQLiteDatabase } from 'expo-sqlite';
 
 import type {
   ActivityRescanResult,
-  DashboardHeartTimelineOptions,
   HealthCacheScope,
   HealthRepository,
   ManualActivityKind,
@@ -53,7 +52,6 @@ import type {
 } from '@/types/health';
 import { addMinutes, dateKey, formatAxisTime, formatClock, formatClockMinutes, formatLongDate, formatShortDate, formatSqliteDateTime, hoursBetween, minutesBetween, parseSqliteDateTime } from '@/utils/dateTime';
 import { describeRecovery, describeSleepScore, formatMetricNumber } from '@/utils/formatters';
-import { selectFocusedHeartBucketMinutes } from '@/utils/heartChartDetail';
 import { buildHeartCardDataFromWindow } from '@/utils/heartTimeline';
 import {
   filterPlausibleRecordedBpms,
@@ -7336,15 +7334,10 @@ export class SQLiteHealthRepository implements HealthRepository {
     });
   }
 
-  async getDashboardHeartTimeline(
-    range: HistoryRange,
-    options?: DashboardHeartTimelineOptions,
-  ): Promise<HeartCardData> {
-    const bucketMinutes = options?.bucketMinutes ?? HEART_INTRADAY_BUCKET_MINUTES;
-
-    return this.readSnapshot(`heart:dashboard:${range}:bucket:${bucketMinutes}`, async () => {
+  async getDashboardHeartTimeline(range: HistoryRange): Promise<HeartCardData> {
+    return this.readSnapshot(`heart:dashboard:${range}`, async () => {
       const window = await this.getDashboardHeartTimelineWindow(range);
-      return buildHeartCardDataFromWindow(window, bucketMinutes);
+      return buildHeartCardDataFromWindow(window);
     });
   }
 
@@ -7375,22 +7368,25 @@ export class SQLiteHealthRepository implements HealthRepository {
 
         const startDate = new Date(startTimeMs);
         const endDate = new Date(endTimeMs);
-        const bucketMinutes = selectFocusedHeartBucketMinutes(
-          exactMinutesBetween(startDate, endDate),
-          null,
+        const bucketRows = await loadHeartBucketRowsBetweenRange(
+          this.db,
+          startDate,
+          endDate,
+          HEART_INTRADAY_BUCKET_SECONDS,
         );
-        const sourceBucketSeconds = bucketMinutes <= 0.25
-          ? HEART_DETAIL_FINE_BUCKET_SECONDS
-          : HEART_GRAPH_FINE_BUCKET_SECONDS;
-        const bucketRows = await loadHeartBucketRowsBetweenRange(this.db, startDate, endDate, sourceBucketSeconds);
         const bucketSamples = bucketRows.map(toHeartIntradayBucketSample);
         const summary = summarizeBucketWindow(bucketRows);
-        const series = createTimeBuckets(bucketSamples, bucketMinutes, startDate, endDate);
+        const series = createTimeBuckets(
+          bucketSamples,
+          HEART_INTRADAY_BUCKET_MINUTES,
+          startDate,
+          endDate,
+        );
 
         const snapshot = {
           averageHr: summary.averageBpm,
           maxHr: summary.sustainedPeakBpm,
-          pointIntervalMinutes: bucketMinutes,
+          pointIntervalMinutes: HEART_INTRADAY_BUCKET_MINUTES,
           series,
           marker: buildFocusedHeartDetailMarker(marker),
           missingReason: series.length === 0 ? NO_HISTORY_REASON : null,

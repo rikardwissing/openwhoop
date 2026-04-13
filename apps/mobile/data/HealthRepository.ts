@@ -21,15 +21,11 @@ export interface ActivityRescanResult {
   removedUnconfirmedActivities: number;
 }
 
-export interface DashboardHeartTimelineOptions {
-  bucketMinutes?: number;
-}
-
 export interface HealthRepository {
   getTodayOverview(): Promise<TodayOverview>;
   getHistoryOverview(dayKey: string): Promise<HistoryOverview>;
   getDashboardHeartTimelineWindow(range: HistoryRange): Promise<HeartTimelineWindow>;
-  getDashboardHeartTimeline(range: HistoryRange, options?: DashboardHeartTimelineOptions): Promise<HeartCardData>;
+  getDashboardHeartTimeline(range: HistoryRange): Promise<HeartCardData>;
   getFocusedHeartDetail(marker: HeartIntradayMarker): Promise<FocusedHeartDetail>;
   getSleepHistory(range: HistoryRange): Promise<SleepHistoryData>;
   getHeartHistory(range: HistoryRange): Promise<HeartHistoryData>;

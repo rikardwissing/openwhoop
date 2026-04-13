@@ -136,10 +136,6 @@ export function HistoryScreen() {
   const refreshAfterActivityMutation = useCallback(() => {
     refreshHealthData(HEART_ACTIVITY_REFRESH_SCOPES);
   }, [refreshHealthData]);
-  const loadFocusedHeartDetail = useCallback(
-    repository.getFocusedHeartDetail.bind(repository),
-    [repository],
-  );
   const handleConfirmHeartActivity = useCallback(async (activityId: string) => {
     await repository.confirmActivity(activityId);
     refreshAfterActivityMutation();
@@ -263,7 +259,6 @@ export function HistoryScreen() {
             updateSleep: handleUpdateHeartSleep,
           }}
           chartTestID="history-heart-chart"
-          loadFocusedDetail={loadFocusedHeartDetail}
           cardData={data.heartCard}
           trailingLabel={data.day.shortLabel}
           viewportKey={data.day.dayKey}

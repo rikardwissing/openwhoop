@@ -22,7 +22,6 @@ import type { ManualActivityKind } from '@/data/HealthRepository';
 import type { HeartCardData, HeartTimelineWindow } from '@/types/health';
 import { hasFreshLiveHeartRate } from '@/types/device';
 import {
-  HEART_TIMELINE_POINT_INTERVAL_MINUTES,
   getHeartTimelineWindowPointCount,
   getHeartTimelineZoomPreset,
   getHeartTimelineZoomSteps,
@@ -73,7 +72,7 @@ export function TodayScreen() {
     heartCardState.cardData && heartCardState.dayKey === heartDayKey ? heartCardState.cardData : null;
   const displayedHeartCardData = useMemo(() => {
     if (heartTimelineWindow) {
-      return buildHeartCardDataFromWindow(heartTimelineWindow, HEART_TIMELINE_POINT_INTERVAL_MINUTES);
+      return buildHeartCardDataFromWindow(heartTimelineWindow);
     }
 
     return fallbackHeartCardData;
@@ -134,7 +133,7 @@ export function TodayScreen() {
       .getDashboardHeartTimelineWindow(HEART_PREFETCH_RANGE)
       .then((window) => {
         if (!cancelled) {
-          const cardData = buildHeartCardDataFromWindow(window, HEART_TIMELINE_POINT_INTERVAL_MINUTES);
+          const cardData = buildHeartCardDataFromWindow(window);
 
           logMobilePerf('screen.today.heartGraph.load', loadStartedAt, {
             day: heartDayKey,

@@ -3,6 +3,8 @@ import { formatAxisTime } from '@/utils/dateTime';
 import { filterPlausibleRecordedBpms, sustainedPeakBpm } from '@/utils/heartRate';
 import { mean } from '@/utils/math';
 
+const HEART_GRAPH_POINT_INTERVAL_MINUTES = 5;
+
 function summarizeHeartSampleValues(samples: readonly HeartTimelineSample[]) {
   const validBpms = filterPlausibleRecordedBpms(samples.map((sample) => sample.bpm));
 
@@ -19,9 +21,8 @@ function summarizeHeartSampleValues(samples: readonly HeartTimelineSample[]) {
   };
 }
 
-export function bucketHeartTimelineSamples(
+function bucketHeartTimelineSamples(
   samples: readonly HeartTimelineSample[],
-  bucketMinutes: number,
   startDate?: Date,
   endDate?: Date,
 ): TrendPoint[] {
@@ -29,6 +30,7 @@ export function bucketHeartTimelineSamples(
     return [];
   }
 
+  const bucketMinutes = HEART_GRAPH_POINT_INTERVAL_MINUTES;
   const bucketMs = bucketMinutes * 60000;
   const buckets = new Map<number, HeartTimelineSample[]>();
 
@@ -53,7 +55,7 @@ export function bucketHeartTimelineSamples(
     const bucketSummary = bucket ? summarizeHeartSampleValues(bucket) : null;
 
     series.push({
-      label: formatAxisTime(new Date(bucketStart), { includeSeconds: bucketMinutes < 1 }),
+      label: formatAxisTime(new Date(bucketStart)),
       value: bucketSummary?.averageHr ?? null,
     });
   }
@@ -63,11 +65,9 @@ export function bucketHeartTimelineSamples(
 
 export function buildHeartCardDataFromWindow(
   window: HeartTimelineWindow,
-  bucketMinutes: number,
 ): HeartCardData {
   const series = bucketHeartTimelineSamples(
     window.samples,
-    bucketMinutes,
     window.intradayStart ?? undefined,
     window.latestHeartDate ?? undefined,
   );
@@ -76,7 +76,7 @@ export function buildHeartCardDataFromWindow(
     restingHr: window.restingHr,
     averageHr: window.averageHr,
     maxHr: window.maxHr,
-    pointIntervalMinutes: bucketMinutes,
+    pointIntervalMinutes: HEART_GRAPH_POINT_INTERVAL_MINUTES,
     series,
     markers: window.markers,
     missingReason: window.missingReason ?? null,

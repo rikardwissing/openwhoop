@@ -1,6 +1,5 @@
 import type {
   ActivityRescanResult,
-  DashboardHeartTimelineOptions,
   HealthRepository,
   ManualActivityKind,
 } from '@/data/HealthRepository';
@@ -32,7 +31,6 @@ import type {
 } from '@/types/health';
 import { formatAxisTime, formatClockMinutes } from '@/utils/dateTime';
 import { describeRecovery } from '@/utils/formatters';
-import { selectFocusedHeartBucketMinutes } from '@/utils/heartChartDetail';
 import { sustainedPeakBpm } from '@/utils/heartRate';
 import { buildHeartCardDataFromWindow } from '@/utils/heartTimeline';
 import { BASE_SLEEP_NEED_MINUTES, calculateOptimalBedtimeMinutes, calculateSleepDebtMinutes, roundClockMinutes } from '@/utils/sleepPlan';
@@ -1029,14 +1027,10 @@ export class MockHealthRepository implements HealthRepository {
     };
   }
 
-  async getDashboardHeartTimeline(
-    range: HistoryRange,
-    options?: DashboardHeartTimelineOptions,
-  ): Promise<HeartCardData> {
+  async getDashboardHeartTimeline(range: HistoryRange): Promise<HeartCardData> {
     const window = await this.getDashboardHeartTimelineWindow(range);
-    const pointIntervalMinutes = options?.bucketMinutes ?? 5;
 
-    return buildHeartCardDataFromWindow(window, pointIntervalMinutes);
+    return buildHeartCardDataFromWindow(window);
   }
 
   async getDashboardHeartTimelineWindow(range: HistoryRange): Promise<HeartTimelineWindow> {
@@ -1088,7 +1082,7 @@ export class MockHealthRepository implements HealthRepository {
     const startDate = new Date(startTimeMs);
     const endDate = new Date(endTimeMs);
     const durationMinutes = Math.max((endTimeMs - startTimeMs) / 60000, 1 / 60);
-    const pointIntervalMinutes = selectFocusedHeartBucketMinutes(durationMinutes, 5);
+    const pointIntervalMinutes = 5;
     const pointCount = Math.max(2, Math.floor(durationMinutes / pointIntervalMinutes) + 1);
     const series = buildIntradayHeartSeries(pointIntervalMinutes, startDate, pointCount);
     const values = series.map((point) => point.value).filter((value): value is number => value !== null);
