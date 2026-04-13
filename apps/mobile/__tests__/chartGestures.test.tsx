@@ -1310,8 +1310,16 @@ describe('chart gesture ownership', () => {
     });
 
     const bubble = screen.getByTestId('trend-chart-selection-bubble');
+    const guide = screen.getByTestId('trend-chart-active-guide');
+    const dot = screen.getByTestId('trend-chart-active-dot');
 
     expect(bubble).toBeTruthy();
+    expect(guide.props.style).toEqual(
+      expect.arrayContaining([expect.objectContaining({ borderStyle: 'dashed' })]),
+    );
+    expect(dot.props.style).toEqual(
+      expect.arrayContaining([expect.objectContaining({ position: 'absolute' })]),
+    );
     expect(within(bubble).getByText('Tue')).toBeTruthy();
     expect(within(bubble).getByText('76 bpm')).toBeTruthy();
   });
@@ -1344,8 +1352,10 @@ describe('chart gesture ownership', () => {
     });
 
     const bubble = screen.getByTestId('trend-chart-selection-bubble');
+  const guide = screen.getByTestId('trend-chart-active-guide');
 
     expect(bubble).toBeTruthy();
+  expect(guide).toBeTruthy();
     expect(within(bubble).getByText('Tue')).toBeTruthy();
     expect(within(bubble).getByText('No data')).toBeTruthy();
     expect(screen.queryByTestId('trend-chart-active-dot')).toBeNull();
@@ -1515,8 +1525,16 @@ describe('chart gesture ownership', () => {
     });
 
     const bubble = screen.getByTestId('heart-chart-selection-bubble');
+    const guide = screen.getByTestId('heart-chart-active-guide');
+    const dot = screen.getByTestId('heart-chart-active-dot');
 
     expect(bubble).toBeTruthy();
+    expect(guide.props.style).toEqual(
+      expect.arrayContaining([expect.objectContaining({ borderStyle: 'dashed' })]),
+    );
+    expect(dot.props.style).toEqual(
+      expect.arrayContaining([expect.objectContaining({ position: 'absolute' })]),
+    );
     expect(within(bubble).getByText('18')).toBeTruthy();
     expect(within(bubble).getByText('78 BPM')).toBeTruthy();
   });

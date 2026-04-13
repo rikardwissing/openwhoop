@@ -79,22 +79,28 @@ function AppDatabaseStatusScreen({
 
 function buildMigrationProgressState(
   inspection: StartupMigrationInspection,
-  progress?: Pick<StartupMigrationProgress, 'completedUnits' | 'backfilledSensorDataRows' | 'totalSensorDataRows'>,
+  progress?: Pick<StartupMigrationProgress, 'stage' | 'completedUnits' | 'backfilledSensorDataRows' | 'totalSensorDataRows'>,
 ) {
   const totalUnits = Math.max(
-    (inspection.heartRateHasImuColumn ? 1 : 0) + inspection.pendingSensorDataBackfillRows,
+    (inspection.heartRateNeedsRewrite ? 1 : 0) + inspection.pendingSensorDataBackfillRows,
     1,
   );
   const totalSensorDataRows = progress?.totalSensorDataRows ?? inspection.pendingSensorDataBackfillRows;
   const completedUnits = progress?.completedUnits ?? 0;
   const backfilledSensorDataRows = progress?.backfilledSensorDataRows ?? 0;
-  const isLegacyStepActive = inspection.heartRateHasImuColumn && completedUnits === 0;
+  const currentStage =
+    progress?.stage ??
+    (inspection.pendingSensorDataBackfillRows > 0
+      ? 'sensor_data_backfill'
+      : inspection.heartRateNeedsRewrite
+        ? 'heart_rate_rewrite'
+        : 'complete');
 
-  if (isLegacyStepActive) {
+  if (currentStage === 'heart_rate_rewrite') {
     return {
-      message: 'Preparing older saved heart data for the new storage format before the app starts.',
+      message: 'Rewriting saved heart data to the new storage format before the app starts.',
       progress: {
-        label: `Step 1 of ${totalUnits}`,
+        label: `Step ${Math.min(completedUnits + 1, totalUnits)} of ${totalUnits}`,
         value: totalUnits > 0 ? completedUnits / totalUnits : 0,
       },
     };

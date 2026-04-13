@@ -137,22 +137,6 @@ function describeSyncResult(result: 'success' | 'skipped' | 'error' | null) {
   }
 }
 
-function describeSyncRunState(
-  lastRunStartedAt: string | null,
-  lastRunFinishedAt: string | null,
-  lastResult: 'success' | 'skipped' | 'error' | null,
-) {
-  if (lastRunStartedAt && (!lastRunFinishedAt || lastRunStartedAt > lastRunFinishedAt) && lastResult === null) {
-    return 'Running';
-  }
-
-  return describeSyncResult(lastResult);
-}
-
-function describeSyncSource(source: SyncImportPerformanceSummary['source']) {
-  return source === 'foreground' ? 'Foreground' : 'Background';
-}
-
 function describeSyncImportBottleneck(bottleneck: SyncImportPerformanceSummary['suspectedBottleneck']) {
   switch (bottleneck) {
     case 'ble':
@@ -483,8 +467,8 @@ export function SettingsScreen() {
       const result = await runDatabaseMaintenance(db);
       const actions: string[] = [];
 
-      if (result.migratedLegacyHeartRate) {
-        actions.push('removed the legacy IMU schema');
+      if (result.rewroteHeartRateSchema) {
+        actions.push('rewrote the heart-rate storage schema');
       }
 
       if (result.vacuumed) {
@@ -554,7 +538,6 @@ export function SettingsScreen() {
       const run = await runFullPerformanceSweep({
         db,
         repository,
-        backgroundSyncState,
       });
       await refreshPerformanceRuns();
       refreshHealthData(['dashboard', 'sleep', 'heart', 'wellness', 'trends']);
@@ -764,7 +747,7 @@ export function SettingsScreen() {
           <View>
             <Text style={styles.settingTitle}>Run full performance sweep</Text>
             <Text style={styles.settingSubtitle}>
-              Measure a full derived rebuild, warm and cache-cold today/history reads, and aggregate rebuilds in one pass. The latest recorded sync summary is attached when available.
+              Measure a full derived rebuild, warm and cache-cold today/history reads, and aggregate rebuilds in one pass.
             </Text>
           </View>
 
@@ -849,11 +832,6 @@ export function SettingsScreen() {
                     },
                   )}
                 />
-                <StatChip
-                  accent={colors.borderStrong}
-                  label="Last sync"
-                  value={latestPerformanceRun.lastSyncResult ? describeSyncRunState(latestPerformanceRun.lastSyncStartedAt, latestPerformanceRun.lastSyncFinishedAt, latestPerformanceRun.lastSyncResult) : 'Unknown'}
-                />
               </View>
 
               {latestPerformanceRun.steps.map((step) => (
@@ -870,20 +848,15 @@ export function SettingsScreen() {
           ) : null}
 
           <View>
-            <Text style={styles.settingTitle}>Latest Sync Profile</Text>
+            <Text style={styles.settingTitle}>Latest Import Profile</Text>
             <Text style={styles.settingSubtitle}>
-              Stores the last import timing snapshot recorded on this phone from the most recent sync run.
+              Stores the last timing snapshot recorded on this phone from the most recent manual sync.
             </Text>
           </View>
 
           {latestSyncImportSummary ? (
             <>
               <View style={styles.chipWrap}>
-                <StatChip
-                  accent={colors.borderStrong}
-                  label="Source"
-                  value={describeSyncSource(latestSyncImportSummary.source)}
-                />
                 <StatChip
                   accent={syncImportStatusAccent(latestSyncImportSummary.status)}
                   label="Outcome"
@@ -937,7 +910,7 @@ export function SettingsScreen() {
               ) : null}
             </>
           ) : (
-            <Text style={styles.roadmapText}>No sync profile has been recorded on this phone yet.</Text>
+            <Text style={styles.roadmapText}>No import profile has been recorded on this phone yet.</Text>
           )}
 
           <View>

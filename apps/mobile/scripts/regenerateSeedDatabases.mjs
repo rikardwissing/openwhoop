@@ -82,8 +82,35 @@ function parseSensorData(value) {
   }
 }
 
+function buildSensorDataFromRow(row) {
+  const parsed = parseSensorData(row.sensor_data);
+  const accelGravity =
+    row.accel_gravity_x !== null && row.accel_gravity_y !== null && row.accel_gravity_z !== null
+      ? [row.accel_gravity_x, row.accel_gravity_y, row.accel_gravity_z]
+      : parsed?.accel_gravity ?? null;
+
+  const sensorData = {
+    ppg_green: row.ppg_green ?? parsed?.ppg_green ?? undefined,
+    ppg_red_ir: row.ppg_red_ir ?? parsed?.ppg_red_ir ?? undefined,
+    spo2_red: row.spo2_red ?? parsed?.spo2_red ?? undefined,
+    spo2_ir: row.spo2_ir ?? parsed?.spo2_ir ?? undefined,
+    skin_temp_raw: row.skin_temp_raw ?? parsed?.skin_temp_raw ?? undefined,
+    ambient_light: row.ambient_light ?? parsed?.ambient_light ?? undefined,
+    led_drive_1: row.led_drive_1 ?? parsed?.led_drive_1 ?? undefined,
+    led_drive_2: row.led_drive_2 ?? parsed?.led_drive_2 ?? undefined,
+    resp_rate_raw: row.resp_rate_raw ?? parsed?.resp_rate_raw ?? undefined,
+    signal_quality: row.signal_quality ?? parsed?.signal_quality ?? undefined,
+    skin_contact: row.skin_contact ?? parsed?.skin_contact ?? undefined,
+    accel_gravity: accelGravity ?? undefined,
+  };
+
+  return Object.values(sensorData).some((value) => value !== undefined && value !== null)
+    ? sensorData
+    : null;
+}
+
 function toHeartRateRecord(row) {
-  const sensorData = parseSensorData(row.sensor_data);
+  const sensorData = buildSensorDataFromRow(row);
 
   return {
     id: row.id,
@@ -617,9 +644,39 @@ function resetDerivedSchema(db) {
 function regenerateDatabase(filePath) {
   const db = new DatabaseSync(filePath);
   resetDerivedSchema(db);
+  const heartRateColumnNames = new Set(
+    db.prepare('PRAGMA table_info(heart_rate)').all().map((column) => column.name),
+  );
+  const legacySensorDataSelect = heartRateColumnNames.has('sensor_data') ? 'sensor_data' : 'NULL AS sensor_data';
 
   const heartRows = db
-    .prepare('SELECT id, bpm, time, rr_intervals, stress, spo2, skin_temp, sensor_data FROM heart_rate ORDER BY time ASC')
+    .prepare(`
+      SELECT
+        id,
+        bpm,
+        time,
+        rr_intervals,
+        stress,
+        spo2,
+        skin_temp,
+        ${legacySensorDataSelect},
+        ppg_green,
+        ppg_red_ir,
+        spo2_red,
+        spo2_ir,
+        skin_temp_raw,
+        ambient_light,
+        led_drive_1,
+        led_drive_2,
+        resp_rate_raw,
+        signal_quality,
+        skin_contact,
+        accel_gravity_x,
+        accel_gravity_y,
+        accel_gravity_z
+      FROM heart_rate
+      ORDER BY time ASC
+    `)
     .all()
     .map(toHeartRateRecord);
 

@@ -24,6 +24,16 @@ export function logMobilePerf(label: string, startedAt: number, details?: Record
   console.info(`[mobile-perf] ${label} ${elapsedMs}ms${suffix ? ` ${suffix}` : ''}`);
 }
 
+export function logMobilePerfEvent(label: string, details?: Record<string, PerformanceLogValue>) {
+  if (!SHOULD_LOG_MOBILE_PERF) {
+    return;
+  }
+
+  const suffix = formatMobilePerfSuffix(details);
+
+  console.info(`[mobile-perf] ${label}${suffix ? ` ${suffix}` : ''}`);
+}
+
 export function logMobilePerfError(label: string, error: unknown, details?: Record<string, PerformanceLogValue>) {
   if (!SHOULD_LOG_MOBILE_PERF) {
     return;

@@ -2,7 +2,6 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { PanResponder, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import Svg, {
-  Circle,
   Defs,
   LinearGradient as SvgLinearGradient,
   Line,
@@ -21,10 +20,13 @@ import {
   selectTrendPointAtX,
 } from '@/components/charts/chartSelection';
 import { ChartSelectionBubble } from '@/components/charts/ChartSelectionBubble';
+import { ChartScrubOverlay } from '@/components/charts/ChartScrubOverlay';
 import { useAcquireScreenScrollLock } from '@/components/layout/ScreenScrollContext';
 import { colors, typography } from '@/constants/theme';
 import type { TrendPoint, TrendSelection } from '@/types/health';
 import { formatMetricValue } from '@/utils/formatters';
+
+const TREND_VIEWBOX_HEIGHT = TREND_VIEWBOX_BASELINE + 4;
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -430,39 +432,6 @@ export function TrendChart({
                 />
               ))
             : null}
-          {activeX !== null ? (
-            <Line
-              stroke={accentColor}
-              strokeDasharray="2 2"
-              strokeOpacity={mode === 'bar' ? '0.26' : '0.35'}
-              strokeWidth="0.7"
-              x1={activeX}
-              x2={activeX}
-              y1="2"
-              y2={TREND_VIEWBOX_BASELINE}
-            />
-          ) : null}
-          {activeCoordinate ? (
-            <>
-              <Circle
-                cx={activeCoordinate.x}
-                cy={activeCoordinate.y}
-                fill={accentColor}
-                opacity="0.18"
-                r="4.6"
-                testID={testID ? `${testID}-active-dot-outer` : undefined}
-              />
-              <Circle
-                cx={activeCoordinate.x}
-                cy={activeCoordinate.y}
-                fill={accentColor}
-                r="1.9"
-                stroke={colors.background}
-                strokeWidth="0.9"
-                testID={testID ? `${testID}-active-dot` : undefined}
-              />
-            </>
-          ) : null}
         </Svg>
         {markerVisuals.length > 0 ? (
           <View pointerEvents="none" style={styles.markerLayer}>
@@ -489,8 +458,24 @@ export function TrendChart({
           collapsable={false}
           style={styles.overlay}
           testID={testID}
-          {...panResponder.panHandlers}
-        />
+          {...panResponder.panHandlers}>
+          <ChartScrubOverlay
+            backgroundColor={colors.background}
+            chartHeight={height}
+            chartWidth={chartWidth}
+            dotTestID={testID ? `${testID}-active-dot` : undefined}
+            dotX={activeCoordinate?.x ?? null}
+            dotY={activeCoordinate?.y ?? null}
+            guideTestID={testID ? `${testID}-active-guide` : undefined}
+            lineBottom={TREND_VIEWBOX_BASELINE}
+            lineOpacity={mode === 'bar' ? 0.26 : 0.35}
+            lineTop={2}
+            lineX={activeX}
+            strokeColor={accentColor}
+            viewBoxHeight={TREND_VIEWBOX_HEIGHT}
+            viewBoxWidth={TREND_VIEWBOX_WIDTH}
+          />
+        </View>
         {selection ? (
           <View
             pointerEvents="none"

@@ -68,10 +68,9 @@ const HISTORY_INSERT_SQL = `
     skin_contact,
     accel_gravity_x,
     accel_gravity_y,
-    accel_gravity_z,
-    synced
+    accel_gravity_z
   )
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(time) DO UPDATE SET
     bpm = CASE
       WHEN excluded.bpm BETWEEN ${MIN_PLAUSIBLE_RECORDED_BPM} AND ${MAX_PLAUSIBLE_RECORDED_BPM} THEN excluded.bpm

@@ -438,7 +438,7 @@ describe('WearableSyncProvider live events', () => {
     });
   });
 
-  it('automatically syncs while the app stays active', async () => {
+  it('does not sync automatically while the app stays active', async () => {
     jest.useFakeTimers();
 
     renderProviderHarness();
@@ -446,26 +446,29 @@ describe('WearableSyncProvider live events', () => {
 
     await flushAsyncState();
 
-    await advanceTimersAndFlush(5_000);
+    await advanceTimersAndFlush(30 * 60 * 1000);
 
-    expect(service.syncSelected).toHaveBeenCalledTimes(1);
+    expect(service.syncSelected).not.toHaveBeenCalled();
   });
 
-  it('keeps foreground auto-sync progress discreet without showing the overlay', async () => {
-    jest.useFakeTimers();
-
-    const screen = renderProgressHarness();
+  it('keeps manual sync progress discreet when showOverlay is false', async () => {
+    const screen = render(
+      <WearableSyncProvider>
+        <ProgressHarness />
+        <SyncActionHarness />
+      </WearableSyncProvider>,
+    );
     const service = latestService();
     service.syncSelected.mockImplementationOnce(async (...args: unknown[]) => {
       const onProgress = args[0] as ((progress: SyncProgress) => void) | undefined;
 
       if (!onProgress) {
-        throw new Error('Expected syncSelected progress callback during auto-sync test.');
+        throw new Error('Expected syncSelected progress callback during manual sync test.');
       }
 
       onProgress({
         status: 'connecting',
-        message: 'Connecting in foreground auto-sync...',
+        message: 'Connecting in manual sync...',
       });
       return {
         importedReadings: 3,
@@ -474,7 +477,8 @@ describe('WearableSyncProvider live events', () => {
     });
 
     await flushAsyncState();
-    await advanceTimersAndFlush(5_000);
+
+    fireEvent.press(screen.getByTestId('isolated-run-sync'));
 
     await waitFor(() => {
       expect(screen.getByTestId('progress-status').props.children).toBe('connecting');
@@ -482,7 +486,7 @@ describe('WearableSyncProvider live events', () => {
     });
   });
 
-  it('waits for the app to become active again before auto-syncing', async () => {
+  it('does not sync automatically when the app becomes active again', async () => {
     jest.useFakeTimers();
 
     renderProviderHarness();
@@ -504,9 +508,9 @@ describe('WearableSyncProvider live events', () => {
     });
 
     await flushAsyncState();
-    await advanceTimersAndFlush(5_000);
+    await advanceTimersAndFlush(30 * 60 * 1000);
 
-    expect(service.syncSelected).toHaveBeenCalledTimes(1);
+    expect(service.syncSelected).not.toHaveBeenCalled();
   });
 
   it('does not rerender device-only consumers when live events change', async () => {

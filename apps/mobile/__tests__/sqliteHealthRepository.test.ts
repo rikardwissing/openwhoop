@@ -28,6 +28,23 @@ import {
 
 type SqlArg = string | number | null;
 
+interface HeartRateInsertOptions {
+  id?: number;
+  bpm: number;
+  time: string;
+  rrIntervals: string;
+  stress?: number | null;
+  spo2?: number | null;
+  skinTemp?: number | null;
+  ppgGreen?: number | null;
+  spo2Red?: number | null;
+  spo2Ir?: number | null;
+  skinTempRaw?: number | null;
+  signalQuality?: number | null;
+  skinContact?: number | null;
+  accelGravity?: [number, number, number] | null;
+}
+
 class NodeSqliteAdapter {
   readonly calls: string[] = [];
 
@@ -77,58 +94,154 @@ class NodeSqliteAdapter {
   }
 }
 
+async function insertHeartRateRow(
+  executor: Pick<NodeSqliteAdapter, 'runAsync'>,
+  {
+    id,
+    bpm,
+    time,
+    rrIntervals,
+    stress = null,
+    spo2 = null,
+    skinTemp = null,
+    ppgGreen = null,
+    spo2Red = null,
+    spo2Ir = null,
+    skinTempRaw = null,
+    signalQuality = null,
+    skinContact = null,
+    accelGravity = null,
+  }: HeartRateInsertOptions,
+) {
+  const accelGravityX = accelGravity?.[0] ?? null;
+  const accelGravityY = accelGravity?.[1] ?? null;
+  const accelGravityZ = accelGravity?.[2] ?? null;
+
+  if (typeof id === 'number') {
+    return executor.runAsync(
+      `
+        INSERT INTO heart_rate (
+          id,
+          bpm,
+          time,
+          rr_intervals,
+          stress,
+          spo2,
+          skin_temp,
+          ppg_green,
+          spo2_red,
+          spo2_ir,
+          skin_temp_raw,
+          signal_quality,
+          skin_contact,
+          accel_gravity_x,
+          accel_gravity_y,
+          accel_gravity_z
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `,
+      id,
+      bpm,
+      time,
+      rrIntervals,
+      stress,
+      spo2,
+      skinTemp,
+      ppgGreen,
+      spo2Red,
+      spo2Ir,
+      skinTempRaw,
+      signalQuality,
+      skinContact,
+      accelGravityX,
+      accelGravityY,
+      accelGravityZ,
+    );
+  }
+
+  return executor.runAsync(
+    `
+      INSERT INTO heart_rate (
+        bpm,
+        time,
+        rr_intervals,
+        stress,
+        spo2,
+        skin_temp,
+        ppg_green,
+        spo2_red,
+        spo2_ir,
+        skin_temp_raw,
+        signal_quality,
+        skin_contact,
+        accel_gravity_x,
+        accel_gravity_y,
+        accel_gravity_z
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+    bpm,
+    time,
+    rrIntervals,
+    stress,
+    spo2,
+    skinTemp,
+    ppgGreen,
+    spo2Red,
+    spo2Ir,
+    skinTempRaw,
+    signalQuality,
+    skinContact,
+    accelGravityX,
+    accelGravityY,
+    accelGravityZ,
+  );
+}
+
 async function createRepositoryFixture() {
   const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
   await initializeDatabase(adapter as never);
 
-  const heartInsert = `
-    INSERT INTO heart_rate (id, bpm, time, rr_intervals, stress, spo2, skin_temp, sensor_data, synced)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
-  `;
-  await adapter.runAsync(
-    heartInsert,
-    1,
-    58,
-    '2026-03-18 05:00:00',
-    '980,990,1000',
-    3,
-    98,
-    33.2,
-    '{"ppg_green":12000}',
-  );
-  await adapter.runAsync(
-    heartInsert,
-    2,
-    62,
-    '2026-03-18 05:05:00',
-    '970,980,995',
-    4,
-    98,
-    33.4,
-    '{"ppg_green":15000}',
-  );
-  await adapter.runAsync(
-    heartInsert,
-    3,
-    72,
-    '2026-03-19 06:55:00',
-    '920,930,940',
-    5,
-    97,
-    33.8,
-    '{"ppg_green":21000}',
-  );
-  await adapter.runAsync(
-    heartInsert,
-    4,
-    76,
-    '2026-03-19 07:00:00',
-    '900,910,920',
-    6,
-    97,
-    34.1,
-    '{"ppg_green":24000}',
-  );
+  await insertHeartRateRow(adapter, {
+    id: 1,
+    bpm: 58,
+    time: '2026-03-18 05:00:00',
+    rrIntervals: '980,990,1000',
+    stress: 3,
+    spo2: 98,
+    skinTemp: 33.2,
+    ppgGreen: 12000,
+  });
+  await insertHeartRateRow(adapter, {
+    id: 2,
+    bpm: 62,
+    time: '2026-03-18 05:05:00',
+    rrIntervals: '970,980,995',
+    stress: 4,
+    spo2: 98,
+    skinTemp: 33.4,
+    ppgGreen: 15000,
+  });
+  await insertHeartRateRow(adapter, {
+    id: 3,
+    bpm: 72,
+    time: '2026-03-19 06:55:00',
+    rrIntervals: '920,930,940',
+    stress: 5,
+    spo2: 97,
+    skinTemp: 33.8,
+    ppgGreen: 21000,
+  });
+  await insertHeartRateRow(adapter, {
+    id: 4,
+    bpm: 76,
+    time: '2026-03-19 07:00:00',
+    rrIntervals: '900,910,920',
+    stress: 6,
+    spo2: 97,
+    skinTemp: 34.1,
+    ppgGreen: 24000,
+  });
 
   await adapter.runAsync(
     `
@@ -211,29 +324,22 @@ async function insertOvernightStillness(
   start: Date,
   idOffset = 0,
 ) {
-  const heartInsert = `
-    INSERT INTO heart_rate (id, bpm, time, rr_intervals, sensor_data, synced)
-    VALUES (?, ?, ?, ?, ?, 0)
-  `;
-  const gravity = [0.11, -0.02, 0.98];
+  const gravity: [number, number, number] = [0.11, -0.02, 0.98];
 
   for (let index = 0; index < 60; index += 1) {
     const sampleDate = new Date(start.getTime() + index * 10 * 60000);
     const sleepEndsAt = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 1, 7, 0, 0);
     const skinContact = sampleDate < sleepEndsAt ? 1 : 0;
-    await adapter.runAsync(
-      heartInsert,
-      idOffset + index + 1,
-      58,
-      formatTestSqliteDateTime(sampleDate),
-      '1000,990,980',
-      JSON.stringify({
-        ppg_green: 15000,
-        skin_contact: skinContact,
-        skin_temp_raw: 830,
-        accel_gravity: gravity,
-      }),
-    );
+    await insertHeartRateRow(adapter, {
+      id: idOffset + index + 1,
+      bpm: 58,
+      time: formatTestSqliteDateTime(sampleDate),
+      rrIntervals: '1000,990,980',
+      ppgGreen: 15000,
+      skinContact,
+      skinTempRaw: 830,
+      accelGravity: gravity,
+    });
   }
 }
 
@@ -251,11 +357,7 @@ async function insertSyntheticHeartSeries(
     intervalMinutes?: number;
   },
 ) {
-  const heartInsert = `
-    INSERT INTO heart_rate (id, bpm, time, rr_intervals, stress, spo2, skin_temp, sensor_data, synced)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
-  `;
-  const gravity = [0.05, -0.01, 0.99];
+  const gravity: [number, number, number] = [0.05, -0.01, 0.99];
 
   await adapter.withExclusiveTransactionAsync(async (tx) => {
     for (let index = 0; index < count; index += 1) {
@@ -265,30 +367,23 @@ async function insertSyntheticHeartSeries(
       const spo2 = 96 + (index % 3);
       const skinTemp = 33.1 + ((index % 5) * 0.1);
 
-      await tx.runAsync(
-        heartInsert,
-        idOffset + index + 1,
+      await insertHeartRateRow(tx, {
+        id: idOffset + index + 1,
         bpm,
-        formatTestSqliteDateTime(sampleDate),
-        `${1020 - (index % 40)},${1005 - (index % 35)},${990 - (index % 30)}`,
+        time: formatTestSqliteDateTime(sampleDate),
+        rrIntervals: `${1020 - (index % 40)},${1005 - (index % 35)},${990 - (index % 30)}`,
         stress,
         spo2,
-        Number(skinTemp.toFixed(1)),
-        JSON.stringify({
-          ppg_green: 14_000 + ((index % 12) * 350),
-          skin_contact: 1,
-          accel_gravity: gravity,
-        }),
-      );
+        skinTemp: Number(skinTemp.toFixed(1)),
+        ppgGreen: 14_000 + ((index % 12) * 350),
+        skinContact: 1,
+        accelGravity: gravity,
+      });
     }
   });
 }
 
 async function insertSingleWorkoutBoutDay(adapter: NodeSqliteAdapter) {
-  const heartInsert = `
-    INSERT INTO heart_rate (id, bpm, time, rr_intervals, sensor_data, synced)
-    VALUES (?, ?, ?, ?, ?, 0)
-  `;
   const start = new Date(2026, 3, 2, 7, 0, 0);
   const restGravityA: [number, number, number] = [0.15, -0.02, 0.97];
   const restGravityB: [number, number, number] = [0.162, -0.018, 0.968];
@@ -306,19 +401,16 @@ async function insertSingleWorkoutBoutDay(adapter: NodeSqliteAdapter) {
         ? restGravityA
         : restGravityB;
 
-    await adapter.runAsync(
-      heartInsert,
-      minute + 1,
-      isWorkout ? 112 : 66,
-      formatTestSqliteDateTime(sampleDate),
-      isWorkout ? '620,615,610' : '920,930,925',
-      JSON.stringify({
-        ppg_green: isWorkout ? 19_900 : 18_000,
-        skin_contact: 1,
-        signal_quality: 3074,
-        accel_gravity: gravity,
-      }),
-    );
+    await insertHeartRateRow(adapter, {
+      id: minute + 1,
+      bpm: isWorkout ? 112 : 66,
+      time: formatTestSqliteDateTime(sampleDate),
+      rrIntervals: isWorkout ? '620,615,610' : '920,930,925',
+      ppgGreen: isWorkout ? 19_900 : 18_000,
+      signalQuality: 3074,
+      skinContact: 1,
+      accelGravity: gravity,
+    });
   }
 
   return {
@@ -331,10 +423,6 @@ async function insertSingleBorderlineWalkBoutDay(
   adapter: NodeSqliteAdapter,
   options?: { start?: Date; idOffset?: number },
 ) {
-  const heartInsert = `
-    INSERT INTO heart_rate (id, bpm, time, rr_intervals, sensor_data, synced)
-    VALUES (?, ?, ?, ?, ?, 0)
-  `;
   const start = options?.start ?? new Date(2026, 3, 7, 7, 0, 0);
   const idOffset = options?.idOffset ?? 0;
   const restGravityA: [number, number, number] = [0.15, -0.02, 0.97];
@@ -353,19 +441,16 @@ async function insertSingleBorderlineWalkBoutDay(
         ? restGravityA
         : restGravityB;
 
-    await adapter.runAsync(
-      heartInsert,
-      idOffset + minute + 1,
-      isWalk ? 90 : 65,
-      formatTestSqliteDateTime(sampleDate),
-      isWalk ? '672,668,664' : '920,930,925',
-      JSON.stringify({
-        ppg_green: isWalk ? 19_400 : 18_000,
-        skin_contact: 1,
-        signal_quality: 3074,
-        accel_gravity: gravity,
-      }),
-    );
+    await insertHeartRateRow(adapter, {
+      id: idOffset + minute + 1,
+      bpm: isWalk ? 90 : 65,
+      time: formatTestSqliteDateTime(sampleDate),
+      rrIntervals: isWalk ? '672,668,664' : '920,930,925',
+      ppgGreen: isWalk ? 19_400 : 18_000,
+      signalQuality: 3074,
+      skinContact: 1,
+      accelGravity: gravity,
+    });
   }
 
   return {
@@ -434,10 +519,14 @@ describe('SQLiteHealthRepository', () => {
     const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
 
     await initializeDatabase(adapter as never);
-    await adapter.execAsync(`
-      INSERT INTO heart_rate (bpm, time, rr_intervals, synced, sensor_data, spo2, skin_temp)
-      VALUES (72, '2026-04-09 12:46:14', '820,810', 1, '{"ppg_green":15000}', 98, 33.6);
-    `);
+    await insertHeartRateRow(adapter, {
+      bpm: 72,
+      time: '2026-04-09 12:46:14',
+      rrIntervals: '820,810',
+      ppgGreen: 15000,
+      spo2: 98,
+      skinTemp: 33.6,
+    });
 
     const inspection = await inspectDatabaseMaintenance(adapter as never);
 
@@ -481,37 +570,32 @@ describe('SQLiteHealthRepository', () => {
       bpm: number;
       time: string;
       rr_intervals: string;
-      activity: number | null;
       stress: number | null;
-      synced: number;
-      sensor_data: string | null;
       ppg_green: number | null;
-      accel_gravity_x: number | null;
       spo2: number | null;
       skin_temp: number | null;
     }>(
-      'SELECT id, bpm, time, rr_intervals, activity, stress, synced, sensor_data, ppg_green, accel_gravity_x, spo2, skin_temp FROM heart_rate WHERE id = 1',
+      'SELECT id, bpm, time, rr_intervals, stress, ppg_green, spo2, skin_temp FROM heart_rate WHERE id = 1',
     );
     const indexes = await adapter.getAllAsync<{ name: string }>('PRAGMA index_list(heart_rate)');
 
     expect(columns.map((column) => column.name)).not.toContain('imu_data');
+    expect(columns.map((column) => column.name)).not.toContain('activity');
+    expect(columns.map((column) => column.name)).not.toContain('synced');
+    expect(columns.map((column) => column.name)).not.toContain('sensor_data');
     expect(row).toEqual({
       id: 1,
       bpm: 72,
       time: '2026-04-09 12:46:14',
       rr_intervals: '820,810',
-      activity: 4,
       stress: 5.5,
-      synced: 1,
-      sensor_data: '{"ppg_green":15000}',
-      ppg_green: null,
-      accel_gravity_x: null,
+      ppg_green: 15000,
       spo2: 98,
       skin_temp: 33.6,
     });
     expect(maintenance.ran).toBe(true);
-    expect(maintenance.migratedLegacyHeartRate).toBe(true);
-    expect(indexes.map((index) => index.name)).toContain('idx_heart_rate_time');
+    expect(maintenance.rewroteHeartRateSchema).toBe(true);
+    expect(indexes.map((index) => index.name)).not.toContain('idx_heart_rate_time');
 
     adapter.close();
   });
@@ -519,6 +603,16 @@ describe('SQLiteHealthRepository', () => {
   it('backfills explicit heart sensor columns during startup migration and clears sensor_data', async () => {
     const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
 
+    await adapter.execAsync(`
+      CREATE TABLE heart_rate (
+        id INTEGER PRIMARY KEY NOT NULL,
+        bpm INTEGER NOT NULL,
+        time TEXT NOT NULL UNIQUE,
+        rr_intervals TEXT NOT NULL,
+        synced INTEGER NOT NULL DEFAULT 0,
+        sensor_data TEXT
+      );
+    `);
     await initializeDatabase(adapter as never);
     await adapter.runAsync(
       `
@@ -534,11 +628,12 @@ describe('SQLiteHealthRepository', () => {
 
     const inspection = await inspectRequiredStartupMigration(adapter as never);
     expect(inspection.needsMigration).toBe(true);
+    expect(inspection.heartRateNeedsRewrite).toBe(true);
     expect(inspection.pendingSensorDataBackfillRows).toBe(1);
 
     const result = await runRequiredStartupMigration(adapter as never);
+    const columns = await adapter.getAllAsync<{ name: string }>('PRAGMA table_info(heart_rate)');
     const row = await adapter.getFirstAsync<{
-      sensor_data: string | null;
       ppg_green: number | null;
       spo2_red: number | null;
       spo2_ir: number | null;
@@ -551,7 +646,6 @@ describe('SQLiteHealthRepository', () => {
     }>(
       `
         SELECT
-          sensor_data,
           ppg_green,
           spo2_red,
           spo2_ir,
@@ -568,11 +662,12 @@ describe('SQLiteHealthRepository', () => {
 
     expect(result).toEqual({
       ran: true,
-      migratedLegacyHeartRate: false,
+      rewroteHeartRateSchema: true,
       backfilledSensorDataRows: 1,
     });
+    expect(columns.map((column) => column.name)).not.toContain('sensor_data');
+    expect(columns.map((column) => column.name)).not.toContain('synced');
     expect(row).toEqual({
-      sensor_data: null,
       ppg_green: 15000,
       spo2_red: 5400,
       spo2_ir: 7800,
@@ -591,41 +686,18 @@ describe('SQLiteHealthRepository', () => {
     const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
     await initializeDatabase(adapter as never);
 
-    await adapter.runAsync(
-      `
-        INSERT INTO heart_rate (
-          bpm,
-          time,
-          rr_intervals,
-          synced,
-          sensor_data,
-          ppg_green,
-          spo2_red,
-          spo2_ir,
-          skin_temp_raw,
-          signal_quality,
-          skin_contact,
-          accel_gravity_x,
-          accel_gravity_y,
-          accel_gravity_z
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `,
-      72,
-      '2026-04-09 12:46:14',
-      '820,810',
-      1,
-      null,
-      15000,
-      5400,
-      8120,
-      312,
-      95,
-      1,
-      0.11,
-      -0.02,
-      0.98,
-    );
+    await insertHeartRateRow(adapter, {
+      bpm: 72,
+      time: '2026-04-09 12:46:14',
+      rrIntervals: '820,810',
+      ppgGreen: 15000,
+      spo2Red: 5400,
+      spo2Ir: 8120,
+      skinTempRaw: 312,
+      signalQuality: 95,
+      skinContact: 1,
+      accelGravity: [0.11, -0.02, 0.98],
+    });
 
     const repository = new SQLiteHealthRepository(adapter as never) as unknown as {
       loadAllHeartRows: () => Promise<Array<{
@@ -1324,12 +1396,12 @@ describe('SQLiteHealthRepository', () => {
     const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
     await initializeDatabase(adapter as never);
 
-    await adapter.runAsync(
-      `
-        INSERT INTO heart_rate (id, bpm, time, rr_intervals, synced)
-        VALUES (1, 60, '2026-03-20 06:00:00', '1000,990,980', 0)
-      `,
-    );
+    await insertHeartRateRow(adapter, {
+      id: 1,
+      bpm: 60,
+      time: '2026-03-20 06:00:00',
+      rrIntervals: '1000,990,980',
+    });
     await adapter.runAsync(
       `
         INSERT INTO derived_data_state (id, derived_schema_version, source_heart_count, refreshed_at)
@@ -1346,12 +1418,12 @@ describe('SQLiteHealthRepository', () => {
     const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
     await initializeDatabase(adapter as never);
 
-    await adapter.runAsync(
-      `
-        INSERT INTO heart_rate (id, bpm, time, rr_intervals, synced)
-        VALUES (1, 60, '2026-03-20 06:00:00', '1000,990,980', 0)
-      `,
-    );
+    await insertHeartRateRow(adapter, {
+      id: 1,
+      bpm: 60,
+      time: '2026-03-20 06:00:00',
+      rrIntervals: '1000,990,980',
+    });
 
     await expect(shouldRefreshDerivedData(adapter as never)).resolves.toBe(true);
 
@@ -1469,19 +1541,6 @@ describe('SQLiteHealthRepository', () => {
     const run = await runFullPerformanceSweep({
       db: adapter as never,
       repository,
-      backgroundSyncState: {
-        pairedDeviceId: 'strap-1',
-        lastRunStartedAt: '2026-03-19 07:10:00',
-        lastRunFinishedAt: '2026-03-19 07:11:00',
-        lastSuccessAt: '2026-03-19 07:11:00',
-        lastSource: 'background',
-        lastResult: 'success',
-        lastError: null,
-        lastImportedReadings: 42,
-        notificationPermission: 'granted',
-        notificationBaselineAt: '2026-03-18 08:00:00',
-        lastSyncImportSummary: null,
-      },
     });
 
     expect(run.runKind).toBe('full_sweep');
@@ -1495,7 +1554,7 @@ describe('SQLiteHealthRepository', () => {
     const recentRuns = await listRecentPerformanceDiagnosticRuns(adapter as never, 5);
     expect(recentRuns).toHaveLength(1);
     expect(recentRuns[0]?.id).toBe(run.id);
-    expect(recentRuns[0]?.lastSyncImportedReadings).toBe(42);
+    expect(recentRuns[0]?.lastSyncImportedReadings).toBeNull();
     expect(recentRuns[0]?.steps.map((step) => step.key)).toEqual(
       expect.arrayContaining([
         'derived.full.rebuild',
@@ -1514,28 +1573,21 @@ describe('SQLiteHealthRepository', () => {
     const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
     await initializeDatabase(adapter as never);
 
-    const heartInsert = `
-      INSERT INTO heart_rate (id, bpm, time, rr_intervals, sensor_data, synced)
-      VALUES (?, ?, ?, ?, ?, 0)
-    `;
     const start = new Date(2026, 3, 1, 23, 0, 0);
-    const gravity = [0.11, -0.02, 0.98];
+    const gravity: [number, number, number] = [0.11, -0.02, 0.98];
 
     for (let index = 0; index < 60; index += 1) {
       const sampleDate = new Date(start.getTime() + index * 10 * 60000);
       const skinContact = sampleDate < new Date(2026, 3, 2, 7, 0, 0) ? 1 : 0;
-      await adapter.runAsync(
-        heartInsert,
-        index + 1,
-        58,
-        formatTestSqliteDateTime(sampleDate),
-        '1000,990,980',
-        JSON.stringify({
-          ppg_green: 15000,
-          skin_contact: skinContact,
-          accel_gravity: gravity,
-        }),
-      );
+      await insertHeartRateRow(adapter, {
+        id: index + 1,
+        bpm: 58,
+        time: formatTestSqliteDateTime(sampleDate),
+        rrIntervals: '1000,990,980',
+        ppgGreen: 15000,
+        skinContact: skinContact,
+        accelGravity: gravity,
+      });
     }
 
     await refreshDerivedData(adapter as never);
@@ -1657,31 +1709,24 @@ describe('SQLiteHealthRepository', () => {
       };
     });
 
-    const heartInsert = `
-      INSERT INTO heart_rate (id, bpm, time, rr_intervals, sensor_data, synced)
-      VALUES (?, ?, ?, ?, ?, 0)
-    `;
-    const gravity = [0.05, -0.01, 0.99];
+    const gravity: [number, number, number] = [0.05, -0.01, 0.99];
 
     await adapter.withExclusiveTransactionAsync(async (tx) => {
       for (let index = 0; index < samples.length; index += 1) {
         const sample = samples[index];
         const sampleDate = new Date(2026, 3, 3, 0, index, 0);
-        await tx.runAsync(
-          heartInsert,
-          index + 1,
-          sample.bpm,
-          formatTestSqliteDateTime(sampleDate),
-          sample.rr.join(','),
-          JSON.stringify({
-            ppg_green: 15_000 + ((index % 10) * 400),
-            spo2_red: 12_000 + index,
-            spo2_ir: 14_000 + index,
-            skin_contact: 1,
-            skin_temp_raw: 830,
-            accel_gravity: gravity,
-          }),
-        );
+        await insertHeartRateRow(tx, {
+          id: index + 1,
+          bpm: sample.bpm,
+          time: formatTestSqliteDateTime(sampleDate),
+          rrIntervals: sample.rr.join(','),
+          ppgGreen: 15_000 + ((index % 10) * 400),
+          spo2Red: 12_000 + index,
+          spo2Ir: 14_000 + index,
+          skinTempRaw: 830,
+          skinContact: 1,
+          accelGravity: gravity,
+        });
       }
     });
 
@@ -1706,28 +1751,21 @@ describe('SQLiteHealthRepository', () => {
     const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
     await initializeDatabase(adapter as never);
 
-    const heartInsert = `
-      INSERT INTO heart_rate (id, bpm, time, rr_intervals, sensor_data, synced)
-      VALUES (?, ?, ?, ?, ?, 0)
-    `;
     const start = new Date(2026, 3, 4, 0, 20, 0);
-    const gravity = [0.11, -0.02, 0.98];
+    const gravity: [number, number, number] = [0.11, -0.02, 0.98];
 
     for (let index = 0; index < 90; index += 1) {
       const sampleDate = new Date(start.getTime() + index * 5 * 60000);
       const isTrailingWake = sampleDate >= new Date(2026, 3, 4, 4, 30, 0);
-      await adapter.runAsync(
-        heartInsert,
-        index + 1,
-        isTrailingWake ? 66 : 58,
-        formatTestSqliteDateTime(sampleDate),
-        '1000,990,980',
-        JSON.stringify({
-          ppg_green: isTrailingWake ? 25000 : 15000,
-          skin_contact: 1,
-          accel_gravity: gravity,
-        }),
-      );
+      await insertHeartRateRow(adapter, {
+        id: index + 1,
+        bpm: isTrailingWake ? 66 : 58,
+        time: formatTestSqliteDateTime(sampleDate),
+        rrIntervals: '1000,990,980',
+        ppgGreen: isTrailingWake ? 25000 : 15000,
+        skinContact: 1,
+        accelGravity: gravity,
+      });
     }
 
     await refreshDerivedData(adapter as never);
@@ -1943,10 +1981,6 @@ describe('SQLiteHealthRepository', () => {
     const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
     await initializeDatabase(adapter as never);
 
-    const heartInsert = `
-      INSERT INTO heart_rate (id, bpm, time, rr_intervals, sensor_data, synced)
-      VALUES (?, ?, ?, ?, ?, 0)
-    `;
     const start = new Date(2026, 3, 5, 0, 0, 0);
     const sleepingGravity: [number, number, number] = [0.11, -0.02, 0.98];
     const awakeGravity: [number, number, number] = [-0.52, -0.8, 0.35];
@@ -1962,19 +1996,16 @@ describe('SQLiteHealthRepository', () => {
             ? 49_750
             : 16_500 + (second % 11) * 120;
 
-        await tx.runAsync(
-          heartInsert,
-          second + 1,
-          sustainedWake ? 62 : 58,
-          formatTestSqliteDateTime(sampleDate),
-          '1000,990,980',
-          JSON.stringify({
-            ppg_green: ppgGreen,
-            skin_contact: 1,
-            signal_quality: 3074,
-            accel_gravity: sustainedWake ? awakeGravity : sleepingGravity,
-          }),
-        );
+        await insertHeartRateRow(tx, {
+          id: second + 1,
+          bpm: sustainedWake ? 62 : 58,
+          time: formatTestSqliteDateTime(sampleDate),
+          rrIntervals: '1000,990,980',
+          ppgGreen,
+          signalQuality: 3074,
+          skinContact: 1,
+          accelGravity: sustainedWake ? awakeGravity : sleepingGravity,
+        });
       }
     });
 
@@ -2010,10 +2041,6 @@ describe('SQLiteHealthRepository', () => {
     const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
     await initializeDatabase(adapter as never);
 
-    const heartInsert = `
-      INSERT INTO heart_rate (id, bpm, time, rr_intervals, sensor_data, synced)
-      VALUES (?, ?, ?, ?, ?, 0)
-    `;
     const start = new Date(2026, 3, 6, 0, 0, 0);
     const sleepingGravity: [number, number, number] = [0.08, -0.03, 0.99];
     const awakeGravityA: [number, number, number] = [-0.51, -0.78, 0.36];
@@ -2046,19 +2073,16 @@ describe('SQLiteHealthRepository', () => {
               : '870,860,865';
         const gravity = isAwake && id % 6 < 3 ? awakeGravityA : isAwake ? awakeGravityB : sleepingGravity;
 
-        await tx.runAsync(
-          heartInsert,
+        await insertHeartRateRow(tx, {
           id,
           bpm,
-          formatTestSqliteDateTime(sampleDate),
+          time: formatTestSqliteDateTime(sampleDate),
           rrIntervals,
-          JSON.stringify({
-            ppg_green: ppgGreen,
-            skin_contact: 1,
-            signal_quality: 3074,
-            accel_gravity: gravity,
-          }),
-        );
+          ppgGreen,
+          signalQuality: 3074,
+          skinContact: 1,
+          accelGravity: gravity,
+        });
         id += 1;
       }
     });
@@ -2090,10 +2114,6 @@ describe('SQLiteHealthRepository', () => {
     const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
     await initializeDatabase(adapter as never);
 
-    const heartInsert = `
-      INSERT INTO heart_rate (id, bpm, time, rr_intervals, sensor_data, synced)
-      VALUES (?, ?, ?, ?, ?, 0)
-    `;
     const start = new Date(2026, 3, 6, 23, 0, 0);
     const sleepingGravity: [number, number, number] = [0.08, -0.03, 0.99];
     const awakeGravity: [number, number, number] = [-0.51, -0.78, 0.36];
@@ -2113,19 +2133,16 @@ describe('SQLiteHealthRepository', () => {
       ) => {
         for (let second = 0; second < durationMinutes * 60; second += 5) {
           const sampleDate = new Date(start.getTime() + (id - 1) * 5000);
-          await tx.runAsync(
-            heartInsert,
+          await insertHeartRateRow(tx, {
             id,
-            values.bpm,
-            formatTestSqliteDateTime(sampleDate),
-            values.rrIntervals,
-            JSON.stringify({
-              ppg_green: values.ppgBase + (id % 7) * values.ppgStep,
-              skin_contact: 1,
-              signal_quality: 3074,
-              accel_gravity: values.gravity,
-            }),
-          );
+            bpm: values.bpm,
+            time: formatTestSqliteDateTime(sampleDate),
+            rrIntervals: values.rrIntervals,
+            ppgGreen: values.ppgBase + (id % 7) * values.ppgStep,
+            signalQuality: 3074,
+            skinContact: 1,
+            accelGravity: values.gravity,
+          });
           id += 1;
         }
       };
@@ -2351,10 +2368,6 @@ describe('SQLiteHealthRepository', () => {
     const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
     await initializeDatabase(adapter as never);
 
-    const heartInsert = `
-      INSERT INTO heart_rate (id, bpm, time, rr_intervals, sensor_data, synced)
-      VALUES (?, ?, ?, ?, ?, 0)
-    `;
     const start = new Date(2026, 3, 7, 0, 0, 0);
     const sleepingGravity: [number, number, number] = [0.08, -0.03, 0.99];
     const wakeTransitionA: [number, number, number] = [-0.51, -0.78, 0.36];
@@ -2395,19 +2408,16 @@ describe('SQLiteHealthRepository', () => {
             ? quietWakeGravity
             : sleepingGravity;
 
-        await tx.runAsync(
-          heartInsert,
+        await insertHeartRateRow(tx, {
           id,
           bpm,
-          formatTestSqliteDateTime(sampleDate),
+          time: formatTestSqliteDateTime(sampleDate),
           rrIntervals,
-          JSON.stringify({
-            ppg_green: ppgGreen,
-            skin_contact: 1,
-            signal_quality: 3074,
-            accel_gravity: gravity,
-          }),
-        );
+          ppgGreen,
+          signalQuality: 3074,
+          skinContact: 1,
+          accelGravity: gravity,
+        });
         id += 1;
       }
     });
@@ -2452,10 +2462,6 @@ describe('SQLiteHealthRepository', () => {
     const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
     await initializeDatabase(adapter as never);
 
-    const heartInsert = `
-      INSERT INTO heart_rate (id, bpm, time, rr_intervals, sensor_data, synced)
-      VALUES (?, ?, ?, ?, ?, 0)
-    `;
     const start = new Date(2026, 3, 8, 0, 0, 0);
     const sleepingGravity: [number, number, number] = [0.08, -0.03, 0.99];
     const wakeTransitionA: [number, number, number] = [-0.51, -0.78, 0.36];
@@ -2501,19 +2507,16 @@ describe('SQLiteHealthRepository', () => {
             ? quietWakeGravity
             : sleepingGravity;
 
-        await tx.runAsync(
-          heartInsert,
+        await insertHeartRateRow(tx, {
           id,
           bpm,
-          formatTestSqliteDateTime(sampleDate),
+          time: formatTestSqliteDateTime(sampleDate),
           rrIntervals,
-          JSON.stringify({
-            ppg_green: ppgGreen,
-            skin_contact: 1,
-            signal_quality: 3074,
-            accel_gravity: gravity,
-          }),
-        );
+          ppgGreen,
+          signalQuality: 3074,
+          skinContact: 1,
+          accelGravity: gravity,
+        });
         id += 1;
       }
     });
@@ -2888,34 +2891,19 @@ describe('SQLiteHealthRepository', () => {
   it('ignores implausible max bpm placeholders when reading the intraday heart window', async () => {
     const { adapter, repository } = await createRepositoryFixture();
 
-    await adapter.runAsync(
-      `
-        INSERT INTO heart_rate (id, bpm, time, rr_intervals, stress, spo2, skin_temp, sensor_data, synced)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
-      `,
-      5,
-      255,
-      '2026-03-19 07:05:00',
-      '',
-      null,
-      null,
-      null,
-      null,
-    );
-    await adapter.runAsync(
-      `
-        INSERT INTO heart_rate (id, bpm, time, rr_intervals, stress, spo2, skin_temp, sensor_data, synced)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
-      `,
-      6,
-      74,
-      '2026-03-19 07:10:00',
-      '910,920,930',
-      null,
-      null,
-      null,
-      '{"ppg_green":18000}',
-    );
+    await insertHeartRateRow(adapter, {
+      id: 5,
+      bpm: 255,
+      time: '2026-03-19 07:05:00',
+      rrIntervals: '',
+    });
+    await insertHeartRateRow(adapter, {
+      id: 6,
+      bpm: 74,
+      time: '2026-03-19 07:10:00',
+      rrIntervals: '910,920,930',
+      ppgGreen: 18000,
+    });
 
     const heart = await repository.getHeartHistory('14d');
 
@@ -2929,14 +2917,30 @@ describe('SQLiteHealthRepository', () => {
     const adapter = new NodeSqliteAdapter(new DatabaseSync(':memory:'));
     await initializeDatabase(adapter as never);
 
-    const heartInsert = `
-      INSERT INTO heart_rate (id, bpm, time, rr_intervals, synced)
-      VALUES (?, ?, ?, ?, 0)
-    `;
-    await adapter.runAsync(heartInsert, 1, 70, '2026-03-20 01:00:00', '1000,990,980');
-    await adapter.runAsync(heartInsert, 2, 72, '2026-03-20 01:05:00', '1000,990,980');
-    await adapter.runAsync(heartInsert, 3, 78, '2026-03-20 04:00:00', '1000,990,980');
-    await adapter.runAsync(heartInsert, 4, 80, '2026-03-20 04:05:00', '1000,990,980');
+    await insertHeartRateRow(adapter, {
+      id: 1,
+      bpm: 70,
+      time: '2026-03-20 01:00:00',
+      rrIntervals: '1000,990,980',
+    });
+    await insertHeartRateRow(adapter, {
+      id: 2,
+      bpm: 72,
+      time: '2026-03-20 01:05:00',
+      rrIntervals: '1000,990,980',
+    });
+    await insertHeartRateRow(adapter, {
+      id: 3,
+      bpm: 78,
+      time: '2026-03-20 04:00:00',
+      rrIntervals: '1000,990,980',
+    });
+    await insertHeartRateRow(adapter, {
+      id: 4,
+      bpm: 80,
+      time: '2026-03-20 04:05:00',
+      rrIntervals: '1000,990,980',
+    });
     await adapter.runAsync(
       `
         INSERT INTO derived_data_state (id, derived_schema_version, source_heart_count, refreshed_at)
@@ -2962,14 +2966,30 @@ describe('SQLiteHealthRepository', () => {
     await insertOvernightStillness(adapter, new Date(2026, 3, 3, 23, 0, 0), 0);
     await insertOvernightStillness(adapter, new Date(2026, 3, 4, 23, 0, 0), 1000);
 
-    const invalidHeartInsert = `
-      INSERT INTO heart_rate (id, bpm, time, rr_intervals, sensor_data, synced)
-      VALUES (?, ?, ?, ?, ?, 0)
-    `;
-    await adapter.runAsync(invalidHeartInsert, 5001, 0, '2026-04-04 00:29:34', '', null);
-    await adapter.runAsync(invalidHeartInsert, 5002, 255, '2026-04-04 00:29:35', '', null);
-    await adapter.runAsync(invalidHeartInsert, 5003, 1, '2026-04-05 00:29:34', '', null);
-    await adapter.runAsync(invalidHeartInsert, 5004, 254, '2026-04-05 00:29:35', '', null);
+    await insertHeartRateRow(adapter, {
+      id: 5001,
+      bpm: 0,
+      time: '2026-04-04 00:29:34',
+      rrIntervals: '',
+    });
+    await insertHeartRateRow(adapter, {
+      id: 5002,
+      bpm: 255,
+      time: '2026-04-04 00:29:35',
+      rrIntervals: '',
+    });
+    await insertHeartRateRow(adapter, {
+      id: 5003,
+      bpm: 1,
+      time: '2026-04-05 00:29:34',
+      rrIntervals: '',
+    });
+    await insertHeartRateRow(adapter, {
+      id: 5004,
+      bpm: 254,
+      time: '2026-04-05 00:29:35',
+      rrIntervals: '',
+    });
 
     await refreshDerivedData(adapter as never);
 

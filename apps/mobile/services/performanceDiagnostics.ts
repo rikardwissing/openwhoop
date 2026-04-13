@@ -2,7 +2,6 @@ import type { SQLiteDatabase } from 'expo-sqlite';
 
 import type { HealthCacheScope, HealthRepository } from '@/data/HealthRepository';
 import { rebuildAggregateTablesForDebug, refreshDerivedData } from '@/data/sqlite/SQLiteHealthRepository';
-import type { BackgroundSyncState } from '@/types/device';
 import type {
   DerivedRefreshState,
   HeartHistoryData,
@@ -42,7 +41,7 @@ export interface PerformanceDiagnosticRun {
   derivedPendingToTime: string | null;
   lastSyncStartedAt: string | null;
   lastSyncFinishedAt: string | null;
-  lastSyncResult: BackgroundSyncState['lastResult'];
+  lastSyncResult: 'success' | 'skipped' | 'error' | null;
   lastSyncImportedReadings: number | null;
   steps: PerformanceDiagnosticStep[];
 }
@@ -61,7 +60,7 @@ interface PerformanceDiagnosticRunRow {
   derived_pending_to_time: string | null;
   last_sync_started_at: string | null;
   last_sync_finished_at: string | null;
-  last_sync_result: BackgroundSyncState['lastResult'];
+  last_sync_result: 'success' | 'skipped' | 'error' | null;
   last_sync_imported_readings: number | null;
 }
 
@@ -82,7 +81,6 @@ interface CountRow {
 export interface RunFullPerformanceSweepParams {
   db: SQLiteDatabase;
   repository: HealthRepository;
-  backgroundSyncState?: BackgroundSyncState;
   historyRange?: HistoryRange;
 }
 
@@ -90,22 +88,6 @@ const PERFORMANCE_DIAGNOSTIC_RETENTION = 20;
 const DEFAULT_HISTORY_RANGE: HistoryRange = '14d';
 const APP_MODE =
   typeof __DEV__ !== 'undefined' && __DEV__ ? 'development' : 'production';
-
-function defaultBackgroundSyncState(): BackgroundSyncState {
-  return {
-    pairedDeviceId: null,
-    lastRunStartedAt: null,
-    lastRunFinishedAt: null,
-    lastSuccessAt: null,
-    lastSource: null,
-    lastResult: null,
-    lastError: null,
-    lastImportedReadings: null,
-    notificationPermission: 'unknown',
-    notificationBaselineAt: null,
-    lastSyncImportSummary: null,
-  };
-}
 
 function serializeDetails(details: Record<string, PerformanceDiagnosticValue>) {
   return JSON.stringify(details);
@@ -408,13 +390,11 @@ async function runWarmAndColdReadPair<T>(params: {
 export async function runFullPerformanceSweep({
   db,
   repository,
-  backgroundSyncState,
   historyRange = DEFAULT_HISTORY_RANGE,
 }: RunFullPerformanceSweepParams): Promise<PerformanceDiagnosticRun> {
   const startedAtDate = new Date();
   const startedAt = formatSqliteDateTime(startedAtDate);
   const steps: PerformanceDiagnosticStep[] = [];
-  const syncState = backgroundSyncState ?? defaultBackgroundSyncState();
   const heartRowCount = await countHeartRows(db);
   const derivedState = await repository.getDerivedRefreshState();
   let latestDayKey: string | null = null;
@@ -553,10 +533,10 @@ export async function runFullPerformanceSweep({
       derivedStatus: derivedState.status,
       derivedPendingFromTime: derivedState.pendingFromTime,
       derivedPendingToTime: derivedState.pendingToTime,
-      lastSyncStartedAt: syncState.lastRunStartedAt,
-      lastSyncFinishedAt: syncState.lastRunFinishedAt,
-      lastSyncResult: syncState.lastResult,
-      lastSyncImportedReadings: syncState.lastImportedReadings,
+      lastSyncStartedAt: null,
+      lastSyncFinishedAt: null,
+      lastSyncResult: null,
+      lastSyncImportedReadings: null,
       steps,
     };
 
@@ -574,10 +554,10 @@ export async function runFullPerformanceSweep({
       derivedStatus: derivedState.status,
       derivedPendingFromTime: derivedState.pendingFromTime,
       derivedPendingToTime: derivedState.pendingToTime,
-      lastSyncStartedAt: syncState.lastRunStartedAt,
-      lastSyncFinishedAt: syncState.lastRunFinishedAt,
-      lastSyncResult: syncState.lastResult,
-      lastSyncImportedReadings: syncState.lastImportedReadings,
+      lastSyncStartedAt: null,
+      lastSyncFinishedAt: null,
+      lastSyncResult: null,
+      lastSyncImportedReadings: null,
       steps: [
         ...steps,
         {

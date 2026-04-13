@@ -5,13 +5,13 @@ import { useEffect, useState } from 'react';
 const mockSeedBundledAppDatabaseAsync = jest.fn(async (_currentDb?: unknown) => {});
 const mockClearLocalAppDatabaseAsync = jest.fn(async (_currentDb?: unknown) => {});
 const mockInspectRequiredStartupMigration = jest.fn(async (_db?: unknown) => ({
-  heartRateHasImuColumn: false,
+  heartRateNeedsRewrite: false,
   pendingSensorDataBackfillRows: 0,
   needsMigration: false,
 }));
 const mockRunRequiredStartupMigration = jest.fn(async (_db?: unknown, _options?: unknown) => ({
   ran: false,
-  migratedLegacyHeartRate: false,
+  rewroteHeartRateSchema: false,
   backfilledSensorDataRows: 0,
 }));
 
@@ -162,13 +162,13 @@ describe('AppDatabaseProvider', () => {
     mockInspectRequiredStartupMigration.mockClear();
     mockRunRequiredStartupMigration.mockClear();
     mockInspectRequiredStartupMigration.mockImplementation(async (_db?: unknown) => ({
-      heartRateHasImuColumn: false,
+      heartRateNeedsRewrite: false,
       pendingSensorDataBackfillRows: 0,
       needsMigration: false,
     }));
     mockRunRequiredStartupMigration.mockImplementation(async (_db?: unknown) => ({
       ran: false,
-      migratedLegacyHeartRate: false,
+      rewroteHeartRateSchema: false,
       backfilledSensorDataRows: 0,
     }));
     mockNextDatabaseId = 0;
@@ -229,7 +229,7 @@ describe('AppDatabaseProvider', () => {
     mockInspectRequiredStartupMigration.mockImplementationOnce(async (_db?: unknown) => {
       await deferredInspection.promise;
       return {
-        heartRateHasImuColumn: false,
+        heartRateNeedsRewrite: false,
         pendingSensorDataBackfillRows: 0,
         needsMigration: false,
       };
@@ -257,7 +257,7 @@ describe('AppDatabaseProvider', () => {
   it('blocks children behind the migration screen until startup migration completes', async () => {
     const deferredMigration = createDeferredPromise();
     mockInspectRequiredStartupMigration.mockImplementationOnce(async (_db?: unknown) => ({
-      heartRateHasImuColumn: false,
+      heartRateNeedsRewrite: false,
       pendingSensorDataBackfillRows: 3,
       needsMigration: true,
     }));
@@ -266,7 +266,7 @@ describe('AppDatabaseProvider', () => {
         const progressOptions = options as
           | {
               onProgress?: (progress: {
-                stage: 'legacy_heart_rate' | 'sensor_data_backfill' | 'complete';
+                stage: 'heart_rate_rewrite' | 'sensor_data_backfill' | 'complete';
                 completedUnits: number;
                 totalUnits: number;
                 backfilledSensorDataRows: number;
@@ -285,7 +285,7 @@ describe('AppDatabaseProvider', () => {
         await deferredMigration.promise;
         return {
           ran: true,
-          migratedLegacyHeartRate: false,
+          rewroteHeartRateSchema: false,
           backfilledSensorDataRows: 3,
         };
       },

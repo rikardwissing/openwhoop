@@ -3,13 +3,104 @@ import type { SQLiteDatabase } from 'expo-sqlite';
 export const APP_DATABASE_NAME = 'btwearable.db';
 export const DERIVED_DATA_SCHEMA_VERSION = 7;
 
-export async function migrateLegacyHeartRateTable(db: SQLiteDatabase) {
-  const heartRateColumns = await db.getAllAsync<{ name: string }>('PRAGMA table_info(heart_rate)');
-  const heartRateColumnNames = new Set(heartRateColumns.map((column) => column.name));
+const HEART_RATE_TABLE_COLUMNS_SQL = `
+  id INTEGER PRIMARY KEY NOT NULL,
+  bpm INTEGER NOT NULL,
+  time TEXT NOT NULL UNIQUE,
+  rr_intervals TEXT NOT NULL,
+  stress REAL,
+  ppg_green INTEGER,
+  ppg_red_ir INTEGER,
+  spo2_red INTEGER,
+  spo2_ir INTEGER,
+  skin_temp_raw INTEGER,
+  ambient_light INTEGER,
+  led_drive_1 INTEGER,
+  led_drive_2 INTEGER,
+  resp_rate_raw INTEGER,
+  signal_quality INTEGER,
+  skin_contact INTEGER,
+  accel_gravity_x REAL,
+  accel_gravity_y REAL,
+  accel_gravity_z REAL,
+  spo2 REAL,
+  skin_temp REAL
+`;
 
-  if (!heartRateColumnNames.has('imu_data')) {
-    return;
+const HEART_RATE_TABLE_SELECT_COLUMNS = `
+  id,
+  bpm,
+  time,
+  rr_intervals,
+  stress,
+  ppg_green,
+  ppg_red_ir,
+  spo2_red,
+  spo2_ir,
+  skin_temp_raw,
+  ambient_light,
+  led_drive_1,
+  led_drive_2,
+  resp_rate_raw,
+  signal_quality,
+  skin_contact,
+  accel_gravity_x,
+  accel_gravity_y,
+  accel_gravity_z,
+  spo2,
+  skin_temp
+`;
+
+const HEART_RATE_OPTIONAL_COLUMN_DEFINITIONS = {
+  stress: 'REAL',
+  ppg_green: 'INTEGER',
+  ppg_red_ir: 'INTEGER',
+  spo2_red: 'INTEGER',
+  spo2_ir: 'INTEGER',
+  skin_temp_raw: 'INTEGER',
+  ambient_light: 'INTEGER',
+  led_drive_1: 'INTEGER',
+  led_drive_2: 'INTEGER',
+  resp_rate_raw: 'INTEGER',
+  signal_quality: 'INTEGER',
+  skin_contact: 'INTEGER',
+  accel_gravity_x: 'REAL',
+  accel_gravity_y: 'REAL',
+  accel_gravity_z: 'REAL',
+  spo2: 'REAL',
+  skin_temp: 'REAL',
+} as const;
+
+function buildCreateHeartRateTableSql(tableName: string, options?: { ifNotExists?: boolean }) {
+  const ifNotExistsClause = options?.ifNotExists ? ' IF NOT EXISTS' : '';
+
+  return `
+    CREATE TABLE${ifNotExistsClause} ${tableName} (
+      ${HEART_RATE_TABLE_COLUMNS_SQL}
+    );
+  `;
+}
+
+async function getHeartRateColumnNames(db: SQLiteDatabase) {
+  const heartRateColumns = await db.getAllAsync<{ name: string }>('PRAGMA table_info(heart_rate)');
+  return new Set(heartRateColumns.map((column) => column.name));
+}
+
+async function ensureHeartRateOptionalColumns(db: SQLiteDatabase) {
+  const heartRateColumnNames = await getHeartRateColumnNames(db);
+
+  for (const [columnName, columnType] of Object.entries(HEART_RATE_OPTIONAL_COLUMN_DEFINITIONS)) {
+    if (heartRateColumnNames.has(columnName)) {
+      continue;
+    }
+
+    await db.execAsync(`ALTER TABLE heart_rate ADD COLUMN ${columnName} ${columnType};`);
+    heartRateColumnNames.add(columnName);
   }
+}
+
+export async function rewriteHeartRateTable(db: SQLiteDatabase) {
+  await ensureHeartRateOptionalColumns(db);
 
   await db.execAsync('PRAGMA foreign_keys = OFF;');
 
@@ -19,40 +110,14 @@ export async function migrateLegacyHeartRateTable(db: SQLiteDatabase) {
 
       DROP TABLE IF EXISTS heart_rate_next;
 
-      CREATE TABLE heart_rate_next (
-        id INTEGER PRIMARY KEY NOT NULL,
-        bpm INTEGER NOT NULL,
-        time TEXT NOT NULL UNIQUE,
-        rr_intervals TEXT NOT NULL,
-        activity INTEGER,
-        stress REAL,
-        synced INTEGER NOT NULL DEFAULT 0,
-        sensor_data TEXT,
-        ppg_green INTEGER,
-        ppg_red_ir INTEGER,
-        spo2_red INTEGER,
-        spo2_ir INTEGER,
-        skin_temp_raw INTEGER,
-        ambient_light INTEGER,
-        led_drive_1 INTEGER,
-        led_drive_2 INTEGER,
-        resp_rate_raw INTEGER,
-        signal_quality INTEGER,
-        skin_contact INTEGER,
-        accel_gravity_x REAL,
-        accel_gravity_y REAL,
-        accel_gravity_z REAL,
-        spo2 REAL,
-        skin_temp REAL
-      );
+      ${buildCreateHeartRateTableSql('heart_rate_next')}
 
-      INSERT INTO heart_rate_next (id, bpm, time, rr_intervals, activity, stress, synced, sensor_data, spo2, skin_temp)
-      SELECT id, bpm, time, rr_intervals, activity, stress, synced, sensor_data, spo2, skin_temp
+      INSERT INTO heart_rate_next (${HEART_RATE_TABLE_SELECT_COLUMNS})
+      SELECT ${HEART_RATE_TABLE_SELECT_COLUMNS}
       FROM heart_rate;
 
       DROP TABLE heart_rate;
       ALTER TABLE heart_rate_next RENAME TO heart_rate;
-      CREATE INDEX IF NOT EXISTS idx_heart_rate_time ON heart_rate(time);
 
       COMMIT;
     `);
@@ -67,40 +132,17 @@ export async function migrateLegacyHeartRateTable(db: SQLiteDatabase) {
   }
 }
 
+export async function migrateLegacyHeartRateTable(db: SQLiteDatabase) {
+  await rewriteHeartRateTable(db);
+}
+
 export async function initializeDatabase(db: SQLiteDatabase) {
   await db.execAsync(`
     PRAGMA journal_mode = WAL;
     PRAGMA busy_timeout = 10000;
     PRAGMA foreign_keys = ON;
 
-    CREATE TABLE IF NOT EXISTS heart_rate (
-      id INTEGER PRIMARY KEY NOT NULL,
-      bpm INTEGER NOT NULL,
-      time TEXT NOT NULL UNIQUE,
-      rr_intervals TEXT NOT NULL,
-      activity INTEGER,
-      stress REAL,
-      synced INTEGER NOT NULL DEFAULT 0,
-      sensor_data TEXT,
-      ppg_green INTEGER,
-      ppg_red_ir INTEGER,
-      spo2_red INTEGER,
-      spo2_ir INTEGER,
-      skin_temp_raw INTEGER,
-      ambient_light INTEGER,
-      led_drive_1 INTEGER,
-      led_drive_2 INTEGER,
-      resp_rate_raw INTEGER,
-      signal_quality INTEGER,
-      skin_contact INTEGER,
-      accel_gravity_x REAL,
-      accel_gravity_y REAL,
-      accel_gravity_z REAL,
-      spo2 REAL,
-      skin_temp REAL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_heart_rate_time ON heart_rate(time);
+    ${buildCreateHeartRateTableSql('heart_rate', { ifNotExists: true })}
 
     CREATE TABLE IF NOT EXISTS sleep_cycles (
       id TEXT PRIMARY KEY NOT NULL,
@@ -325,36 +367,10 @@ export async function initializeDatabase(db: SQLiteDatabase) {
     CREATE INDEX IF NOT EXISTS idx_sleep_stage_segments_sleep_id ON sleep_stage_segments(sleep_id);
   `);
 
+  await ensureHeartRateOptionalColumns(db);
+
   const sleepPreferenceColumns = await db.getAllAsync<{ name: string }>('PRAGMA table_info(sleep_preferences)');
   const sleepPreferenceColumnNames = new Set(sleepPreferenceColumns.map((column) => column.name));
-
-  const heartRateColumns = await db.getAllAsync<{ name: string }>('PRAGMA table_info(heart_rate)');
-  const heartRateColumnNames = new Set(heartRateColumns.map((column) => column.name));
-  const heartRateSensorColumnDefinitions = {
-    ppg_green: 'INTEGER',
-    ppg_red_ir: 'INTEGER',
-    spo2_red: 'INTEGER',
-    spo2_ir: 'INTEGER',
-    skin_temp_raw: 'INTEGER',
-    ambient_light: 'INTEGER',
-    led_drive_1: 'INTEGER',
-    led_drive_2: 'INTEGER',
-    resp_rate_raw: 'INTEGER',
-    signal_quality: 'INTEGER',
-    skin_contact: 'INTEGER',
-    accel_gravity_x: 'REAL',
-    accel_gravity_y: 'REAL',
-    accel_gravity_z: 'REAL',
-  } as const;
-
-  for (const [columnName, columnType] of Object.entries(heartRateSensorColumnDefinitions)) {
-    if (heartRateColumnNames.has(columnName)) {
-      continue;
-    }
-
-    await db.execAsync(`ALTER TABLE heart_rate ADD COLUMN ${columnName} ${columnType};`);
-    heartRateColumnNames.add(columnName);
-  }
 
   if (!sleepPreferenceColumnNames.has('alarm_enabled')) {
     await db.execAsync('ALTER TABLE sleep_preferences ADD COLUMN alarm_enabled INTEGER NOT NULL DEFAULT 0;');

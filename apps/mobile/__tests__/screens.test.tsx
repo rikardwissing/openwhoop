@@ -38,7 +38,7 @@ const mockUseOptionalAppDatabaseControls = jest.fn(() => ({
   clearAllLocalData: mockClearAllLocalData,
 }));
 const mockInspectDatabaseMaintenance = jest.fn(async (_db?: unknown) => ({
-  heartRateHasImuColumn: false,
+  heartRateNeedsRewrite: false,
   pageCount: 0,
   pageSizeBytes: 0,
   freelistCount: 0,
@@ -48,7 +48,7 @@ const mockInspectDatabaseMaintenance = jest.fn(async (_db?: unknown) => ({
 }));
 const mockRunDatabaseMaintenance = jest.fn(async (_db?: unknown) => ({
   ran: false,
-  migratedLegacyHeartRate: false,
+  rewroteHeartRateSchema: false,
   vacuumed: false,
   sizeBytesBefore: 0,
   sizeBytesAfter: 0,
@@ -105,7 +105,7 @@ function createWearableContextValue(overrides: Partial<{
   scanResults: WearableScanResult[];
   scan: () => Promise<void>;
   loadSeededData: () => Promise<void>;
-  pairDevice: (device: WearableScanResult) => Promise<SyncResult | null>;
+  pairDevice: (device: WearableScanResult) => Promise<void>;
   selectDevice: (device: WearableScanResult) => Promise<void>;
   forgetDevice: () => Promise<void>;
   syncSelected: (options?: { showOverlay?: boolean }) => Promise<SyncResult | null>;
@@ -949,15 +949,15 @@ describe('screen rendering', () => {
     expect(screen.getAllByText('Status').length).toBeGreaterThan(0);
     expect(screen.getByText('Charge')).toBeTruthy();
     expect(screen.getByText('Wear')).toBeTruthy();
-    expect(screen.getByText('Latest Sync Profile')).toBeTruthy();
-    expect(screen.getByText('No sync profile has been recorded on this phone yet.')).toBeTruthy();
+    expect(screen.getByText('Latest Import Profile')).toBeTruthy();
+    expect(screen.getByText('No import profile has been recorded on this phone yet.')).toBeTruthy();
     expect(screen.getAllByText('Unknown').length).toBeGreaterThan(0);
     expect(screen.getAllByText('--').length).toBeGreaterThan(0);
     expect(screen.queryByText('Scan nearby')).toBeNull();
     expect(screen.queryByText('Scan Results')).toBeNull();
   });
 
-  it('renders the latest sync profile summary on settings', () => {
+  it('renders the latest import profile summary on settings', () => {
     const screen = renderWithProviders(<SettingsScreen />, {
       backgroundSyncState: {
         lastSyncImportSummary: {
@@ -989,7 +989,8 @@ describe('screen rendering', () => {
       },
     });
 
-    expect(screen.getByText('Foreground')).toBeTruthy();
+    expect(screen.queryByText('Foreground')).toBeNull();
+    expect(screen.getByText('Success')).toBeTruthy();
     expect(screen.getByText('BLE')).toBeTruthy();
     expect(screen.getByText('12.3 s')).toBeTruthy();
     expect(screen.getByText('10,000')).toBeTruthy();
@@ -1003,7 +1004,7 @@ describe('screen rendering', () => {
     };
     mockUseOptionalAppDatabase.mockReturnValue(db);
     mockInspectDatabaseMaintenance.mockImplementationOnce(async () => ({
-      heartRateHasImuColumn: true,
+      heartRateNeedsRewrite: true,
       pageCount: 100,
       pageSizeBytes: 4096,
       freelistCount: 50,
@@ -1013,7 +1014,7 @@ describe('screen rendering', () => {
     }));
     mockRunDatabaseMaintenance.mockImplementationOnce(async () => ({
       ran: true,
-      migratedLegacyHeartRate: true,
+      rewroteHeartRateSchema: true,
       vacuumed: true,
       sizeBytesBefore: 409600,
       sizeBytesAfter: 204800,
@@ -1033,7 +1034,7 @@ describe('screen rendering', () => {
     await waitFor(() => {
       expect(mockInspectDatabaseMaintenance).toHaveBeenCalledWith(db);
       expect(mockRunDatabaseMaintenance).toHaveBeenCalledWith(db);
-      expect(screen.getByText(/removed the legacy IMU schema and reclaimed 200.0 KB/)).toBeTruthy();
+      expect(screen.getByText(/rewrote the heart-rate storage schema and reclaimed 200.0 KB/)).toBeTruthy();
     });
   });
 
@@ -1202,8 +1203,9 @@ describe('screen rendering', () => {
     expect(scan).toHaveBeenCalledTimes(1);
   });
 
-  it('pairs and syncs a wearable from the pairing screen', async () => {
-    const pairDevice = jest.fn(async () => null);
+  it('pairs a wearable from the pairing screen without syncing yet', async () => {
+    const pairDevice = jest.fn(async () => {});
+    const syncSelected = jest.fn(async () => null);
     const screen = renderWithProviders(<PairWearableScreen />, {
       progress: {
         status: 'idle',
@@ -1217,6 +1219,7 @@ describe('screen rendering', () => {
         },
       ],
       pairDevice,
+      syncSelected,
     });
 
     await act(async () => {
@@ -1228,6 +1231,7 @@ describe('screen rendering', () => {
       name: 'Neo Strap',
       rssi: -44,
     });
+    expect(syncSelected).not.toHaveBeenCalled();
   });
 
   it('lets the pairing screen continue with seeded data when no wearable is selected', async () => {

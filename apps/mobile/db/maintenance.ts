@@ -1,6 +1,6 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 
-import { migrateLegacyHeartRateTable } from '@/db/schema';
+import { rewriteHeartRateTable } from '@/db/schema';
 
 const VACUUM_FREE_BYTES_THRESHOLD = 16 * 1024 * 1024;
 
@@ -10,7 +10,7 @@ interface SqliteCountRow {
 }
 
 export interface DatabaseMaintenanceInspection {
-  heartRateHasImuColumn: boolean;
+  heartRateNeedsRewrite: boolean;
   pageCount: number;
   pageSizeBytes: number;
   freelistCount: number;
@@ -21,7 +21,7 @@ export interface DatabaseMaintenanceInspection {
 
 export interface DatabaseMaintenanceResult {
   ran: boolean;
-  migratedLegacyHeartRate: boolean;
+  rewroteHeartRateSchema: boolean;
   vacuumed: boolean;
   sizeBytesBefore: number;
   sizeBytesAfter: number;
@@ -31,19 +31,19 @@ export interface DatabaseMaintenanceResult {
 }
 
 export interface StartupMigrationInspection {
-  heartRateHasImuColumn: boolean;
+  heartRateNeedsRewrite: boolean;
   pendingSensorDataBackfillRows: number;
   needsMigration: boolean;
 }
 
 export interface StartupMigrationResult {
   ran: boolean;
-  migratedLegacyHeartRate: boolean;
+  rewroteHeartRateSchema: boolean;
   backfilledSensorDataRows: number;
 }
 
 export interface StartupMigrationProgress {
-  stage: 'legacy_heart_rate' | 'sensor_data_backfill' | 'complete';
+  stage: 'heart_rate_rewrite' | 'sensor_data_backfill' | 'complete';
   completedUnits: number;
   totalUnits: number;
   backfilledSensorDataRows: number;
@@ -74,9 +74,23 @@ async function getPragmaCount(db: SQLiteDatabase, pragma: string) {
   return 0;
 }
 
-async function heartRateHasImuColumn(db: SQLiteDatabase) {
-  const columns = await db.getAllAsync<{ name: string }>('PRAGMA table_info(heart_rate)');
-  return columns.some((column) => column.name === 'imu_data');
+async function heartRateNeedsRewrite(db: SQLiteDatabase) {
+  const [columns, indexes] = await Promise.all([
+    db.getAllAsync<{ name: string }>('PRAGMA table_info(heart_rate)'),
+    db.getAllAsync<{ name: string }>('PRAGMA index_list(heart_rate)'),
+  ]);
+  const columnNames = new Set(columns.map((column) => column.name));
+
+  if (
+    columnNames.has('imu_data') ||
+    columnNames.has('activity') ||
+    columnNames.has('sensor_data') ||
+    columnNames.has('synced')
+  ) {
+    return true;
+  }
+
+  return indexes.some((index) => index.name === 'idx_heart_rate_time');
 }
 
 async function heartRateColumnNames(db: SQLiteDatabase) {
@@ -233,15 +247,15 @@ async function backfillHeartRateSensorColumns(
 }
 
 export async function inspectRequiredStartupMigration(db: SQLiteDatabase): Promise<StartupMigrationInspection> {
-  const [hasImuColumn, pendingSensorDataBackfillRows] = await Promise.all([
-    heartRateHasImuColumn(db),
+  const [needsRewrite, pendingSensorDataBackfillRows] = await Promise.all([
+    heartRateNeedsRewrite(db),
     countPendingSensorDataBackfillRows(db),
   ]);
 
   return {
-    heartRateHasImuColumn: hasImuColumn,
+    heartRateNeedsRewrite: needsRewrite,
     pendingSensorDataBackfillRows,
-    needsMigration: hasImuColumn || pendingSensorDataBackfillRows > 0,
+    needsMigration: needsRewrite || pendingSensorDataBackfillRows > 0,
   };
 }
 
@@ -250,34 +264,17 @@ export async function runRequiredStartupMigration(
   options?: StartupMigrationRunOptions,
 ): Promise<StartupMigrationResult> {
   const inspection = await inspectRequiredStartupMigration(db);
-  let migratedLegacyHeartRate = false;
-  const totalUnits = (inspection.heartRateHasImuColumn ? 1 : 0) + inspection.pendingSensorDataBackfillRows;
-  let completedUnits = 0;
+  let rewroteHeartRateSchema = false;
+  const totalUnits = (inspection.heartRateNeedsRewrite ? 1 : 0) + inspection.pendingSensorDataBackfillRows;
 
   if (totalUnits > 0) {
     options?.onProgress?.({
-      stage: inspection.heartRateHasImuColumn ? 'legacy_heart_rate' : 'sensor_data_backfill',
-      completedUnits,
+      stage: inspection.pendingSensorDataBackfillRows > 0 ? 'sensor_data_backfill' : 'heart_rate_rewrite',
+      completedUnits: 0,
       totalUnits,
       backfilledSensorDataRows: 0,
       totalSensorDataRows: inspection.pendingSensorDataBackfillRows,
     });
-  }
-
-  if (inspection.heartRateHasImuColumn) {
-    await migrateLegacyHeartRateTable(db);
-    migratedLegacyHeartRate = true;
-    completedUnits += 1;
-
-    if (totalUnits > 0) {
-      options?.onProgress?.({
-        stage: inspection.pendingSensorDataBackfillRows > 0 ? 'sensor_data_backfill' : 'complete',
-        completedUnits,
-        totalUnits,
-        backfilledSensorDataRows: 0,
-        totalSensorDataRows: inspection.pendingSensorDataBackfillRows,
-      });
-    }
   }
 
   const backfilledSensorDataRows = await backfillHeartRateSensorColumns(db, {
@@ -287,14 +284,29 @@ export async function runRequiredStartupMigration(
       }
 
       options?.onProgress?.({
-        stage: completedRows >= totalRows ? 'complete' : 'sensor_data_backfill',
-        completedUnits: (inspection.heartRateHasImuColumn ? 1 : 0) + completedRows,
+        stage: completedRows >= totalRows && !inspection.heartRateNeedsRewrite ? 'complete' : 'sensor_data_backfill',
+        completedUnits: completedRows,
         totalUnits,
         backfilledSensorDataRows: completedRows,
         totalSensorDataRows: totalRows,
       });
     },
   });
+
+  if (inspection.heartRateNeedsRewrite) {
+    if (totalUnits > 0) {
+      options?.onProgress?.({
+        stage: 'heart_rate_rewrite',
+        completedUnits: backfilledSensorDataRows,
+        totalUnits,
+        backfilledSensorDataRows,
+        totalSensorDataRows: inspection.pendingSensorDataBackfillRows,
+      });
+    }
+
+    await rewriteHeartRateTable(db);
+    rewroteHeartRateSchema = true;
+  }
 
   if (totalUnits > 0) {
     options?.onProgress?.({
@@ -307,15 +319,15 @@ export async function runRequiredStartupMigration(
   }
 
   return {
-    ran: migratedLegacyHeartRate || backfilledSensorDataRows > 0,
-    migratedLegacyHeartRate,
+    ran: rewroteHeartRateSchema || backfilledSensorDataRows > 0,
+    rewroteHeartRateSchema,
     backfilledSensorDataRows,
   };
 }
 
 export async function inspectDatabaseMaintenance(db: SQLiteDatabase): Promise<DatabaseMaintenanceInspection> {
-  const [hasImuColumn, pageCount, pageSizeBytes, freelistCount] = await Promise.all([
-    heartRateHasImuColumn(db),
+  const [needsRewrite, pageCount, pageSizeBytes, freelistCount] = await Promise.all([
+    heartRateNeedsRewrite(db),
     getPragmaCount(db, 'page_count'),
     getPragmaCount(db, 'page_size'),
     getPragmaCount(db, 'freelist_count'),
@@ -324,13 +336,13 @@ export async function inspectDatabaseMaintenance(db: SQLiteDatabase): Promise<Da
   const freeBytes = freelistCount * pageSizeBytes;
 
   return {
-    heartRateHasImuColumn: hasImuColumn,
+    heartRateNeedsRewrite: needsRewrite,
     pageCount,
     pageSizeBytes,
     freelistCount,
     sizeBytes,
     freeBytes,
-    needsMaintenance: hasImuColumn || freeBytes >= VACUUM_FREE_BYTES_THRESHOLD,
+    needsMaintenance: needsRewrite || freeBytes >= VACUUM_FREE_BYTES_THRESHOLD,
   };
 }
 
@@ -342,14 +354,15 @@ async function checkpointWal(db: SQLiteDatabase) {
 
 export async function runDatabaseMaintenance(db: SQLiteDatabase): Promise<DatabaseMaintenanceResult> {
   const before = await inspectDatabaseMaintenance(db);
-  let migratedLegacyHeartRate = false;
+  let rewroteHeartRateSchema = false;
 
-  if (before.heartRateHasImuColumn) {
-    await migrateLegacyHeartRateTable(db);
-    migratedLegacyHeartRate = true;
+  if (before.heartRateNeedsRewrite) {
+    await backfillHeartRateSensorColumns(db);
+    await rewriteHeartRateTable(db);
+    rewroteHeartRateSchema = true;
   }
 
-  const shouldVacuum = migratedLegacyHeartRate || before.freeBytes >= VACUUM_FREE_BYTES_THRESHOLD;
+  const shouldVacuum = rewroteHeartRateSchema || before.freeBytes >= VACUUM_FREE_BYTES_THRESHOLD;
 
   if (shouldVacuum) {
     await checkpointWal(db);
@@ -360,8 +373,8 @@ export async function runDatabaseMaintenance(db: SQLiteDatabase): Promise<Databa
   const after = await inspectDatabaseMaintenance(db);
 
   return {
-    ran: migratedLegacyHeartRate || shouldVacuum,
-    migratedLegacyHeartRate,
+    ran: rewroteHeartRateSchema || shouldVacuum,
+    rewroteHeartRateSchema,
     vacuumed: shouldVacuum,
     sizeBytesBefore: before.sizeBytes,
     sizeBytesAfter: after.sizeBytes,

@@ -1,5 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import {
+  memo,
   startTransition,
   useCallback,
   useEffect,
@@ -18,7 +19,6 @@ import Animated, {
   cancelAnimation,
   runOnJS,
   useAnimatedProps,
-  useDerivedValue,
   useAnimatedStyle,
   useSharedValue,
   withDelay,
@@ -26,7 +26,6 @@ import Animated, {
   type SharedValue,
 } from 'react-native-reanimated';
 import Svg, {
-  Circle,
   ClipPath,
   Defs,
   G,
@@ -47,6 +46,7 @@ import {
   mapTrendValueToY,
 } from '@/components/charts/chartSelection';
 import { ChartSelectionBubble } from '@/components/charts/ChartSelectionBubble';
+import { ChartScrubOverlay } from '@/components/charts/ChartScrubOverlay';
 import type { ManualActivityKind } from '@/data/HealthRepository';
 import { useAcquireScreenScrollLock } from '@/components/layout/ScreenScrollContext';
 import { colors, sleepStageColors, typography } from '@/constants/theme';
@@ -54,13 +54,13 @@ import type { HeartIntradayMarker, SleepStage, TrendPoint } from '@/types/health
 import { addMinutes, formatShortDate } from '@/utils/dateTime';
 import { formatMetricNumber } from '@/utils/formatters';
 import { getHeartIntradayMarkerPresentation, mapHeartIntradayMarkersToTrendMarkers } from '@/utils/heartChartMarkers';
+import { logMobilePerfEvent, type PerformanceLogValue } from '@/utils/mobilePerf';
 
 const DEFAULT_HEART_POINT_INTERVAL_MINUTES = 5;
 const LOAD_MORE_EDGE_THRESHOLD_POINTS = 2;
 const LOAD_MORE_TRIGGER_DRAG_PX = 18;
 const SNAP_DURATION_MS = 110;
 const FOCUS_ZOOM_DURATION_MS = 220;
-const PRECISION_SWAP_FADE_DURATION_MS = 180;
 const Y_AXIS_LAG_DURATION_MS = 180;
 const HEART_CHART_VIEWBOX_HEIGHT = 40;
 const MARKER_BADGE_SIZE = 24;
@@ -74,9 +74,6 @@ const HEART_FILL_BASELINE = ACTIVITY_DRAFT_BAND_TOP + ACTIVITY_DRAFT_BAND_HEIGHT
 const AnimatedSvgGroup = Animated.createAnimatedComponent(G) as ComponentType<
   ComponentProps<typeof G> & { animatedProps?: object }
 >;
-const AnimatedSvgPath = Animated.createAnimatedComponent(Path) as ComponentType<
-  ComponentProps<typeof Path> & { animatedProps?: object }
->;
 
 export type HeartMarkerDraftKind = ManualActivityKind | 'Sleep';
 
@@ -89,25 +86,6 @@ export interface HeartActivityDraft {
 interface HeartViewportWindowState {
   windowPointCount: number;
   windowStart: number;
-}
-
-interface HeartPlotAnimationInputs {
-  animatedDomainWindowStart: SharedValue<number>;
-  focusTransitionProgress: SharedValue<number>;
-  focusSourceDomainMin: SharedValue<number>;
-  focusSourceDomainMax: SharedValue<number>;
-  focusTargetDomainMin: SharedValue<number>;
-  focusTargetDomainMax: SharedValue<number>;
-  focusedDomainMin: SharedValue<number>;
-  focusedDomainMax: SharedValue<number>;
-  isFocusDomainSourceFrozen: SharedValue<number>;
-  isTimelineDomainSourceFrozen: SharedValue<number>;
-  timelineDomainTransitionProgress: SharedValue<number>;
-  timelineSourceDomainMin: SharedValue<number>;
-  timelineSourceDomainMax: SharedValue<number>;
-  timelineTargetDomainMin: SharedValue<number>;
-  timelineTargetDomainMax: SharedValue<number>;
-  windowDomains: ReturnType<typeof buildHeartWindowDomains>;
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -494,59 +472,6 @@ export function buildHeartDomainAnimation(
   };
 }
 
-function getHeartPlotTransform(baseDomain: ReturnType<typeof buildTrendDomain>, inputs: HeartPlotAnimationInputs) {
-  'worklet';
-
-  const animatedVisibleDomain = inputs.windowDomains
-    ? interpolateHeartDomain(inputs.animatedDomainWindowStart.value, inputs.windowDomains.mins, inputs.windowDomains.maxs)
-    : null;
-  const timelineVisibleDomain =
-    inputs.isTimelineDomainSourceFrozen.value > 0
-      ? {
-          min:
-            inputs.timelineSourceDomainMin.value +
-            (inputs.timelineTargetDomainMin.value - inputs.timelineSourceDomainMin.value) *
-              inputs.timelineDomainTransitionProgress.value,
-          max:
-            inputs.timelineSourceDomainMax.value +
-            (inputs.timelineTargetDomainMax.value - inputs.timelineSourceDomainMax.value) *
-              inputs.timelineDomainTransitionProgress.value,
-        }
-      : animatedVisibleDomain;
-  const transitionSourceDomain =
-    inputs.isFocusDomainSourceFrozen.value > 0
-      ? {
-          min: inputs.focusSourceDomainMin.value,
-          max: inputs.focusSourceDomainMax.value,
-        }
-      : timelineVisibleDomain;
-  const focusedDomain =
-    inputs.isFocusDomainSourceFrozen.value > 0
-      ? {
-          min: inputs.focusTargetDomainMin.value,
-          max: inputs.focusTargetDomainMax.value,
-        }
-      : inputs.focusedDomainMax.value > inputs.focusedDomainMin.value
-        ? {
-            min: inputs.focusedDomainMin.value,
-            max: inputs.focusedDomainMax.value,
-          }
-        : null;
-  const blendedDomain =
-    transitionSourceDomain && focusedDomain
-      ? {
-          min:
-            transitionSourceDomain.min +
-            (focusedDomain.min - transitionSourceDomain.min) * inputs.focusTransitionProgress.value,
-          max:
-            transitionSourceDomain.max +
-            (focusedDomain.max - transitionSourceDomain.max) * inputs.focusTransitionProgress.value,
-        }
-      : focusedDomain ?? transitionSourceDomain;
-
-  return buildHeartDomainAnimation(baseDomain, blendedDomain);
-}
-
 export function buildHeartChartViewBox(windowStart: number, windowPointCount: number) {
   'worklet';
   return `${windowStart} 0 ${getHeartViewBoxWidth(windowPointCount)} ${HEART_CHART_VIEWBOX_HEIGHT}`;
@@ -609,19 +534,42 @@ interface HeartMarkerVisual {
   timeLabel: string;
 }
 
-interface PrecisionSwapOverlay {
-  areas: string[];
-  bridgePaths: string[];
-  chartEndX: number;
-  guideLineY: number;
-  linePaths: string[];
-}
-
 interface HeartSleepStageHighlight {
   stage: SleepStage;
   startX: number;
   width: number;
   testID?: string;
+}
+
+const EMPTY_HEART_SLEEP_STAGE_HIGHLIGHTS: HeartSleepStageHighlight[] = [];
+
+function formatRenderTraceValue(value: PerformanceLogValue | undefined) {
+  return value ?? 'null';
+}
+
+function useRenderTrace(label: string, details: Record<string, PerformanceLogValue>) {
+  const renderCountRef = useRef(0);
+  const previousDetailsRef = useRef<Record<string, PerformanceLogValue> | null>(null);
+
+  useEffect(() => {
+    renderCountRef.current += 1;
+    const previousDetails = previousDetailsRef.current;
+    const changes = previousDetails
+      ? Object.entries(details)
+          .filter(([key, value]) => previousDetails[key] !== value)
+          .map(([key, value]) => `${key}:${formatRenderTraceValue(previousDetails[key])}->${formatRenderTraceValue(value)}`)
+          .join('|')
+      : Object.entries(details)
+          .map(([key, value]) => `${key}:${formatRenderTraceValue(value)}`)
+          .join('|');
+
+    logMobilePerfEvent(`${label}.render`, {
+      changes: changes || 'none',
+      render: renderCountRef.current,
+    });
+
+    previousDetailsRef.current = details;
+  });
 }
 
 interface HeartSleepStageSpan {
@@ -723,61 +671,6 @@ function buildHeartSleepStageHighlights(
   }));
 }
 
-function buildPrecisionSwapOverlay(params: {
-  marker: HeartIntradayMarker | null;
-  points: readonly TrendPoint[];
-  viewportWidth: number;
-  windowPointCount: number;
-  windowStart: number;
-}): PrecisionSwapOverlay | null {
-  const { marker, points, viewportWidth, windowPointCount, windowStart } = params;
-
-  if (viewportWidth <= 0 || points.length === 0) {
-    return null;
-  }
-
-  const safeWindowPointCount = Math.min(Math.max(windowPointCount, 2), Math.max(points.length, 1));
-  const maxWindowStart = Math.max(0, points.length - safeWindowPointCount);
-  const safeWindowStart = clamp(windowStart, 0, maxWindowStart);
-  const visiblePoints = points.slice(safeWindowStart, safeWindowStart + safeWindowPointCount);
-
-  if (visiblePoints.length === 0) {
-    return null;
-  }
-
-  const domain =
-    buildHeartMarkerDomain(points, marker) ??
-    buildVisibleHeartDomain(points, safeWindowPointCount, safeWindowStart) ??
-    buildTrendDomain(visiblePoints, { mode: 'line' });
-
-  if (!domain) {
-    return null;
-  }
-
-  const pointSpacing = getHeartViewportPointSpacing(viewportWidth, safeWindowPointCount);
-  const coordinates = buildHeartCoordinates(visiblePoints, domain, pointSpacing);
-  const geometry = buildTrendLineGeometry(coordinates);
-  const linePaths = geometry.segments.map((segment) => buildLine(segment));
-  const bridgePaths = geometry.bridges.map((bridge) => buildLine(bridge));
-  const areas = geometry.segments
-    .filter((segment) => segment.length >= 2)
-    .map((segment) => {
-      const path = buildLine(segment);
-      const startX = segment[0]?.x ?? 0;
-      const endX = segment.at(-1)?.x ?? startX;
-
-      return `${path} L ${endX} ${TREND_VIEWBOX_BASELINE} L ${startX} ${TREND_VIEWBOX_BASELINE} Z`;
-    });
-
-  return {
-    areas,
-    bridgePaths,
-    chartEndX: Math.max(viewportWidth, pointSpacing),
-    guideLineY: domain.min < 0 && domain.max > 0 ? mapTrendValueToY(0, domain) : 24,
-    linePaths,
-  };
-}
-
 function HeartMarkerBadge({
   marker,
   onPress,
@@ -843,44 +736,264 @@ function HeartMarkerBadge({
   );
 }
 
-function HeartAreaFillPath({
-  baseDomain,
+const HeartChartSvgPlot = memo(function HeartChartSvgPlot({
+  activeSleepStageColor,
+  areas,
+  bridgePaths,
+  chartContentWidth,
+  chartEndX,
   chartId,
-  plotAnimationInputs,
-  segment,
+  chartPointSpacingValue,
+  chartTestID,
+  gradientEnd,
+  gradientStart,
+  guideLineY,
+  paths,
+  shadowColor,
+  sleepStageHighlightClipId,
+  sleepStageHighlightFillId,
+  sleepStageHighlights,
+  viewportWidth,
+  viewportZoomAnchorIndex,
+  viewportZoomAnchorScreenX,
+  viewportZoomScale,
 }: {
-  baseDomain: ReturnType<typeof buildTrendDomain>;
+  activeSleepStageColor: string | null;
+  areas: string[];
+  bridgePaths: string[];
+  chartContentWidth: number;
+  chartEndX: number;
   chartId: string;
-  plotAnimationInputs: HeartPlotAnimationInputs;
-  segment: Array<{ x: number; y: number }>;
+  chartPointSpacingValue: SharedValue<number>;
+  chartTestID?: string;
+  gradientEnd: string;
+  gradientStart: string;
+  guideLineY: number;
+  paths: string[];
+  shadowColor: string;
+  sleepStageHighlightClipId: string | null;
+  sleepStageHighlightFillId: string | null;
+  sleepStageHighlights: HeartSleepStageHighlight[];
+  viewportWidth: number;
+  viewportZoomAnchorIndex: SharedValue<number>;
+  viewportZoomAnchorScreenX: SharedValue<number>;
+  viewportZoomScale: SharedValue<number>;
 }) {
-  const animatedAreaPathProps = useAnimatedProps(
-    () => {
-      const { scaleY, translateY } = getHeartPlotTransform(baseDomain, plotAnimationInputs);
+  const chartPlotClipId = `${chartId}-plot-clip`;
+  const plotPathSignature = `${paths.length}:${paths[0]?.length ?? 0}:${paths.at(-1)?.length ?? 0}`;
+  const plotAreaSignature = `${areas.length}:${areas[0]?.length ?? 0}:${areas.at(-1)?.length ?? 0}`;
+  const bridgeSignature = `${bridgePaths.length}:${bridgePaths[0]?.length ?? 0}:${bridgePaths.at(-1)?.length ?? 0}`;
+  const sleepHighlightSignature =
+    sleepStageHighlights.length > 0
+      ? sleepStageHighlights
+          .map((highlight) => `${highlight.stage}:${Math.round(highlight.startX * 10)}:${Math.round(highlight.width * 10)}`)
+          .join(',')
+      : 'none';
 
-      let path = '';
-      for (let index = 0; index < segment.length; index += 1) {
-        const point = segment[index];
-        const transformedY = point.y * scaleY + translateY;
-        path += `${index === 0 ? 'M' : 'L'} ${point.x} ${transformedY}`;
+  useRenderTrace(`chart.heart.svgPlot.${chartTestID ?? 'default'}`, {
+    activeSleepStageColor: activeSleepStageColor ?? 'none',
+    areaSignature: plotAreaSignature,
+    bridgeSignature,
+    chartContentWidth: Math.round(chartContentWidth),
+    chartEndX: Math.round(chartEndX),
+    pathSignature: plotPathSignature,
+    sleepHighlightSignature,
+    viewportWidth: Math.round(viewportWidth),
+  });
 
-        if (index < segment.length - 1) {
-          path += ' ';
-        }
-      }
-
-      const startX = segment[0]?.x ?? 0;
-      const endX = segment[segment.length - 1]?.x ?? startX;
-
-      return {
-        d: `${path} L ${endX} ${HEART_FILL_BASELINE} L ${startX} ${HEART_FILL_BASELINE} Z`,
-      };
-    },
-    [baseDomain, plotAnimationInputs, segment],
+  const animatedChartCameraProps = useAnimatedProps(
+    () => ({
+      matrix: [
+        viewportZoomScale.value,
+        0,
+        0,
+        1,
+        viewportZoomAnchorScreenX.value -
+          viewportZoomScale.value * viewportZoomAnchorIndex.value * chartPointSpacingValue.value,
+        0,
+      ],
+    }),
+    [chartPointSpacingValue, viewportZoomAnchorIndex, viewportZoomAnchorScreenX, viewportZoomScale],
   );
 
-  return <AnimatedSvgPath animatedProps={animatedAreaPathProps} fill={`url(#${chartId}-fill)`} />;
-}
+  return (
+    <Animated.View pointerEvents="none" style={styles.chartCanvas}>
+      <Svg
+        height="100%"
+        preserveAspectRatio="none"
+        viewBox={`0 0 ${Math.max(viewportWidth, 1)} ${HEART_CHART_VIEWBOX_HEIGHT}`}
+        width="100%">
+        <Defs>
+          <SvgLinearGradient id={`${chartId}-stroke`} x1="0%" x2="100%" y1="100%" y2="0%">
+            <Stop offset="0%" stopColor={gradientStart} />
+            <Stop offset="100%" stopColor={gradientEnd} />
+          </SvgLinearGradient>
+          <SvgLinearGradient id={`${chartId}-fill`} x1="0%" x2="0%" y1="0%" y2="100%">
+            <Stop offset="0%" stopColor={gradientEnd} stopOpacity="0.6" />
+            <Stop offset="58%" stopColor={gradientStart} stopOpacity="0.2" />
+            <Stop offset="100%" stopColor={gradientStart} stopOpacity="0" />
+          </SvgLinearGradient>
+          <SvgLinearGradient
+            gradientUnits="userSpaceOnUse"
+            id={`${chartId}-fill-mask-gradient`}
+            x1="0"
+            x2="0"
+            y1={TREND_VIEWBOX_TOP}
+            y2={TREND_VIEWBOX_BASELINE}>
+            <Stop offset="0%" stopColor="#ffffff" stopOpacity="1" />
+            <Stop offset="72%" stopColor="#ffffff" stopOpacity="1" />
+            <Stop offset="100%" stopColor="#ffffff" stopOpacity="0" />
+          </SvgLinearGradient>
+          <Mask
+            height={HEART_CHART_VIEWBOX_HEIGHT}
+            id={`${chartId}-fill-mask`}
+            maskContentUnits="userSpaceOnUse"
+            maskUnits="userSpaceOnUse"
+            width={chartContentWidth}
+            x="0"
+            y="0">
+            <Rect fill="#000000" height={HEART_CHART_VIEWBOX_HEIGHT} width={chartContentWidth} x="0" y="0" />
+            <Rect
+              fill={`url(#${chartId}-fill-mask-gradient)`}
+              height={TREND_VIEWBOX_BASELINE - TREND_VIEWBOX_TOP}
+              width={chartContentWidth}
+              x="0"
+              y={TREND_VIEWBOX_TOP}
+            />
+          </Mask>
+          <ClipPath id={chartPlotClipId}>
+            <Rect height={HEART_CHART_VIEWBOX_HEIGHT} width={chartContentWidth} x="0" y="0" />
+          </ClipPath>
+          {sleepStageHighlights.length > 0 && sleepStageHighlightClipId && sleepStageHighlightFillId && activeSleepStageColor ? (
+            <G>
+              <ClipPath id={sleepStageHighlightClipId}>
+                {sleepStageHighlights.map((highlight, index) => (
+                  <Rect
+                    height={HEART_CHART_VIEWBOX_HEIGHT}
+                    key={`stage-highlight-clip-${highlight.stage}-${index}`}
+                    width={highlight.width}
+                    x={highlight.startX}
+                    y="0"
+                  />
+                ))}
+              </ClipPath>
+              <SvgLinearGradient id={sleepStageHighlightFillId} x1="0%" x2="0%" y1="0%" y2="100%">
+                <Stop offset="0%" stopColor={activeSleepStageColor} stopOpacity="0.72" />
+                <Stop offset="55%" stopColor={activeSleepStageColor} stopOpacity="0.26" />
+                <Stop offset="100%" stopColor={activeSleepStageColor} stopOpacity="0" />
+              </SvgLinearGradient>
+            </G>
+          ) : null}
+        </Defs>
+        <AnimatedSvgGroup animatedProps={animatedChartCameraProps}>
+          <G clipPath={`url(#${chartPlotClipId})`}>
+            {areas.map((area, index) => (
+              <Path key={`area-${index}`} d={area} fill={`url(#${chartId}-fill)`} />
+            ))}
+          </G>
+          <G clipPath={`url(#${chartPlotClipId})`}>
+            <Line
+              stroke="rgba(149, 162, 188, 0.22)"
+              strokeDasharray="0.36 0.36"
+              strokeWidth="0.7"
+              vectorEffect="non-scaling-stroke"
+              x1={0}
+              x2={chartEndX}
+              y1={guideLineY}
+              y2={guideLineY}
+            />
+            {bridgePaths.map((path, index) => (
+              <Path
+                d={path}
+                fill="none"
+                key={`bridge-${index}`}
+                stroke={colors.subtle}
+                strokeDasharray="1.8 1.8"
+                strokeLinecap="round"
+                strokeOpacity="0.72"
+                strokeWidth="0.68"
+                testID={chartTestID ? `${chartTestID}-bridge-${index}` : undefined}
+                vectorEffect="non-scaling-stroke"
+              />
+            ))}
+            <G>
+              {paths.map((path, index) => (
+                <Path
+                  key={`shadow-${index}`}
+                  d={path}
+                  fill="none"
+                  stroke={shadowColor}
+                  strokeWidth="1.6"
+                  vectorEffect="non-scaling-stroke"
+                />
+              ))}
+              {paths.map((path, index) => (
+                <Path
+                  key={`line-${index}`}
+                  d={path}
+                  fill="none"
+                  stroke={`url(#${chartId}-stroke)`}
+                  strokeLinecap="round"
+                  strokeWidth="0.8"
+                  vectorEffect="non-scaling-stroke"
+                />
+              ))}
+            </G>
+            {sleepStageHighlights.map((highlight, index) => (
+              <Rect
+                fill="transparent"
+                height={HEART_CHART_VIEWBOX_HEIGHT}
+                key={`stage-highlight-probe-${highlight.stage}-${index}`}
+                testID={highlight.testID}
+                width={highlight.width}
+                x={highlight.startX}
+                y="0"
+              />
+            ))}
+            {sleepStageHighlights.length > 0 && sleepStageHighlightClipId && sleepStageHighlightFillId && activeSleepStageColor ? (
+              <G clipPath={`url(#${sleepStageHighlightClipId})`}>
+                <G mask={`url(#${chartId}-fill-mask)`}>
+                  {areas.map((area, areaIndex) => (
+                    <Path
+                      key={`stage-area-${areaIndex}`}
+                      d={area}
+                      fill={`url(#${sleepStageHighlightFillId})`}
+                    />
+                  ))}
+                </G>
+                <G>
+                  {paths.map((path, pathIndex) => (
+                    <Path
+                      key={`stage-shadow-${pathIndex}`}
+                      d={path}
+                      fill="none"
+                      stroke={activeSleepStageColor}
+                      strokeOpacity="0.22"
+                      strokeWidth="2.4"
+                      vectorEffect="non-scaling-stroke"
+                    />
+                  ))}
+                  {paths.map((path, pathIndex) => (
+                    <Path
+                      key={`stage-line-${pathIndex}`}
+                      d={path}
+                      fill="none"
+                      stroke={activeSleepStageColor}
+                      strokeLinecap="round"
+                      strokeOpacity="0.96"
+                      strokeWidth="1.3"
+                      vectorEffect="non-scaling-stroke"
+                    />
+                  ))}
+                </G>
+              </G>
+            ) : null}
+          </G>
+        </AnimatedSvgGroup>
+      </Svg>
+    </Animated.View>
+  );
+});
 
 export function PannableHeartChart({
   accentColor = colors.primary,
@@ -935,8 +1048,8 @@ export function PannableHeartChart({
 }) {
   const [viewportWidth, setViewportWidth] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(height);
-  const [precisionSwapOverlay, setPrecisionSwapOverlay] = useState<PrecisionSwapOverlay | null>(null);
   const baseWindowPointCount = Math.min(Math.max(windowPointCount, 2), Math.max(points.length, 1));
+  const [plotBaseWindowPointCount, setPlotBaseWindowPointCount] = useState(baseWindowPointCount);
   const [activeWindowPointCount, setActiveWindowPointCount] = useState(baseWindowPointCount);
   const activeWindowPointCountRef = useRef(baseWindowPointCount);
   const safeWindowPointCount = Math.min(Math.max(activeWindowPointCount, 2), Math.max(points.length, 1));
@@ -983,11 +1096,9 @@ export function PannableHeartChart({
   const viewportZoomScale = useSharedValue(1);
   const viewportZoomAnchorIndex = useSharedValue(maxWindowStart);
   const viewportZoomAnchorScreenX = useSharedValue(0);
-  const precisionSwapHasOverlay = useSharedValue(0);
-  const precisionSwapProgress = useSharedValue(1);
 
   const pointSpacing = getHeartViewportPointSpacing(viewportWidth, safeWindowPointCount);
-  const basePointSpacing = getHeartViewportPointSpacing(viewportWidth, baseWindowPointCount);
+  const basePointSpacing = getHeartViewportPointSpacing(viewportWidth, plotBaseWindowPointCount);
   const chartPointSpacing = basePointSpacing > 0 ? basePointSpacing : 1;
   const viewBoxWidth = getHeartViewBoxWidth(safeWindowPointCount);
   const visibleDomain = useMemo(
@@ -1033,7 +1144,7 @@ export function PannableHeartChart({
     [lineGeometry],
   );
   const chartContentWidth = Math.max(
-    getHeartViewportContentWidth(viewportWidth, points.length, baseWindowPointCount),
+    getHeartViewportContentWidth(viewportWidth, points.length, plotBaseWindowPointCount),
     1,
   );
   const chartEndX = Math.max(chartContentWidth, chartPointSpacing);
@@ -1138,12 +1249,15 @@ export function PannableHeartChart({
     () => buildHeartMarkerDomain(points, focusedMarker),
     [focusedMarker, points],
   );
-  const selectionDomain = focusedMarkerDomain ?? visibleDomain;
+  const selectionDomain = baseDomain;
   const selectionY = selectionPoint && selectionPoint.value !== null && selectionDomain
     ? mapTrendValueToY(selectionPoint.value, selectionDomain)
     : null;
   const sleepStageHighlights = useMemo(
-    () => buildHeartSleepStageHighlights(focusedMarker, highlightedSleepStage, fullSeriesSpan, chartTestID),
+    () =>
+      highlightedSleepStage
+        ? buildHeartSleepStageHighlights(focusedMarker, highlightedSleepStage, fullSeriesSpan, chartTestID)
+        : EMPTY_HEART_SLEEP_STAGE_HIGHLIGHTS,
     [chartTestID, focusedMarker, fullSeriesSpan, highlightedSleepStage],
   );
   const activeSleepStageColor = highlightedSleepStage ? sleepStageColors[highlightedSleepStage] : null;
@@ -1426,7 +1540,7 @@ export function PannableHeartChart({
       const resolvedWindowPointCount = Math.min(Math.max(nextWindowPointCount, 2), Math.max(points.length, 1));
       const nextMaxWindowStart = Math.max(0, points.length - resolvedWindowPointCount);
       const clampedWindowStart = clamp(nextWindowStart, 0, nextMaxWindowStart);
-      const nextZoomScale = getHeartViewportZoomScale(baseWindowPointCount, resolvedWindowPointCount);
+      const nextZoomScale = getHeartViewportZoomScale(plotBaseWindowPointCount, resolvedWindowPointCount);
       const previousAnimatedWindowStart = clamp(animatedWindowStart.value, 0, maxWindowStartRef.current);
       const currentVisibleDomain =
         windowDomains
@@ -1498,13 +1612,13 @@ export function PannableHeartChart({
     },
     [
       animatedWindowStart,
-      baseWindowPointCount,
       cancelAnimation,
       chartPointSpacing,
       commitSelection,
       isAxisDragging,
       loadRequested,
       points.length,
+      plotBaseWindowPointCount,
       releaseScrollLock,
       baseDomain,
       focusedDomainMax,
@@ -1527,55 +1641,6 @@ export function PannableHeartChart({
     ],
   );
 
-  const runPrecisionSwapOverlay = useCallback(
-    (
-      previousContext: {
-        marker: HeartIntradayMarker | null;
-        points: readonly TrendPoint[];
-        windowPointCount: number;
-        windowStart: number;
-      },
-      durationMs = PRECISION_SWAP_FADE_DURATION_MS,
-    ) => {
-      const nextPrecisionSwapOverlay = buildPrecisionSwapOverlay({
-        marker: previousContext.marker,
-        points: previousContext.points,
-        viewportWidth,
-        windowPointCount: previousContext.windowPointCount,
-        windowStart: previousContext.windowStart,
-      });
-
-      cancelAnimation(precisionSwapProgress);
-
-      if (!nextPrecisionSwapOverlay) {
-        precisionSwapHasOverlay.value = 0;
-        precisionSwapProgress.value = 1;
-        setPrecisionSwapOverlay(null);
-        return;
-      }
-
-      setPrecisionSwapOverlay(nextPrecisionSwapOverlay);
-      precisionSwapHasOverlay.value = 1;
-      precisionSwapProgress.value = 0;
-      precisionSwapProgress.value = withTiming(
-        1,
-        {
-          duration: durationMs,
-          easing: Easing.out(Easing.cubic),
-        },
-        (finished) => {
-          if (!finished) {
-            return;
-          }
-
-          precisionSwapHasOverlay.value = 0;
-          runOnJS(setPrecisionSwapOverlay)(null);
-        },
-      );
-    },
-    [cancelAnimation, precisionSwapHasOverlay, precisionSwapProgress, viewportWidth],
-  );
-
   const syncFocusedWindowInstant = useCallback(
     (
       nextWindowPointCount: number,
@@ -1583,15 +1648,10 @@ export function PannableHeartChart({
       nextFocusedMarkerId: string | null,
       nextViewportZoomAnchorIndex?: number,
     ) => {
-      const previousPrecisionContext = previousPrecisionContextRef.current;
-      const previousFocusedMarker =
-        previousPrecisionContext.markers.find((marker) => marker.id === focusedMarkerId) ??
-        previousRequestedFocusedMarkerRef.current ??
-        null;
       const resolvedWindowPointCount = Math.min(Math.max(nextWindowPointCount, 2), Math.max(points.length, 1));
       const nextMaxWindowStart = Math.max(0, points.length - resolvedWindowPointCount);
       const clampedWindowStart = clamp(nextWindowStart, 0, nextMaxWindowStart);
-      const nextZoomScale = getHeartViewportZoomScale(baseWindowPointCount, resolvedWindowPointCount);
+      const nextZoomScale = getHeartViewportZoomScale(plotBaseWindowPointCount, resolvedWindowPointCount);
       const nextAnchorIndex = clamp(
         nextViewportZoomAnchorIndex ?? clampedWindowStart,
         0,
@@ -1623,20 +1683,9 @@ export function PannableHeartChart({
         setFocusedMarkerId(nextFocusedMarkerId);
         setWindowStart(clampedWindowStart);
       });
-
-      runPrecisionSwapOverlay(
-        {
-          marker: previousFocusedMarker,
-          points: previousPrecisionContext.points,
-          windowPointCount: activeWindowPointCountRef.current,
-          windowStart: windowStartRef.current,
-        },
-        PRECISION_SWAP_FADE_DURATION_MS,
-      );
     },
     [
       animatedWindowStart,
-      baseWindowPointCount,
       cancelAnimation,
       chartPointSpacing,
       commitSelection,
@@ -1646,10 +1695,9 @@ export function PannableHeartChart({
       isFocusDomainSourceFrozen,
       loadRequested,
       points.length,
+      plotBaseWindowPointCount,
       releaseScrollLock,
       reportedWindowStart,
-      runPrecisionSwapOverlay,
-      viewportWidth,
       viewportZoomAnchorIndex,
       viewportZoomAnchorScreenX,
       viewportZoomScale,
@@ -1690,7 +1738,7 @@ export function PannableHeartChart({
 
     const previousRequestedMarker = previousRequestedFocusedMarkerRef.current;
     const previousPrecisionContext = previousPrecisionContextRef.current;
-    const isPrecisionSwapForFocusedMarker =
+    const isInPlaceFocusedMarkerUpdate =
       focusedMarkerId !== null &&
       focusedMarkerId === requestedFocusedMarker.id &&
       (
@@ -1718,7 +1766,7 @@ export function PannableHeartChart({
       ((requestedFocusedMarker.startFraction + requestedFocusedMarker.endFraction) / 2) *
       Math.max(points.length - 1, 0);
 
-    if (isPrecisionSwapForFocusedMarker) {
+    if (isInPlaceFocusedMarkerUpdate) {
       syncFocusedWindowInstant(
         focusedWindow.windowPointCount,
         focusedWindow.windowStart,
@@ -1906,6 +1954,7 @@ export function PannableHeartChart({
   ]);
 
   useLayoutEffect(() => {
+    setPlotBaseWindowPointCount(baseWindowPointCount);
     const nextWindowStart = maxWindowStart;
 
     activeWindowPointCountRef.current = baseWindowPointCount;
@@ -1928,7 +1977,7 @@ export function PannableHeartChart({
     isFocusDomainSourceFrozen.value = 0;
     isTimelineDomainSourceFrozen.value = 0;
     timelineDomainTransitionProgress.value = 1;
-    viewportZoomScale.value = 1;
+    viewportZoomScale.value = getHeartViewportZoomScale(baseWindowPointCount, baseWindowPointCount);
     viewportZoomAnchorIndex.value = nextWindowStart;
     viewportZoomAnchorScreenX.value = 0;
     reportPresetZoomTransitionStateChange(false);
@@ -2012,8 +2061,9 @@ export function PannableHeartChart({
       0,
       nextMaxWindowStart,
     );
-    const finalAnchorScreenX = (nextCenterIndex - clampedWindowStart) * chartPointSpacing;
-    const initialZoomScale = clamp(nextVisibleDurationMinutes / previousVisibleDurationMinutes, 0.5, 6);
+    const targetZoomScale = getHeartViewportZoomScale(plotBaseWindowPointCount, baseWindowPointCount);
+    const finalAnchorScreenX =
+      targetZoomScale * (nextCenterIndex - clampedWindowStart) * chartPointSpacing;
     const centerAnchorScreenX = viewportWidth > 0 ? viewportWidth / 2 : finalAnchorScreenX;
     const shouldPanAfterZoom =
       viewportWidth > 0 && Math.abs(finalAnchorScreenX - centerAnchorScreenX) > chartPointSpacing / 2;
@@ -2084,7 +2134,6 @@ export function PannableHeartChart({
     reportedWindowStart.value = clampedWindowStart;
     viewportZoomAnchorIndex.value = nextCenterIndex;
     animatedWindowStart.value = clampedWindowStart;
-    viewportZoomScale.value = initialZoomScale;
     viewportZoomAnchorScreenX.value = centerAnchorScreenX;
 
     startTransition(() => {
@@ -2093,7 +2142,7 @@ export function PannableHeartChart({
       setWindowStart(clampedWindowStart);
     });
 
-    viewportZoomScale.value = withTiming(1, {
+    viewportZoomScale.value = withTiming(targetZoomScale, {
       duration: FOCUS_ZOOM_DURATION_MS,
       easing: Easing.out(Easing.cubic),
     });
@@ -2123,6 +2172,7 @@ export function PannableHeartChart({
     isFocusDomainSourceFrozen,
     loadRequested,
     pointIntervalMinutes,
+    plotBaseWindowPointCount,
     timelineDomainTransitionProgress,
     timelineSourceDomainMax,
     timelineSourceDomainMin,
@@ -2478,21 +2528,6 @@ export function PannableHeartChart({
     [chartPointSpacingValue, viewportZoomAnchorIndex],
   );
 
-  const animatedChartCameraProps = useAnimatedProps(
-    () => ({
-      matrix: [
-        viewportZoomScale.value,
-        0,
-        0,
-        1,
-        viewportZoomAnchorScreenX.value -
-          viewportZoomScale.value * viewportZoomAnchorIndex.value * chartPointSpacingValue.value,
-        0,
-      ],
-    }),
-    [chartPointSpacingValue, viewportZoomAnchorIndex, viewportZoomAnchorScreenX, viewportZoomScale],
-  );
-
   const animatedMarkerLayerStyle = useAnimatedStyle(
     () => ({
       opacity: 1 - focusTransitionProgress.value,
@@ -2500,96 +2535,28 @@ export function PannableHeartChart({
     [focusTransitionProgress],
   );
 
-  const animatedDomainWindowStart = useDerivedValue(
-    () =>
-      withTiming(animatedWindowStart.value, {
-        duration: Y_AXIS_LAG_DURATION_MS,
-        easing: Easing.out(Easing.cubic),
-      }),
-    [animatedWindowStart],
-  );
-
-  const heartPlotAnimationInputs = useMemo(
-    () => ({
-      animatedDomainWindowStart,
-      focusTransitionProgress,
-      focusSourceDomainMin,
-      focusSourceDomainMax,
-      focusTargetDomainMin,
-      focusTargetDomainMax,
-      focusedDomainMin,
-      focusedDomainMax,
-      isFocusDomainSourceFrozen,
-      isTimelineDomainSourceFrozen,
-      timelineDomainTransitionProgress,
-      timelineSourceDomainMin,
-      timelineSourceDomainMax,
-      timelineTargetDomainMin,
-      timelineTargetDomainMax,
-      windowDomains,
-    }),
-    [
-      animatedDomainWindowStart,
-      focusTransitionProgress,
-      focusSourceDomainMin,
-      focusSourceDomainMax,
-      focusTargetDomainMin,
-      focusTargetDomainMax,
-      focusedDomainMin,
-      focusedDomainMax,
-      isFocusDomainSourceFrozen,
-      isTimelineDomainSourceFrozen,
-      timelineDomainTransitionProgress,
-      timelineSourceDomainMin,
-      timelineSourceDomainMax,
-      timelineTargetDomainMin,
-      timelineTargetDomainMax,
-      windowDomains,
-    ],
-  );
-
-  const animatedChartPlotProps = useAnimatedProps(
-    () => {
-      const { scaleY, translateY } = getHeartPlotTransform(baseDomain, heartPlotAnimationInputs);
-
-      return {
-        matrix: [1, 0, 0, scaleY, 0, translateY],
-        opacity: precisionSwapHasOverlay.value > 0 ? precisionSwapProgress.value : 1,
-      };
-    },
-    [baseDomain, heartPlotAnimationInputs, precisionSwapHasOverlay, precisionSwapProgress],
-  );
-
-  const animatedPrecisionSwapOverlayProps = useAnimatedProps(
-    () => ({
-      opacity: precisionSwapHasOverlay.value > 0 ? 1 - precisionSwapProgress.value : 0,
-    }),
-    [precisionSwapHasOverlay, precisionSwapProgress],
-  );
-
-  useEffect(() => {
-    if (points.length > 0) {
-      return;
-    }
-
-    precisionSwapHasOverlay.value = 0;
-    precisionSwapProgress.value = 1;
-    setPrecisionSwapOverlay(null);
-  }, [points.length, precisionSwapHasOverlay, precisionSwapProgress]);
-
-  useLayoutEffect(() => {
-    precisionSwapHasOverlay.value = 0;
-    precisionSwapProgress.value = 1;
-    setPrecisionSwapOverlay(null);
-  }, [precisionSwapHasOverlay, precisionSwapProgress, resetKey]);
-
   if (points.length === 0) {
     return null;
   }
 
   const [gradientStart, gradientEnd] = colorStops(accentColor);
   const shadowColor = chartShadowColor(accentColor);
-  const chartPlotClipId = `${chartId}-plot-clip`;
+
+  useRenderTrace(`chart.heart.container.${chartTestID ?? 'default'}`, {
+    activeWindowPointCount,
+    highlightedSleepStage: highlightedSleepStage ?? 'none',
+    markers: markers.length,
+    pointIntervalMinutes,
+    points: points.length,
+    plotBaseWindowPointCount,
+    requestedFocusedMarkerId: requestedFocusedMarkerId ?? 'none',
+    selectionIndex,
+    viewportHeight: Math.round(viewportHeight),
+    viewportWidth: Math.round(viewportWidth),
+    windowPointCount: baseWindowPointCount,
+    windowStart,
+    zoomedMarker: focusedMarkerId ?? 'none',
+  });
 
   return (
     <View>
@@ -2635,278 +2602,45 @@ export function PannableHeartChart({
               </Animated.View>
             </View>
           ) : null}
-          <Animated.View pointerEvents="none" style={styles.chartCanvas}>
-            <Svg
-              height="100%"
-              preserveAspectRatio="none"
-              viewBox={`0 0 ${Math.max(viewportWidth, 1)} ${HEART_CHART_VIEWBOX_HEIGHT}`}
-              width="100%">
-              <Defs>
-                <SvgLinearGradient id={`${chartId}-stroke`} x1="0%" x2="100%" y1="100%" y2="0%">
-                  <Stop offset="0%" stopColor={gradientStart} />
-                  <Stop offset="100%" stopColor={gradientEnd} />
-                </SvgLinearGradient>
-                <SvgLinearGradient id={`${chartId}-fill`} x1="0%" x2="0%" y1="0%" y2="100%">
-                  <Stop offset="0%" stopColor={gradientEnd} stopOpacity="0.6" />
-                  <Stop offset="58%" stopColor={gradientStart} stopOpacity="0.2" />
-                  <Stop offset="100%" stopColor={gradientStart} stopOpacity="0" />
-                </SvgLinearGradient>
-                <SvgLinearGradient
-                  gradientUnits="userSpaceOnUse"
-                  id={`${chartId}-fill-mask-gradient`}
-                  x1="0"
-                  x2="0"
-                  y1={TREND_VIEWBOX_TOP}
-                  y2={TREND_VIEWBOX_BASELINE}>
-                  <Stop offset="0%" stopColor="#ffffff" stopOpacity="1" />
-                  <Stop offset="72%" stopColor="#ffffff" stopOpacity="1" />
-                  <Stop offset="100%" stopColor="#ffffff" stopOpacity="0" />
-                </SvgLinearGradient>
-                <Mask
-                  height={HEART_CHART_VIEWBOX_HEIGHT}
-                  id={`${chartId}-fill-mask`}
-                  maskContentUnits="userSpaceOnUse"
-                  maskUnits="userSpaceOnUse"
-                  width={chartContentWidth}
-                  x="0"
-                  y="0">
-                  <Rect fill="#000000" height={HEART_CHART_VIEWBOX_HEIGHT} width={chartContentWidth} x="0" y="0" />
-                  <Rect
-                    fill={`url(#${chartId}-fill-mask-gradient)`}
-                    height={TREND_VIEWBOX_BASELINE - TREND_VIEWBOX_TOP}
-                    width={chartContentWidth}
-                    x="0"
-                    y={TREND_VIEWBOX_TOP}
-                  />
-                </Mask>
-                <ClipPath id={chartPlotClipId}>
-                  <Rect
-                    height={HEART_CHART_VIEWBOX_HEIGHT}
-                    width={chartContentWidth}
-                    x="0"
-                    y="0"
-                  />
-                </ClipPath>
-                {sleepStageHighlights.length > 0 && sleepStageHighlightClipId && sleepStageHighlightFillId && activeSleepStageColor ? (
-                  <G>
-                    <ClipPath id={sleepStageHighlightClipId}>
-                      {sleepStageHighlights.map((highlight, index) => (
-                        <Rect
-                          height={HEART_CHART_VIEWBOX_HEIGHT}
-                          key={`stage-highlight-clip-${highlight.stage}-${index}`}
-                          width={highlight.width}
-                          x={highlight.startX}
-                          y="0"
-                        />
-                      ))}
-                    </ClipPath>
-                    <SvgLinearGradient id={sleepStageHighlightFillId} x1="0%" x2="0%" y1="0%" y2="100%">
-                      <Stop offset="0%" stopColor={activeSleepStageColor} stopOpacity="0.72" />
-                      <Stop offset="55%" stopColor={activeSleepStageColor} stopOpacity="0.26" />
-                      <Stop offset="100%" stopColor={activeSleepStageColor} stopOpacity="0" />
-                    </SvgLinearGradient>
-                  </G>
-                ) : null}
-              </Defs>
-              <AnimatedSvgGroup animatedProps={animatedChartCameraProps}>
-                <G clipPath={`url(#${chartPlotClipId})`}>
-                  {lineGeometry.segments
-                    .filter((segment) => segment.length >= 2)
-                    .map((segment, index) => (
-                      <HeartAreaFillPath
-                        baseDomain={baseDomain}
-                        chartId={chartId}
-                        key={`area-${index}`}
-                        plotAnimationInputs={heartPlotAnimationInputs}
-                        segment={segment}
-                      />
-                    ))}
-                </G>
-                <G clipPath={`url(#${chartPlotClipId})`}>
-                  <AnimatedSvgGroup animatedProps={animatedChartPlotProps}>
-                    <Line
-                      stroke="rgba(149, 162, 188, 0.22)"
-                      strokeDasharray="0.36 0.36"
-                      strokeWidth="0.7"
-                      vectorEffect="non-scaling-stroke"
-                      x1={0}
-                      x2={chartEndX}
-                      y1={guideLineY}
-                      y2={guideLineY}
-                    />
-                    {bridgePaths.map((path, index) => (
-                      <Path
-                        d={path}
-                        fill="none"
-                        key={`bridge-${index}`}
-                        stroke={colors.subtle}
-                        strokeDasharray="1.8 1.8"
-                        strokeLinecap="round"
-                        strokeOpacity="0.72"
-                        strokeWidth="0.68"
-                        testID={chartTestID ? `${chartTestID}-bridge-${index}` : undefined}
-                        vectorEffect="non-scaling-stroke"
-                      />
-                    ))}
-                    <G>
-                      {paths.map((path, index) => (
-                        <Path
-                          key={`shadow-${index}`}
-                          d={path}
-                          fill="none"
-                          stroke={shadowColor}
-                          strokeWidth="1.6"
-                          vectorEffect="non-scaling-stroke"
-                        />
-                      ))}
-                      {paths.map((path, index) => (
-                        <Path
-                          key={`line-${index}`}
-                          d={path}
-                          fill="none"
-                          stroke={`url(#${chartId}-stroke)`}
-                          strokeLinecap="round"
-                          strokeWidth="0.8"
-                          vectorEffect="non-scaling-stroke"
-                        />
-                      ))}
-                    </G>
-                    {sleepStageHighlights.map((highlight, index) => (
-                      <Rect
-                        fill="transparent"
-                        height={HEART_CHART_VIEWBOX_HEIGHT}
-                        key={`stage-highlight-probe-${highlight.stage}-${index}`}
-                        testID={highlight.testID}
-                        width={highlight.width}
-                        x={highlight.startX}
-                        y="0"
-                      />
-                    ))}
-                    {sleepStageHighlights.length > 0 && sleepStageHighlightClipId && sleepStageHighlightFillId && activeSleepStageColor ? (
-                      <G clipPath={`url(#${sleepStageHighlightClipId})`}>
-                        <G mask={`url(#${chartId}-fill-mask)`}>
-                          {areas.map((area, areaIndex) => (
-                            <Path
-                              key={`stage-area-${areaIndex}`}
-                              d={area}
-                              fill={`url(#${sleepStageHighlightFillId})`}
-                            />
-                          ))}
-                        </G>
-                        <G>
-                          {paths.map((path, pathIndex) => (
-                            <Path
-                              key={`stage-shadow-${pathIndex}`}
-                              d={path}
-                              fill="none"
-                              stroke={activeSleepStageColor}
-                              strokeOpacity="0.22"
-                              strokeWidth="2.4"
-                              vectorEffect="non-scaling-stroke"
-                            />
-                          ))}
-                          {paths.map((path, pathIndex) => (
-                            <Path
-                              key={`stage-line-${pathIndex}`}
-                              d={path}
-                              fill="none"
-                              stroke={activeSleepStageColor}
-                              strokeLinecap="round"
-                              strokeOpacity="0.96"
-                              strokeWidth="1.3"
-                              vectorEffect="non-scaling-stroke"
-                            />
-                          ))}
-                        </G>
-                      </G>
-                    ) : null}
-                  </AnimatedSvgGroup>
-                </G>
-                {precisionSwapOverlay ? (
-                  <G clipPath={`url(#${chartPlotClipId})`}>
-                    <AnimatedSvgGroup animatedProps={animatedPrecisionSwapOverlayProps}>
-                      <Line
-                        stroke="rgba(149, 162, 188, 0.22)"
-                        strokeDasharray="0.36 0.36"
-                        strokeWidth="0.7"
-                        vectorEffect="non-scaling-stroke"
-                        x1={0}
-                        x2={precisionSwapOverlay.chartEndX}
-                        y1={precisionSwapOverlay.guideLineY}
-                        y2={precisionSwapOverlay.guideLineY}
-                      />
-                      <G mask={`url(#${chartId}-fill-mask)`}>
-                        {precisionSwapOverlay.areas.map((area, index) => (
-                          <Path key={`precision-area-${index}`} d={area} fill={`url(#${chartId}-fill)`} />
-                        ))}
-                      </G>
-                      {precisionSwapOverlay.bridgePaths.map((path, index) => (
-                        <Path
-                          d={path}
-                          fill="none"
-                          key={`precision-bridge-${index}`}
-                          stroke={colors.subtle}
-                          strokeDasharray="1.8 1.8"
-                          strokeLinecap="round"
-                          strokeOpacity="0.72"
-                          strokeWidth="0.68"
-                          vectorEffect="non-scaling-stroke"
-                        />
-                      ))}
-                      <G>
-                        {precisionSwapOverlay.linePaths.map((path, index) => (
-                          <Path
-                            key={`precision-shadow-${index}`}
-                            d={path}
-                            fill="none"
-                            stroke={shadowColor}
-                            strokeWidth="1.6"
-                            vectorEffect="non-scaling-stroke"
-                          />
-                        ))}
-                        {precisionSwapOverlay.linePaths.map((path, index) => (
-                          <Path
-                            key={`precision-line-${index}`}
-                            d={path}
-                            fill="none"
-                            stroke={`url(#${chartId}-stroke)`}
-                            strokeLinecap="round"
-                            strokeWidth="0.8"
-                            vectorEffect="non-scaling-stroke"
-                          />
-                        ))}
-                      </G>
-                    </AnimatedSvgGroup>
-                  </G>
-                ) : null}
-              </AnimatedSvgGroup>
-            </Svg>
-          </Animated.View>
+          <HeartChartSvgPlot
+            activeSleepStageColor={activeSleepStageColor}
+            areas={areas}
+            bridgePaths={bridgePaths}
+            chartContentWidth={chartContentWidth}
+            chartEndX={chartEndX}
+            chartId={chartId}
+            chartPointSpacingValue={chartPointSpacingValue}
+            chartTestID={chartTestID}
+            gradientEnd={gradientEnd}
+            gradientStart={gradientStart}
+            guideLineY={guideLineY}
+            paths={paths}
+            shadowColor={shadowColor}
+            sleepStageHighlightClipId={sleepStageHighlightClipId}
+            sleepStageHighlightFillId={sleepStageHighlightFillId}
+            sleepStageHighlights={sleepStageHighlights}
+            viewportWidth={viewportWidth}
+            viewportZoomAnchorIndex={viewportZoomAnchorIndex}
+            viewportZoomAnchorScreenX={viewportZoomAnchorScreenX}
+            viewportZoomScale={viewportZoomScale}
+          />
           <View collapsable={false} style={styles.overlay} testID={chartTestID} {...panResponder.panHandlers}>
-            {selectionX !== null && selectionY !== null ? (
-              <Svg height="100%" pointerEvents="none" preserveAspectRatio="none" viewBox="0 0 100 40" width="100%">
-                <Line
-                  stroke={accentColor}
-                  strokeDasharray="2 2"
-                  strokeOpacity="0.35"
-                  strokeWidth="0.7"
-                  x1={selectionX}
-                  x2={selectionX}
-                  y1="2"
-                  y2={TREND_VIEWBOX_BASELINE}
-                />
-                <Circle cx={selectionX} cy={selectionY} fill={accentColor} opacity="0.18" r="4.6" />
-                <Circle
-                  cx={selectionX}
-                  cy={selectionY}
-                  fill={accentColor}
-                  r="1.9"
-                  stroke={colors.background}
-                  strokeWidth="0.9"
-                  testID={chartTestID ? `${chartTestID}-active-dot` : undefined}
-                />
-              </Svg>
-            ) : null}
+            <ChartScrubOverlay
+              backgroundColor={colors.background}
+              chartHeight={viewportHeight}
+              chartWidth={viewportWidth}
+              dotTestID={chartTestID ? `${chartTestID}-active-dot` : undefined}
+              dotX={selectionX}
+              dotY={selectionY}
+              guideTestID={chartTestID ? `${chartTestID}-active-guide` : undefined}
+              lineBottom={TREND_VIEWBOX_BASELINE}
+              lineOpacity={0.35}
+              lineTop={2}
+              lineX={selectionX}
+              strokeColor={accentColor}
+              viewBoxHeight={HEART_CHART_VIEWBOX_HEIGHT}
+              viewBoxWidth={100}
+            />
           </View>
           {activityDraftVisual && activityDraft ? (
             <View pointerEvents="box-none" style={styles.activityDraftLayer}>

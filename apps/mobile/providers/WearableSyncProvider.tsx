@@ -26,11 +26,8 @@ import {
   type WearableLiveEvent,
   type WearableScanResult,
 } from '@/types/device';
-import { parseSqliteDateTime } from '@/utils/dateTime';
 
 const MAX_LIVE_EVENTS = 200;
-const FOREGROUND_AUTO_SYNC_INTERVAL_MS = 15 * 60 * 1000;
-const FOREGROUND_AUTO_SYNC_MIN_DELAY_MS = 5 * 1000;
 
 const SHOULD_LOG_MOBILE_SYNC_PERF =
   typeof __DEV__ !== 'undefined' &&
@@ -62,7 +59,7 @@ export interface WearableSyncContextValue {
   scanResults: WearableScanResult[];
   scan: () => Promise<void>;
   loadSeededData: () => Promise<void>;
-  pairDevice: (device: WearableScanResult) => Promise<SyncResult | null>;
+  pairDevice: (device: WearableScanResult) => Promise<void>;
   selectDevice: (device: WearableScanResult) => Promise<void>;
   forgetDevice: () => Promise<void>;
   syncSelected: (options?: { showOverlay?: boolean }) => Promise<SyncResult | null>;
@@ -92,7 +89,7 @@ interface WearableScanContextValue {
 interface WearableActionsContextValue {
   scan: () => Promise<void>;
   loadSeededData: () => Promise<void>;
-  pairDevice: (device: WearableScanResult) => Promise<SyncResult | null>;
+  pairDevice: (device: WearableScanResult) => Promise<void>;
   selectDevice: (device: WearableScanResult) => Promise<void>;
   forgetDevice: () => Promise<void>;
   syncSelected: (options?: { showOverlay?: boolean }) => Promise<SyncResult | null>;
@@ -139,7 +136,7 @@ export const defaultWearableSyncContextValue: WearableSyncContextValue = {
   scanResults: [],
   scan: async () => {},
   loadSeededData: async () => {},
-  pairDevice: async () => null,
+  pairDevice: async () => {},
   selectDevice: async () => {},
   forgetDevice: async () => {},
   syncSelected: async () => null,
@@ -236,13 +233,7 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
   const [progress, setProgress] = useState<SyncProgress>(defaultWearableSyncContextValue.progress);
   const [scanResults, setScanResults] = useState<WearableScanResult[]>([]);
   const [appState, setAppState] = useState<AppStateStatus>(AppState.currentState);
-  const [lastSyncAttemptAtMs, setLastSyncAttemptAtMs] = useState<number | null>(null);
-  const appStateRef = useRef(appState);
   const backgroundSyncStateRef = useRef(backgroundSyncState);
-
-  useEffect(() => {
-    appStateRef.current = appState;
-  }, [appState]);
 
   useEffect(() => {
     backgroundSyncStateRef.current = backgroundSyncState;
@@ -372,7 +363,6 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
 
   const runSyncSelected = useCallback(
     async (options?: { showOverlay?: boolean }) => {
-      setLastSyncAttemptAtMs(Date.now());
       const showOverlay = options?.showOverlay ?? true;
       const syncStartedAt = Date.now();
 
@@ -405,35 +395,6 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
     },
     [appendLiveEvent, refreshBackgroundState, service, triggerDerivedRefresh],
   );
-
-  useEffect(() => {
-    const syncBlocked = progress.status === 'scanning' || isBlockingSyncStatus(progress.status);
-    if (!isReady || !deviceState.id || appState !== 'active' || syncBlocked) {
-      return;
-    }
-
-    const lastSyncedAtMs = deviceState.lastSyncedAt
-      ? parseSqliteDateTime(deviceState.lastSyncedAt).getTime()
-      : null;
-    const lastActivityAtMs = Math.max(lastSyncAttemptAtMs ?? 0, lastSyncedAtMs ?? 0);
-    const elapsedMs = lastActivityAtMs > 0 ? Date.now() - lastActivityAtMs : Number.POSITIVE_INFINITY;
-    const delayMs =
-      lastActivityAtMs > 0
-        ? Math.max(FOREGROUND_AUTO_SYNC_INTERVAL_MS - elapsedMs, FOREGROUND_AUTO_SYNC_MIN_DELAY_MS)
-        : FOREGROUND_AUTO_SYNC_MIN_DELAY_MS;
-
-    const timer = setTimeout(() => {
-      if (appStateRef.current !== 'active') {
-        return;
-      }
-
-      void runSyncSelected({ showOverlay: false });
-    }, delayMs);
-
-    return () => {
-      clearTimeout(timer);
-    };
-  }, [appState, deviceState.id, deviceState.lastSyncedAt, isReady, lastSyncAttemptAtMs, progress.status, runSyncSelected]);
 
   const scan = useCallback(async () => {
     setProgress({
@@ -480,20 +441,19 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
       resetLiveEvents();
       setScanResults([]);
       setProgress({
-        status: 'connecting',
-        message: `Pairing ${device.name} and starting the first sync...`,
+        status: 'idle',
+        message: `Paired ${device.name}. Run a manual sync when you're ready to import data.`,
       });
       setDeviceState(await service.getDeviceState());
-      return runSyncSelected();
+      await refreshBackgroundState();
     },
-    [resetLiveEvents, runSyncSelected, service],
+    [refreshBackgroundState, resetLiveEvents, service],
   );
 
   const selectDevice = useCallback(
     async (device: WearableScanResult) => {
       await service.selectDevice(device);
       resetLiveEvents();
-      setLastSyncAttemptAtMs(null);
       setDeviceState(await service.getDeviceState());
       await refreshBackgroundState();
       setProgress({
@@ -507,7 +467,6 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
   const forgetDevice = useCallback(async () => {
     await service.forgetDevice();
     resetLiveEvents();
-    setLastSyncAttemptAtMs(null);
     setDeviceState(emptyDeviceState);
     await refreshBackgroundState();
     setScanResults([]);
