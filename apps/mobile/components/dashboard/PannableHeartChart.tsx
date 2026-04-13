@@ -1360,6 +1360,37 @@ export function PannableHeartChart({
     },
     [lockYAxisDomain],
   );
+  const animateYAxisDomainWhileLocked = useCallback(
+    (nextDomain: { min: number; max: number } | null, durationMs: number) => {
+      if (!nextDomain) {
+        scheduleYAxisDomainUnlock(durationMs);
+        return;
+      }
+
+      lockYAxisDomain();
+
+      if (durationMs <= 0) {
+        focusedDomainMin.value = nextDomain.min;
+        focusedDomainMax.value = nextDomain.max;
+        setIsYAxisDomainLocked(false);
+        return;
+      }
+
+      focusedDomainMin.value = withTiming(nextDomain.min, {
+        duration: durationMs,
+        easing: Easing.out(Easing.cubic),
+      });
+      focusedDomainMax.value = withTiming(nextDomain.max, {
+        duration: durationMs,
+        easing: Easing.out(Easing.cubic),
+      });
+      yAxisTransitionTimeoutRef.current = setTimeout(() => {
+        yAxisTransitionTimeoutRef.current = null;
+        setIsYAxisDomainLocked(false);
+      }, durationMs);
+    },
+    [focusedDomainMax, focusedDomainMin, lockYAxisDomain, scheduleYAxisDomainUnlock],
+  );
   const focusedMarkerDomain = useMemo(
     () => buildHeartMarkerDomain(points, focusedMarker),
     [focusedMarker, points],
@@ -1693,6 +1724,7 @@ export function PannableHeartChart({
         viewportZoomScale.value * (nextAnchorIndex - viewportZoomAnchorIndex.value) * chartPointSpacing;
       const nextAnchorScreenX = nextZoomScale * (nextAnchorIndex - clampedWindowStart) * chartPointSpacing;
       const isFocusStateChanging = focusedMarkerId !== nextFocusedMarkerId;
+      const isReturningFromFocusedMarker = focusedMarkerId !== null && nextFocusedMarkerId === null;
 
       pendingLoadMoreRef.current = false;
       loadRequested.value = false;
@@ -1704,7 +1736,11 @@ export function PannableHeartChart({
       isAxisDragging.value = false;
 
       if (viewportWidth > 0) {
-        scheduleYAxisDomainUnlock(FOCUS_ZOOM_DURATION_MS);
+        if (isReturningFromFocusedMarker) {
+          animateYAxisDomainWhileLocked(nextVisibleDomain, FOCUS_ZOOM_DURATION_MS);
+        } else {
+          scheduleYAxisDomainUnlock(FOCUS_ZOOM_DURATION_MS);
+        }
       } else {
         unlockYAxisDomain();
       }
@@ -1765,6 +1801,7 @@ export function PannableHeartChart({
       focusTargetDomainMin,
       isFocusDomainSourceFrozen,
       markers,
+      animateYAxisDomainWhileLocked,
       reportFocusTransitionStateChange,
       scheduleYAxisDomainUnlock,
       scheduleFocusTransitionSettled,
