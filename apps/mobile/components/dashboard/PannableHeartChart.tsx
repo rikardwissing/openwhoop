@@ -65,6 +65,8 @@ const FOCUS_ZOOM_MAX_DURATION_MS = 420;
 const FOCUS_ZOOM_DURATION_PER_OCTAVE_MS = 42;
 const Y_AXIS_LAG_DURATION_MS = 180;
 const DEFAULT_HEART_ACCENT_TRANSITION_DURATION_MS = 240;
+const PINCH_ACTIVATION_PAN_THRESHOLD_PX = 4;
+const PINCH_ACTIVATION_SCALE_THRESHOLD = 0.015;
 const HEART_CHART_VIEWBOX_HEIGHT = 40;
 const MARKER_BADGE_SIZE = 24;
 const MIN_MARKER_BAND_WIDTH = 0.15;
@@ -115,6 +117,27 @@ function projectHeartOverlayX(
   'worklet';
 
   return anchorScreenX + (rawX - anchorIndex * pointSpacing) * zoomScale;
+}
+
+function getPinchTouchMetrics(
+  touches: readonly { absoluteX: number; absoluteY: number }[],
+) {
+  'worklet';
+
+  const firstTouch = touches[0];
+  const secondTouch = touches[1];
+  if (!firstTouch || !secondTouch) {
+    return null;
+  }
+
+  const deltaX = secondTouch.absoluteX - firstTouch.absoluteX;
+  const deltaY = secondTouch.absoluteY - firstTouch.absoluteY;
+
+  return {
+    centerX: (firstTouch.absoluteX + secondTouch.absoluteX) / 2,
+    centerY: (firstTouch.absoluteY + secondTouch.absoluteY) / 2,
+    distance: Math.sqrt(deltaX * deltaX + deltaY * deltaY),
+  };
 }
 
 function sanitizeMarkerId(value: string) {
@@ -1270,6 +1293,7 @@ export function PannableHeartChart({
   const safeWindowPointCount = Math.min(Math.max(activeWindowPointCount, 2), Math.max(points.length, 1));
   const maxWindowStart = Math.max(0, points.length - safeWindowPointCount);
   const [windowStart, setWindowStart] = useState(maxWindowStart);
+  const [pinchPreviewWindow, setPinchPreviewWindow] = useState<HeartViewportWindowState | null>(null);
   const [focusedMarkerId, setFocusedMarkerId] = useState<string | null>(null);
   const windowStartRef = useRef(maxWindowStart);
   const maxWindowStartRef = useRef(maxWindowStart);
@@ -1326,11 +1350,17 @@ export function PannableHeartChart({
   const pinchAnchorIndex = useSharedValue(0);
   const pinchAnchorScreenX = useSharedValue(0);
   const pinchCommitted = useSharedValue(false);
+  const pinchGestureActive = useSharedValue(false);
+  const pinchActivationStartDistance = useSharedValue(0);
+  const pinchActivationStartCenterX = useSharedValue(0);
+  const pinchActivationStartCenterY = useSharedValue(0);
 
   const pointSpacing = getHeartViewportPointSpacing(viewportWidth, safeWindowPointCount);
   const basePointSpacing = getHeartViewportPointSpacing(viewportWidth, plotBaseWindowPointCount);
   const chartPointSpacing = basePointSpacing > 0 ? basePointSpacing : 1;
   const viewBoxWidth = getHeartViewBoxWidth(safeWindowPointCount);
+  const effectiveWindowPointCount = pinchPreviewWindow?.windowPointCount ?? safeWindowPointCount;
+  const effectiveWindowStart = pinchPreviewWindow?.windowStart ?? windowStart;
   const baseDomain = useMemo(() => buildTrendDomain(points, { mode: 'line' }), [points]);
   const [isYAxisDomainLocked, setIsYAxisDomainLocked] = useState(false);
   const focusTransitionProgress = useSharedValue(focusedMarkerId !== null ? 1 : 0);
@@ -1414,8 +1444,8 @@ export function PannableHeartChart({
   );
 
   const axisLabels = useMemo(
-    () => buildHeartAxisLabels(points, safeWindowPointCount, anchorDayKey, windowStart, pointIntervalMinutes),
-    [anchorDayKey, pointIntervalMinutes, points, safeWindowPointCount, windowStart],
+    () => buildHeartAxisLabels(points, effectiveWindowPointCount, anchorDayKey, effectiveWindowStart, pointIntervalMinutes),
+    [anchorDayKey, effectiveWindowPointCount, effectiveWindowStart, pointIntervalMinutes, points],
   );
   const visibleWindowDomain = useMemo(
     () => buildVisibleHeartDomain(points, safeWindowPointCount, windowStart),
@@ -1688,15 +1718,40 @@ export function PannableHeartChart({
   }, []);
 
   const handlePinchZoomStart = useCallback(() => {
+    setPinchPreviewWindow(null);
     ensureScrollLock();
     commitSelection(null);
     lockYAxisDomain();
   }, [commitSelection, ensureScrollLock, lockYAxisDomain]);
 
   const handlePinchZoomCancel = useCallback(() => {
+    setPinchPreviewWindow(null);
     releaseScrollLock();
     unlockYAxisDomain();
   }, [releaseScrollLock, unlockYAxisDomain]);
+
+  const syncPinchPreviewWindow = useCallback(
+    (nextWindowPointCount: number, nextWindowStart: number) => {
+      const resolvedWindowPointCount = Math.min(Math.max(nextWindowPointCount, 2), Math.max(points.length, 1));
+      const nextMaxWindowStart = Math.max(0, points.length - resolvedWindowPointCount);
+      const clampedWindowStart = clamp(nextWindowStart, 0, nextMaxWindowStart);
+
+      setPinchPreviewWindow((current) => {
+        if (
+          current?.windowPointCount === resolvedWindowPointCount &&
+          current.windowStart === clampedWindowStart
+        ) {
+          return current;
+        }
+
+        return {
+          windowPointCount: resolvedWindowPointCount,
+          windowStart: clampedWindowStart,
+        };
+      });
+    },
+    [points.length],
+  );
 
   const updateSelection = useCallback(
     (touchX: number) => {
@@ -1949,13 +2004,14 @@ export function PannableHeartChart({
       nextWindowStart: number,
       nextAnchorIndex: number,
     ) => {
+      syncPinchPreviewWindow(nextWindowPointCount, nextWindowStart);
       pendingPinchZoomSyncRef.current = {
         windowPointCount: nextWindowPointCount,
       };
       applyWindowZoom(nextWindowPointCount, nextWindowStart, null, nextAnchorIndex);
       onPinchZoomStepChange?.(nextZoomValue);
     },
-    [applyWindowZoom, onPinchZoomStepChange],
+    [applyWindowZoom, onPinchZoomStepChange, syncPinchPreviewWindow],
   );
 
   const syncFocusedWindowInstant = useCallback(
@@ -2443,6 +2499,16 @@ export function PannableHeartChart({
   ]);
 
   useEffect(() => {
+    if (
+      pinchPreviewWindow &&
+      pinchPreviewWindow.windowPointCount === safeWindowPointCount &&
+      pinchPreviewWindow.windowStart === windowStart
+    ) {
+      setPinchPreviewWindow(null);
+    }
+  }, [pinchPreviewWindow, safeWindowPointCount, windowStart]);
+
+  useEffect(() => {
     if (points.length === 0) {
       commitSelection(null);
       releaseScrollLock();
@@ -2493,10 +2559,10 @@ export function PannableHeartChart({
 
   useEffect(() => {
     onViewportWindowChange?.({
-      windowPointCount: safeWindowPointCount,
-      windowStart,
+      windowPointCount: effectiveWindowPointCount,
+      windowStart: effectiveWindowStart,
     });
-  }, [onViewportWindowChange, safeWindowPointCount, windowStart]);
+  }, [effectiveWindowPointCount, effectiveWindowStart, onViewportWindowChange]);
 
   useEffect(() => {
     const hasPendingFocusRequest = requestedFocusedMarker !== null || requestedFocusedMarkerId !== null;
@@ -2818,25 +2884,72 @@ export function PannableHeartChart({
     ],
   );
   const canPinchZoom = Boolean(onPinchZoomStepChange && pinchZoomSteps && pinchZoomSteps.length > 1 && activityDraft === null);
-  const graphPanGesture = useMemo(
-    () =>
-      Gesture.Pan()
-        .enabled(canPinchZoom && !isFocusedWindow)
-        .minPointers(2)
-        .maxPointers(2)
-        .activeOffsetX([-2, 2])
-        .failOffsetY([-12, 12])
-        .onStart(beginViewportPan)
-        .onUpdate((event) => {
-          updateViewportPan(event.translationX);
-        })
-        .onFinalize(finalizeViewportPan),
-    [beginViewportPan, canPinchZoom, finalizeViewportPan, isFocusedWindow, updateViewportPan],
-  );
   const pinchZoomGesture = useMemo(
     () =>
       Gesture.Pinch()
+        .manualActivation(true)
         .enabled(canPinchZoom && !isFocusedWindow)
+        .onTouchesDown((event) => {
+          const touchMetrics = getPinchTouchMetrics(event.allTouches);
+          if (!touchMetrics) {
+            return;
+          }
+
+          pinchActivationStartDistance.value = touchMetrics.distance;
+          pinchActivationStartCenterX.value = touchMetrics.centerX;
+          pinchActivationStartCenterY.value = touchMetrics.centerY;
+        })
+        .onTouchesMove((event, manager) => {
+          if (pinchGestureActive.value) {
+            return;
+          }
+
+          const touchMetrics = getPinchTouchMetrics(event.allTouches);
+          if (!touchMetrics) {
+            return;
+          }
+
+          const startDistance = pinchActivationStartDistance.value > 0
+            ? pinchActivationStartDistance.value
+            : touchMetrics.distance;
+          const deltaCenterX = touchMetrics.centerX - pinchActivationStartCenterX.value;
+          const deltaCenterY = touchMetrics.centerY - pinchActivationStartCenterY.value;
+          const centerShift = Math.sqrt(deltaCenterX * deltaCenterX + deltaCenterY * deltaCenterY);
+          const scaleShift = Math.abs(touchMetrics.distance - startDistance) / Math.max(startDistance, 0.0001);
+
+          if (
+            centerShift >= PINCH_ACTIVATION_PAN_THRESHOLD_PX ||
+            scaleShift >= PINCH_ACTIVATION_SCALE_THRESHOLD
+          ) {
+            manager.activate();
+          }
+        })
+        .onTouchesUp((event, manager) => {
+          const touchMetrics = getPinchTouchMetrics(event.allTouches);
+          if (touchMetrics) {
+            pinchActivationStartDistance.value = touchMetrics.distance;
+            pinchActivationStartCenterX.value = touchMetrics.centerX;
+            pinchActivationStartCenterY.value = touchMetrics.centerY;
+            return;
+          }
+
+          pinchActivationStartDistance.value = 0;
+          pinchActivationStartCenterX.value = 0;
+          pinchActivationStartCenterY.value = 0;
+
+          if (!pinchGestureActive.value) {
+            manager.fail();
+          }
+        })
+        .onTouchesCancelled((_event, manager) => {
+          pinchActivationStartDistance.value = 0;
+          pinchActivationStartCenterX.value = 0;
+          pinchActivationStartCenterY.value = 0;
+
+          if (!pinchGestureActive.value) {
+            manager.fail();
+          }
+        })
         .onStart((event) => {
           if (!pinchZoomScaleBounds || viewportWidth <= 0) {
             return;
@@ -2852,6 +2965,7 @@ export function PannableHeartChart({
           cancelAnimation(viewportZoomScale);
           cancelAnimation(viewportZoomAnchorScreenX);
 
+          pinchGestureActive.value = true;
           pinchCommitted.value = false;
           pinchStartZoomScale.value = currentScale;
           pinchAnchorScreenX.value = clamp(event.focalX, 0, viewportWidth);
@@ -2872,19 +2986,41 @@ export function PannableHeartChart({
             return;
           }
 
+          const nextSafePointSpacing = chartPointSpacingValue.value;
+          if (nextSafePointSpacing <= 0) {
+            return;
+          }
+
           const numberOfPointers = (event as { numberOfPointers?: number }).numberOfPointers ?? 2;
           if (numberOfPointers < 2) {
             return;
           }
 
-          viewportZoomScale.value = applyElasticHeartZoomScaleLimit(
+          const nextScale = applyElasticHeartZoomScaleLimit(
             pinchStartZoomScale.value * event.scale,
             pinchZoomScaleBounds.minZoomScale,
             pinchZoomScaleBounds.maxZoomScale,
           );
+          viewportZoomScale.value = nextScale;
           pinchAnchorScreenX.value = clamp(event.focalX, 0, viewportWidth);
           viewportZoomAnchorIndex.value = pinchAnchorIndex.value;
           viewportZoomAnchorScreenX.value = pinchAnchorScreenX.value;
+
+          const nextWindowPointCount = clamp(
+            getHeartWindowPointCountForZoomScale(
+              plotBaseWindowPointCount,
+              clamp(nextScale, pinchZoomScaleBounds.minZoomScale, pinchZoomScaleBounds.maxZoomScale),
+            ),
+            pinchZoomScaleBounds.minWindowPointCount,
+            pinchZoomScaleBounds.maxWindowPointCount,
+          );
+          const nextWindowStart = clamp(
+            pinchAnchorIndex.value - pinchAnchorScreenX.value / Math.max(nextScale * nextSafePointSpacing, 0.0001),
+            0,
+            Math.max(points.length - nextWindowPointCount, 0),
+          );
+
+          runOnJS(syncPinchPreviewWindow)(nextWindowPointCount, nextWindowStart);
         })
         .onEnd(() => {
           if (!pinchZoomSteps || !pinchZoomScaleBounds || viewportWidth <= 0) {
@@ -2931,6 +3067,11 @@ export function PannableHeartChart({
           );
         })
         .onFinalize(() => {
+          pinchGestureActive.value = false;
+          pinchActivationStartDistance.value = 0;
+          pinchActivationStartCenterX.value = 0;
+          pinchActivationStartCenterY.value = 0;
+
           if (!pinchCommitted.value) {
             runOnJS(handlePinchZoomCancel)();
           }
@@ -2949,21 +3090,22 @@ export function PannableHeartChart({
       isFocusedWindow,
       pinchAnchorIndex,
       pinchAnchorScreenX,
+      pinchActivationStartCenterX,
+      pinchActivationStartCenterY,
+      pinchActivationStartDistance,
       pinchCommitted,
+      pinchGestureActive,
       pinchStartZoomScale,
       pinchZoomScaleBounds,
       pinchZoomSteps,
       plotBaseWindowPointCount,
       points.length,
+      syncPinchPreviewWindow,
       viewportWidth,
       viewportZoomAnchorIndex,
       viewportZoomAnchorScreenX,
       viewportZoomScale,
     ],
-  );
-  const chartViewportGesture = useMemo(
-    () => Gesture.Race(pinchZoomGesture, graphPanGesture),
-    [graphPanGesture, pinchZoomGesture],
   );
 
   const animatedViewportZoomStyle = useAnimatedStyle(
@@ -3129,7 +3271,7 @@ export function PannableHeartChart({
         }}
         style={[styles.chartArea, { height }]}
         testID={chartTestID ? `${chartTestID}-viewport` : undefined}>
-        <GestureDetector gesture={chartViewportGesture}>
+        <GestureDetector gesture={pinchZoomGesture}>
           <View style={styles.chartViewport}>
           {markerVisuals.length > 0 ? (
             <View pointerEvents="none" style={styles.markerBandViewport}>
