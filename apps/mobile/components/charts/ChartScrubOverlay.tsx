@@ -14,6 +14,25 @@ function mapViewBoxToPixels(value: number, viewBoxSize: number, renderSize: numb
   return (value / viewBoxSize) * renderSize;
 }
 
+export interface ChartScrubOverlayProps {
+  backgroundColor?: string;
+  chartHeight: number;
+  chartWidth: number;
+  dotTestID?: string;
+  dotX: number | null;
+  dotY: number | null;
+  guideTestID?: string;
+  lineBottom: number;
+  lineOverflowBottom?: number;
+  lineOpacity: number;
+  lineTop: number;
+  lineOverflowTop?: number;
+  lineX: number | null;
+  strokeColor: string;
+  viewBoxHeight: number;
+  viewBoxWidth: number;
+}
+
 export function ChartScrubOverlay({
   backgroundColor = colors.background,
   chartHeight,
@@ -23,28 +42,15 @@ export function ChartScrubOverlay({
   dotY,
   guideTestID,
   lineBottom,
+  lineOverflowBottom = 0,
   lineOpacity,
   lineTop,
+  lineOverflowTop = 0,
   lineX,
   strokeColor,
   viewBoxHeight,
   viewBoxWidth,
-}: {
-  backgroundColor?: string;
-  chartHeight: number;
-  chartWidth: number;
-  dotTestID?: string;
-  dotX: number | null;
-  dotY: number | null;
-  guideTestID?: string;
-  lineBottom: number;
-  lineOpacity: number;
-  lineTop: number;
-  lineX: number | null;
-  strokeColor: string;
-  viewBoxHeight: number;
-  viewBoxWidth: number;
-}) {
+}: ChartScrubOverlayProps) {
   if (lineX === null || chartWidth <= 0 || chartHeight <= 0) {
     return null;
   }
@@ -52,7 +58,9 @@ export function ChartScrubOverlay({
   const lineXPx = clamp(mapViewBoxToPixels(lineX, viewBoxWidth, chartWidth), 0, chartWidth);
   const lineTopPx = clamp(mapViewBoxToPixels(lineTop, viewBoxHeight, chartHeight), 0, chartHeight);
   const lineBottomPx = clamp(mapViewBoxToPixels(lineBottom, viewBoxHeight, chartHeight), lineTopPx, chartHeight);
-  const lineHeightPx = Math.max(lineBottomPx - lineTopPx, 0);
+  const extendedLineTopPx = lineTopPx - lineOverflowTop;
+  const extendedLineBottomPx = lineBottomPx + lineOverflowBottom;
+  const lineHeightPx = Math.max(extendedLineBottomPx - extendedLineTopPx, 0);
   const horizontalScale = chartWidth / Math.max(viewBoxWidth, 1);
   const outerRadius = clamp(5.6 * horizontalScale, 5.25, 9.5);
   const innerRadius = clamp(2.45 * horizontalScale, 2.4, 4.6);
@@ -74,7 +82,7 @@ export function ChartScrubOverlay({
               height: lineHeightPx,
               left: lineXPx,
               opacity: lineOpacity,
-              top: lineTopPx,
+              top: extendedLineTopPx,
             },
           ]}
           testID={guideTestID}
@@ -122,6 +130,7 @@ export function ChartScrubOverlay({
 const styles = StyleSheet.create({
   overlay: {
     ...StyleSheet.absoluteFillObject,
+    overflow: 'visible',
   },
   guide: {
     borderLeftWidth: 1,

@@ -1034,7 +1034,9 @@ export function HeartCard({
     return null;
   }, [baseResolvedMarkers, displayedFocusedMarker, editingBaseMarker, isDraftEditing]);
   const cardAccentColor = displayedFocusedCardContent?.accentColor ?? colors.success;
-  const chartAccentColor = displayedFocusedCardContent?.chartAccentColor ?? colors.primary;
+  const chartAccentColor = isDraftEditing
+    ? colors.primary
+    : displayedFocusedCardContent?.chartAccentColor ?? colors.primary;
   const isSleepFocused = displayedFocusedMarker?.kind === 'sleep';
   const isActivityFocused = displayedFocusedMarker?.kind === 'activity' || displayedFocusedMarker?.kind === 'nap';
   const cardAccentTransitionProgress = useSharedValue(1);
