@@ -385,6 +385,34 @@ export function buildHeartViewportDayLabel(
   return formatShortDate(viewportMidpointDate);
 }
 
+function resolveHeartMinuteOffset(
+  points: readonly { label: string }[],
+  anchorDayKey: string | undefined,
+  timestampMs: number,
+  pointIntervalMinutes = DEFAULT_HEART_POINT_INTERVAL_MINUTES,
+) {
+  if (!anchorDayKey || points.length === 0 || !Number.isFinite(timestampMs)) {
+    return null;
+  }
+
+  const latestLabel = points.at(-1)?.label;
+  if (!latestLabel) {
+    return null;
+  }
+
+  const latestPointMinutes = parseHeartAxisLabelMinutes(latestLabel);
+  if (latestPointMinutes === null) {
+    return null;
+  }
+
+  const anchorDate = new Date(`${anchorDayKey}T00:00:00`);
+  const latestPointDate = addMinutes(anchorDate, latestPointMinutes);
+  const totalSeriesMinutes = Math.max((points.length - 1) * pointIntervalMinutes, 1);
+  const minuteOffset = totalSeriesMinutes + (timestampMs - latestPointDate.getTime()) / 60000;
+
+  return clamp(minuteOffset, 0, totalSeriesMinutes);
+}
+
 export function buildHeartViewportLabel(
   points: readonly TrendPoint[],
   windowPointCount: number,
@@ -783,29 +811,39 @@ function buildHeartSleepStageHighlights(
 }
 
 function HeartMarkerBadge({
+  chartPointSpacingValue,
   marker,
   onPress,
-  zoomScale,
+  viewportZoomAnchorIndex,
+  viewportZoomAnchorScreenX,
+  viewportZoomScale,
 }: {
+  chartPointSpacingValue: SharedValue<number>;
   marker: HeartMarkerVisual;
   onPress?: () => void;
-  zoomScale: SharedValue<number>;
+  viewportZoomAnchorIndex: SharedValue<number>;
+  viewportZoomAnchorScreenX: SharedValue<number>;
+  viewportZoomScale: SharedValue<number>;
 }) {
-  const animatedBadgeScaleStyle = useAnimatedStyle(
-    () => ({
-      transform: [{ scaleX: 1 / Math.max(zoomScale.value, 0.0001) }],
-    }),
-    [zoomScale],
+  const animatedBadgeWrapStyle = useAnimatedStyle(
+    () => {
+      const projectedCenterX = projectHeartOverlayX(
+        marker.centerX,
+        viewportZoomAnchorScreenX.value,
+        viewportZoomAnchorIndex.value,
+        chartPointSpacingValue.value,
+        Math.max(viewportZoomScale.value, 0.0001),
+      );
+
+      return {
+        left: projectedCenterX - MARKER_BADGE_SIZE / 2,
+        top: 8,
+      };
+    },
+    [chartPointSpacingValue, marker.centerX, viewportZoomAnchorIndex, viewportZoomAnchorScreenX, viewportZoomScale],
   );
 
-  const badgeWrapStyle = [
-    styles.markerBadgeWrap,
-    {
-      left: marker.centerX - MARKER_BADGE_SIZE / 2,
-      top: 8,
-    },
-    animatedBadgeScaleStyle,
-  ];
+  const badgeWrapStyle = [styles.markerBadgeWrap, animatedBadgeWrapStyle];
 
   const badgeStyle = [
     styles.markerBadge,
@@ -844,6 +882,60 @@ function HeartMarkerBadge({
         <Ionicons color={marker.accentColor} name={marker.iconName} size={12} />
       </View>
     </Animated.View>
+  );
+}
+
+function HeartMarkerBand({
+  chartPointSpacingValue,
+  marker,
+  markerBandHeight,
+  markerBandRadius,
+  markerBandTop,
+  viewportZoomAnchorIndex,
+  viewportZoomAnchorScreenX,
+  viewportZoomScale,
+}: {
+  chartPointSpacingValue: SharedValue<number>;
+  marker: HeartMarkerVisual;
+  markerBandHeight: number;
+  markerBandRadius: number;
+  markerBandTop: number;
+  viewportZoomAnchorIndex: SharedValue<number>;
+  viewportZoomAnchorScreenX: SharedValue<number>;
+  viewportZoomScale: SharedValue<number>;
+}) {
+  const animatedBandStyle = useAnimatedStyle(
+    () => {
+      const zoomScale = Math.max(viewportZoomScale.value, 0.0001);
+
+      return {
+        left: projectHeartOverlayX(
+          marker.startX,
+          viewportZoomAnchorScreenX.value,
+          viewportZoomAnchorIndex.value,
+          chartPointSpacingValue.value,
+          zoomScale,
+        ),
+        width: Math.max(marker.bandWidth * zoomScale, 1),
+      };
+    },
+    [chartPointSpacingValue, marker.bandWidth, marker.startX, viewportZoomAnchorIndex, viewportZoomAnchorScreenX, viewportZoomScale],
+  );
+
+  return (
+    <Animated.View
+      pointerEvents="none"
+      style={[
+        styles.markerBand,
+        animatedBandStyle,
+        {
+          backgroundColor: marker.backgroundColor,
+          borderRadius: markerBandRadius,
+          height: markerBandHeight,
+          top: markerBandTop,
+        },
+      ]}
+    />
   );
 }
 
@@ -1413,7 +1505,7 @@ export function PannableHeartChart({
         : ((selectionIndex - windowStart) / viewBoxWidth) * 100
       : null;
 
-  const fullSeriesSpan = Math.max(chartContentWidth - chartPointSpacing, chartPointSpacing);
+  const fullSeriesSpan = chartEndX;
   const markerVisuals = useMemo(
     () =>
       mapHeartIntradayMarkersToTrendMarkers(markers).map((marker, index) => {
@@ -1421,14 +1513,31 @@ export function PannableHeartChart({
         const presentation = sourceMarker ? getHeartIntradayMarkerPresentation(sourceMarker) : null;
         const startFraction = clampFraction(marker.startFraction);
         const endFraction = clampFraction(Math.max(marker.startFraction, marker.endFraction));
-        const startX = startFraction * fullSeriesSpan;
-        const endX = endFraction * fullSeriesSpan;
-        const midpoint = clampFraction((startFraction + endFraction) / 2) * fullSeriesSpan;
+        const totalSeriesMinutes = Math.max((points.length - 1) * pointIntervalMinutes, 1);
+        const fractionStartMinuteOffset = clamp(startFraction * totalSeriesMinutes, 0, totalSeriesMinutes);
+        const fractionEndMinuteOffset = clamp(endFraction * totalSeriesMinutes, fractionStartMinuteOffset, totalSeriesMinutes);
+        const exactStartMinuteOffset =
+          sourceMarker?.startTimeMs !== undefined
+            ? resolveHeartMinuteOffset(points, anchorDayKey, sourceMarker.startTimeMs, pointIntervalMinutes)
+            : null;
+        const exactEndMinuteOffset =
+          sourceMarker?.endTimeMs !== undefined
+            ? resolveHeartMinuteOffset(points, anchorDayKey, sourceMarker.endTimeMs, pointIntervalMinutes)
+            : null;
+        const startMinuteOffset = exactStartMinuteOffset ?? fractionStartMinuteOffset;
+        const endMinuteOffset = clamp(
+          exactEndMinuteOffset ?? fractionEndMinuteOffset,
+          startMinuteOffset,
+          totalSeriesMinutes,
+        );
+        const startX = (startMinuteOffset / totalSeriesMinutes) * fullSeriesSpan;
+        const endX = (endMinuteOffset / totalSeriesMinutes) * fullSeriesSpan;
+        const bandWidth = Math.max(endX - startX, MIN_MARKER_BAND_WIDTH);
 
         return {
           ...marker,
-          bandWidth: Math.max(endX - startX, MIN_MARKER_BAND_WIDTH),
-          centerX: midpoint,
+          bandWidth,
+          centerX: startX + bandWidth / 2,
           endFraction,
           isZoomable: sourceMarker ? isZoomableHeartMarkerKind(sourceMarker.kind) : false,
           kind: sourceMarker?.kind ?? 'activity',
@@ -1440,7 +1549,7 @@ export function PannableHeartChart({
           timeLabel: sourceMarker?.timeLabel ?? '',
         } satisfies HeartMarkerVisual;
       }),
-    [chartTestID, fullSeriesSpan, markers],
+    [anchorDayKey, chartTestID, fullSeriesSpan, markers, pointIntervalMinutes, points],
   );
 
   const axisLabels = useMemo(
@@ -3108,27 +3217,6 @@ export function PannableHeartChart({
     ],
   );
 
-  const animatedViewportZoomStyle = useAnimatedStyle(
-    () => ({
-      transform: [{ scaleX: viewportZoomScale.value }],
-    }),
-    [viewportZoomScale],
-  );
-
-  const animatedViewportCameraStyle = useAnimatedStyle(
-    () => ({
-      transform: [{ translateX: viewportZoomAnchorScreenX.value }],
-    }),
-    [viewportZoomAnchorScreenX],
-  );
-
-  const animatedChartContentStyle = useAnimatedStyle(
-    () => ({
-      transform: [{ translateX: -viewportZoomAnchorIndex.value * chartPointSpacingValue.value }],
-    }),
-    [chartPointSpacingValue, viewportZoomAnchorIndex],
-  );
-
   const animatedMarkerLayerStyle = useAnimatedStyle(
     () => ({
       opacity: 1 - focusTransitionProgress.value,
@@ -3275,35 +3363,20 @@ export function PannableHeartChart({
           <View style={styles.chartViewport}>
           {markerVisuals.length > 0 ? (
             <View pointerEvents="none" style={styles.markerBandViewport}>
-              <Animated.View pointerEvents="none" style={[styles.chartCameraLayer, animatedViewportCameraStyle]}>
-                <Animated.View pointerEvents="none" style={[styles.chartZoomLayer, animatedViewportZoomStyle]}>
-                  <Animated.View
-                    pointerEvents="none"
-                    style={[
-                      styles.chartContent,
-                      animatedChartContentStyle,
-                      { width: chartContentWidth },
-                    ]}>
-                    <Animated.View pointerEvents="none" style={[styles.markerBandLayer, animatedMarkerLayerStyle]}>
-                      {markerVisuals.map((marker) => (
-                        <View
-                          key={`marker-band-${marker.id}`}
-                          style={[
-                            styles.markerBand,
-                            {
-                              backgroundColor: marker.backgroundColor,
-                              borderRadius: markerBandRadius,
-                              height: markerBandHeight,
-                              left: marker.startX,
-                              top: markerBandTop,
-                              width: marker.bandWidth,
-                            },
-                          ]}
-                        />
-                      ))}
-                    </Animated.View>
-                  </Animated.View>
-                </Animated.View>
+              <Animated.View pointerEvents="none" style={[styles.markerBandLayer, animatedMarkerLayerStyle]}>
+                {markerVisuals.map((marker) => (
+                  <HeartMarkerBand
+                    key={`marker-band-${marker.id}`}
+                    chartPointSpacingValue={chartPointSpacingValue}
+                    marker={marker}
+                    markerBandHeight={markerBandHeight}
+                    markerBandRadius={markerBandRadius}
+                    markerBandTop={markerBandTop}
+                    viewportZoomAnchorIndex={viewportZoomAnchorIndex}
+                    viewportZoomAnchorScreenX={viewportZoomAnchorScreenX}
+                    viewportZoomScale={viewportZoomScale}
+                  />
+                ))}
               </Animated.View>
             </View>
           ) : null}
@@ -3442,27 +3515,21 @@ export function PannableHeartChart({
             </View>
           ) : null}
           <View pointerEvents={isFocusedWindow || activityDraft ? 'none' : 'box-none'} style={styles.markerViewport}>
-            <Animated.View pointerEvents="box-none" style={[styles.chartCameraLayer, animatedViewportCameraStyle]}>
-              <Animated.View pointerEvents="box-none" style={[styles.chartZoomLayer, animatedViewportZoomStyle]}>
-                <Animated.View
-                  pointerEvents="box-none"
-                  style={[styles.chartContent, animatedChartContentStyle, { width: chartContentWidth }]}
-                  testID={chartTestID ? `${chartTestID}-content` : undefined}>
-                  {hasTopMarkers ? (
-                    <Animated.View pointerEvents="box-none" style={[styles.markerLayer, animatedMarkerLayerStyle]}>
-                      {markerVisuals.map((marker) => (
-                        <HeartMarkerBadge
-                          key={`marker-badge-${marker.id}`}
-                          marker={marker}
-                          onPress={marker.isZoomable ? () => handleMarkerZoomPress(marker) : undefined}
-                          zoomScale={viewportZoomScale}
-                        />
-                      ))}
-                    </Animated.View>
-                  ) : null}
-                </Animated.View>
+            {markerVisuals.length > 0 ? (
+              <Animated.View pointerEvents="box-none" style={[styles.markerLayer, animatedMarkerLayerStyle]}>
+                {markerVisuals.map((marker) => (
+                  <HeartMarkerBadge
+                    key={`marker-badge-${marker.id}`}
+                    chartPointSpacingValue={chartPointSpacingValue}
+                    marker={marker}
+                    onPress={marker.isZoomable ? () => handleMarkerZoomPress(marker) : undefined}
+                    viewportZoomAnchorIndex={viewportZoomAnchorIndex}
+                    viewportZoomAnchorScreenX={viewportZoomAnchorScreenX}
+                    viewportZoomScale={viewportZoomScale}
+                  />
+                ))}
               </Animated.View>
-            </Animated.View>
+            ) : null}
           </View>
           {selectionPoint ? (
             <View
