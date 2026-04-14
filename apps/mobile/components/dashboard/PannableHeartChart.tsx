@@ -54,7 +54,6 @@ import type { HeartIntradayMarker, SleepStage, TrendPoint } from '@/types/health
 import { addMinutes, formatShortDate } from '@/utils/dateTime';
 import { formatMetricNumber } from '@/utils/formatters';
 import { getHeartIntradayMarkerPresentation, mapHeartIntradayMarkersToTrendMarkers } from '@/utils/heartChartMarkers';
-import { logMobilePerfEvent, type PerformanceLogValue } from '@/utils/mobilePerf';
 
 const DEFAULT_HEART_POINT_INTERVAL_MINUTES = 5;
 const LOAD_MORE_EDGE_THRESHOLD_POINTS = 2;
@@ -103,6 +102,18 @@ function clamp(value: number, min: number, max: number) {
 
 function clampFraction(value: number) {
   return Math.min(1, Math.max(0, value));
+}
+
+function projectHeartOverlayX(
+  rawX: number,
+  anchorScreenX: number,
+  anchorIndex: number,
+  pointSpacing: number,
+  zoomScale: number,
+) {
+  'worklet';
+
+  return anchorScreenX + (rawX - anchorIndex * pointSpacing) * zoomScale;
 }
 
 function sanitizeMarkerId(value: string) {
@@ -507,6 +518,21 @@ export function buildFocusedHeartMarkerWindow(
   };
 }
 
+function buildFocusedMarkerReportSignature(marker: HeartIntradayMarker | null) {
+  if (!marker) {
+    return null;
+  }
+
+  return [
+    marker.id,
+    marker.kind,
+    marker.startFraction,
+    marker.endFraction,
+    marker.startTimeMs ?? 'none',
+    marker.endTimeMs ?? 'none',
+  ].join(':');
+}
+
 function mapHeartValueToYInDomain(value: number, domain: NonNullable<ReturnType<typeof buildTrendDomain>>) {
   'worklet';
   const span = Math.max(domain.max - domain.min, 0.0001);
@@ -632,35 +658,6 @@ interface HeartSleepStageHighlight {
 }
 
 const EMPTY_HEART_SLEEP_STAGE_HIGHLIGHTS: HeartSleepStageHighlight[] = [];
-
-function formatRenderTraceValue(value: PerformanceLogValue | undefined) {
-  return value ?? 'null';
-}
-
-function useRenderTrace(label: string, details: Record<string, PerformanceLogValue>) {
-  const renderCountRef = useRef(0);
-  const previousDetailsRef = useRef<Record<string, PerformanceLogValue> | null>(null);
-
-  useEffect(() => {
-    renderCountRef.current += 1;
-    const previousDetails = previousDetailsRef.current;
-    const changes = previousDetails
-      ? Object.entries(details)
-          .filter(([key, value]) => previousDetails[key] !== value)
-          .map(([key, value]) => `${key}:${formatRenderTraceValue(previousDetails[key])}->${formatRenderTraceValue(value)}`)
-          .join('|')
-      : Object.entries(details)
-          .map(([key, value]) => `${key}:${formatRenderTraceValue(value)}`)
-          .join('|');
-
-    logMobilePerfEvent(`${label}.render`, {
-      changes: changes || 'none',
-      render: renderCountRef.current,
-    });
-
-    previousDetailsRef.current = details;
-  });
-}
 
 interface HeartSleepStageSpan {
   endRatio: number;
@@ -893,17 +890,6 @@ const HeartChartSvgPlot = memo(function HeartChartSvgPlot({
           .map((highlight) => `${highlight.stage}:${Math.round(highlight.startX * 10)}:${Math.round(highlight.width * 10)}`)
           .join(',')
       : 'none';
-
-  useRenderTrace(`chart.heart.svgPlot.${chartTestID ?? 'default'}`, {
-    activeSleepStageColor: activeSleepStageColor ?? 'none',
-    areaSignature: plotAreaSignature,
-    bridgeSignature,
-    chartContentWidth: Math.round(chartContentWidth),
-    chartEndX: Math.round(chartEndX),
-    pathSignature: plotPathSignature,
-    sleepHighlightSignature,
-    viewportWidth: Math.round(viewportWidth),
-  });
 
   const animatedChartCameraProps = useAnimatedProps(
     () => ({
@@ -1247,6 +1233,7 @@ export function PannableHeartChart({
   const draftGestureOriginRef = useRef<HeartActivityDraft | null>(activityDraft ?? null);
   const latestActivityDraftRef = useRef<HeartActivityDraft | null>(activityDraft);
   const previousRequestedFocusedMarkerRef = useRef<HeartIntradayMarker | null>(null);
+  const lastReportedFocusedMarkerSignatureRef = useRef<string | null | undefined>(undefined);
   const previousPrecisionContextRef = useRef({
     pointCount: points.length,
     pointIntervalMinutes,
@@ -2007,6 +1994,14 @@ export function PannableHeartChart({
   );
 
   useEffect(() => {
+    if (requestedFocusedMarker !== null) {
+      return;
+    }
+
+    previousRequestedFocusedMarkerRef.current = null;
+  }, [requestedFocusedMarker]);
+
+  useEffect(() => {
     if (!requestedFocusedMarker || previousRequestedFocusedMarkerRef.current === requestedFocusedMarker) {
       return;
     }
@@ -2066,6 +2061,14 @@ export function PannableHeartChart({
     requestedFocusedMarker,
     syncFocusedWindowInstant,
   ]);
+
+  useEffect(() => {
+    if (requestedFocusedMarkerId !== null) {
+      return;
+    }
+
+    requestedFocusMarkerIdRef.current = null;
+  }, [requestedFocusedMarkerId]);
 
   useEffect(() => {
     previousPrecisionContextRef.current = {
@@ -2439,9 +2442,19 @@ export function PannableHeartChart({
   }, [onViewportWindowChange, safeWindowPointCount, windowStart]);
 
   useEffect(() => {
-    if (focusedMarker === null && (requestedFocusedMarker !== null || requestedFocusedMarkerId)) {
+    const hasPendingFocusRequest = requestedFocusedMarker !== null || requestedFocusedMarkerId !== null;
+
+    if (focusedMarker === null && hasPendingFocusRequest) {
       return;
     }
+
+    const nextFocusedMarkerSignature = buildFocusedMarkerReportSignature(focusedMarker);
+
+    if (lastReportedFocusedMarkerSignatureRef.current === nextFocusedMarkerSignature) {
+      return;
+    }
+
+    lastReportedFocusedMarkerSignatureRef.current = nextFocusedMarkerSignature;
 
     onFocusedMarkerChange?.(focusedMarker);
   }, [focusedMarker, onFocusedMarkerChange, requestedFocusedMarker, requestedFocusedMarkerId]);
@@ -2859,11 +2872,97 @@ export function PannableHeartChart({
     }),
     [focusTransitionProgress],
   );
-  const animatedActivityDraftControlScaleStyle = useAnimatedStyle(
-    () => ({
-      transform: [{ scaleX: 1 / Math.max(viewportZoomScale.value, 0.0001) }],
-    }),
-    [viewportZoomScale],
+  const activityDraftBandStartX = activityDraftVisual?.startX ?? 0;
+  const activityDraftBandWidth = activityDraftVisual?.bandWidth ?? 0;
+  const activityDraftBodyLeft = activityDraftVisual?.bodyLeft ?? 0;
+  const activityDraftBodyWidth = activityDraftVisual?.bodyWidth ?? 0;
+  const activityDraftInlineBadgeLeft = activityDraftVisual?.inlineBadgeLeft ?? 0;
+  const activityDraftStartHandleLeft = activityDraftVisual?.startHandleLeft ?? 0;
+  const activityDraftEndHandleLeft = activityDraftVisual?.endHandleLeft ?? 0;
+  const activityDraftInlineBadgeCenterX = activityDraftInlineBadgeLeft + MARKER_BADGE_SIZE / 2;
+  const activityDraftStartHandleCenterX = activityDraftStartHandleLeft + ACTIVITY_DRAFT_HANDLE_WIDTH / 2;
+  const activityDraftEndHandleCenterX = activityDraftEndHandleLeft + ACTIVITY_DRAFT_HANDLE_WIDTH / 2;
+  const animatedActivityDraftBandStyle = useAnimatedStyle(
+    () => {
+      const zoomScale = Math.max(viewportZoomScale.value, 0.0001);
+
+      return {
+        left: projectHeartOverlayX(
+          activityDraftBandStartX,
+          viewportZoomAnchorScreenX.value,
+          viewportZoomAnchorIndex.value,
+          chartPointSpacingValue.value,
+          zoomScale,
+        ),
+        width: Math.max(activityDraftBandWidth * zoomScale, 2),
+      };
+    },
+    [activityDraftBandStartX, activityDraftBandWidth, chartPointSpacingValue, viewportZoomAnchorIndex, viewportZoomAnchorScreenX, viewportZoomScale],
+  );
+  const animatedActivityDraftBodyStyle = useAnimatedStyle(
+    () => {
+      const zoomScale = Math.max(viewportZoomScale.value, 0.0001);
+
+      return {
+        left: projectHeartOverlayX(
+          activityDraftBodyLeft,
+          viewportZoomAnchorScreenX.value,
+          viewportZoomAnchorIndex.value,
+          chartPointSpacingValue.value,
+          zoomScale,
+        ),
+        width: Math.max(activityDraftBodyWidth * zoomScale, ACTIVITY_DRAFT_BODY_MIN_WIDTH),
+      };
+    },
+    [activityDraftBodyLeft, activityDraftBodyWidth, chartPointSpacingValue, viewportZoomAnchorIndex, viewportZoomAnchorScreenX, viewportZoomScale],
+  );
+  const animatedActivityDraftBadgeStyle = useAnimatedStyle(
+    () => {
+      const projectedCenterX = projectHeartOverlayX(
+        activityDraftInlineBadgeCenterX,
+        viewportZoomAnchorScreenX.value,
+        viewportZoomAnchorIndex.value,
+        chartPointSpacingValue.value,
+        Math.max(viewportZoomScale.value, 0.0001),
+      );
+
+      return {
+        left: projectedCenterX - MARKER_BADGE_SIZE / 2,
+      };
+    },
+    [activityDraftInlineBadgeCenterX, chartPointSpacingValue, viewportZoomAnchorIndex, viewportZoomAnchorScreenX, viewportZoomScale],
+  );
+  const animatedActivityDraftStartHandleStyle = useAnimatedStyle(
+    () => {
+      const projectedCenterX = projectHeartOverlayX(
+        activityDraftStartHandleCenterX,
+        viewportZoomAnchorScreenX.value,
+        viewportZoomAnchorIndex.value,
+        chartPointSpacingValue.value,
+        Math.max(viewportZoomScale.value, 0.0001),
+      );
+
+      return {
+        left: projectedCenterX - ACTIVITY_DRAFT_HANDLE_WIDTH / 2,
+      };
+    },
+    [activityDraftStartHandleCenterX, chartPointSpacingValue, viewportZoomAnchorIndex, viewportZoomAnchorScreenX, viewportZoomScale],
+  );
+  const animatedActivityDraftEndHandleStyle = useAnimatedStyle(
+    () => {
+      const projectedCenterX = projectHeartOverlayX(
+        activityDraftEndHandleCenterX,
+        viewportZoomAnchorScreenX.value,
+        viewportZoomAnchorIndex.value,
+        chartPointSpacingValue.value,
+        Math.max(viewportZoomScale.value, 0.0001),
+      );
+
+      return {
+        left: projectedCenterX - ACTIVITY_DRAFT_HANDLE_WIDTH / 2,
+      };
+    },
+    [activityDraftEndHandleCenterX, chartPointSpacingValue, viewportZoomAnchorIndex, viewportZoomAnchorScreenX, viewportZoomScale],
   );
 
   if (points.length === 0) {
@@ -2877,22 +2976,6 @@ export function PannableHeartChart({
   const [focusGradientStart, focusGradientEnd] = colorStops(focusedChartAccentColor);
   const baseShadowColor = chartShadowColor(baseChartAccentColor);
   const focusShadowColor = chartShadowColor(focusedChartAccentColor);
-
-  useRenderTrace(`chart.heart.container.${chartTestID ?? 'default'}`, {
-    activeWindowPointCount,
-    highlightedSleepStage: highlightedSleepStage ?? 'none',
-    markers: markers.length,
-    pointIntervalMinutes,
-    points: points.length,
-    plotBaseWindowPointCount,
-    requestedFocusedMarkerId: requestedFocusedMarkerId ?? 'none',
-    selectionIndex,
-    viewportHeight: Math.round(viewportHeight),
-    viewportWidth: Math.round(viewportWidth),
-    windowPointCount: baseWindowPointCount,
-    windowStart,
-    zoomedMarker: focusedMarkerId ?? 'none',
-  });
 
   return (
     <View>
@@ -2988,103 +3071,89 @@ export function PannableHeartChart({
           </View>
           {activityDraftVisual && activityDraft ? (
             <View pointerEvents="box-none" style={styles.activityDraftViewport}>
-              <Animated.View pointerEvents="box-none" style={[styles.chartCameraLayer, animatedViewportCameraStyle]}>
-                <Animated.View pointerEvents="box-none" style={[styles.chartZoomLayer, animatedViewportZoomStyle]}>
-                  <Animated.View
-                    pointerEvents="box-none"
-                    style={[styles.chartContent, animatedChartContentStyle, { width: chartContentWidth }]}
-                    testID={chartTestID ? `${chartTestID}-draft-content` : undefined}>
-                    <View
-                      pointerEvents="none"
-                      style={[
-                        styles.activityDraftBand,
-                        {
-                          backgroundColor: activityDraftFillColor,
-                          borderColor: activityDraftAccentColor,
-                          height: activityDraftVisual.bandHeight,
-                          left: activityDraftVisual.startX,
-                          top: activityDraftVisual.bandTop,
-                          width: activityDraftVisual.bandWidth,
-                        },
-                      ]}
-                      testID={chartTestID ? `${chartTestID}-draft-band` : undefined}
-                    />
-                    {activityDraftBadgeMarker ? (
-                      <Animated.View
-                        pointerEvents="none"
-                        style={[
-                          styles.activityDraftInlineBadgeWrap,
-                          animatedActivityDraftControlScaleStyle,
-                          {
-                            left: activityDraftVisual.inlineBadgeLeft,
-                            top: activityDraftVisual.inlineBadgeTop,
-                          },
-                        ]}
-                        testID={activityDraftBadgeMarker.testID}>
-                        <View
-                          style={[
-                            styles.activityDraftInlineBadge,
-                            { borderColor: activityDraftBadgeMarker.accentColor },
-                          ]}>
-                          <Ionicons color={activityDraftBadgeMarker.accentColor} name={activityDraftBadgeMarker.iconName} size={12} />
-                        </View>
-                      </Animated.View>
-                    ) : null}
-                    <View
-                      style={[
-                        styles.activityDraftDragBody,
-                        {
-                          height: activityDraftVisual.bandHeight,
-                          left: activityDraftVisual.bodyLeft,
-                          top: activityDraftVisual.bandTop,
-                          width: activityDraftVisual.bodyWidth,
-                        },
-                      ]}
-                      testID={chartTestID ? `${chartTestID}-draft-body` : undefined}
-                      {...activityDraftBodyResponder.panHandlers}
-                    />
-                    <Animated.View
-                      style={[
-                        styles.activityDraftHandle,
-                        animatedActivityDraftControlScaleStyle,
-                        {
-                          height: activityDraftVisual.handleHeight,
-                          left: activityDraftVisual.startHandleLeft,
-                          top: activityDraftVisual.handleTop,
-                        },
-                      ]}
-                      testID={chartTestID ? `${chartTestID}-draft-start-handle` : undefined}
-                      {...activityDraftStartHandleResponder.panHandlers}>
-                      <View
-                        pointerEvents="none"
-                        style={[
-                          styles.activityDraftHandleGrip,
-                          { backgroundColor: activityDraftAccentColor },
-                        ]}
-                      />
-                    </Animated.View>
-                    <Animated.View
-                      style={[
-                        styles.activityDraftHandle,
-                        animatedActivityDraftControlScaleStyle,
-                        {
-                          height: activityDraftVisual.handleHeight,
-                          left: activityDraftVisual.endHandleLeft,
-                          top: activityDraftVisual.handleTop,
-                        },
-                      ]}
-                      testID={chartTestID ? `${chartTestID}-draft-end-handle` : undefined}
-                      {...activityDraftEndHandleResponder.panHandlers}>
-                      <View
-                        pointerEvents="none"
-                        style={[
-                          styles.activityDraftHandleGrip,
-                          { backgroundColor: activityDraftAccentColor },
-                        ]}
-                      />
-                    </Animated.View>
-                  </Animated.View>
+              <Animated.View
+                pointerEvents="none"
+                style={[
+                  styles.activityDraftBand,
+                  animatedActivityDraftBandStyle,
+                  {
+                    backgroundColor: activityDraftFillColor,
+                    borderColor: activityDraftAccentColor,
+                    height: activityDraftVisual.bandHeight,
+                    top: activityDraftVisual.bandTop,
+                  },
+                ]}
+                testID={chartTestID ? `${chartTestID}-draft-band` : undefined}
+              />
+              {activityDraftBadgeMarker ? (
+                <Animated.View
+                  pointerEvents="none"
+                  style={[
+                    styles.activityDraftInlineBadgeWrap,
+                    animatedActivityDraftBadgeStyle,
+                    {
+                      top: activityDraftVisual.inlineBadgeTop,
+                    },
+                  ]}
+                  testID={activityDraftBadgeMarker.testID}>
+                  <View
+                    style={[
+                      styles.activityDraftInlineBadge,
+                      { borderColor: activityDraftBadgeMarker.accentColor },
+                    ]}>
+                    <Ionicons color={activityDraftBadgeMarker.accentColor} name={activityDraftBadgeMarker.iconName} size={12} />
+                  </View>
                 </Animated.View>
+              ) : null}
+              <Animated.View
+                style={[
+                  styles.activityDraftDragBody,
+                  animatedActivityDraftBodyStyle,
+                  {
+                    height: activityDraftVisual.bandHeight,
+                    top: activityDraftVisual.bandTop,
+                  },
+                ]}
+                testID={chartTestID ? `${chartTestID}-draft-body` : undefined}
+                {...activityDraftBodyResponder.panHandlers}
+              />
+              <Animated.View
+                style={[
+                  styles.activityDraftHandle,
+                  animatedActivityDraftStartHandleStyle,
+                  {
+                    height: activityDraftVisual.handleHeight,
+                    top: activityDraftVisual.handleTop,
+                  },
+                ]}
+                testID={chartTestID ? `${chartTestID}-draft-start-handle` : undefined}
+                {...activityDraftStartHandleResponder.panHandlers}>
+                <View
+                  pointerEvents="none"
+                  style={[
+                    styles.activityDraftHandleGrip,
+                    { backgroundColor: activityDraftAccentColor },
+                  ]}
+                />
+              </Animated.View>
+              <Animated.View
+                style={[
+                  styles.activityDraftHandle,
+                  animatedActivityDraftEndHandleStyle,
+                  {
+                    height: activityDraftVisual.handleHeight,
+                    top: activityDraftVisual.handleTop,
+                  },
+                ]}
+                testID={chartTestID ? `${chartTestID}-draft-end-handle` : undefined}
+                {...activityDraftEndHandleResponder.panHandlers}>
+                <View
+                  pointerEvents="none"
+                  style={[
+                    styles.activityDraftHandleGrip,
+                    { backgroundColor: activityDraftAccentColor },
+                  ]}
+                />
               </Animated.View>
             </View>
           ) : null}
