@@ -1075,14 +1075,19 @@ const HeartChartSvgPlot = memo(function HeartChartSvgPlot({
     [accentTransitionProgress, focusTransitionProgress],
   );
 
-  const renderPlotLayer = useCallback(
-    (keyPrefix: string, fillId: string, shadowColor: string, strokeId: string) => (
+  const renderAreaLayer = useCallback(
+    (keyPrefix: string, fillId: string) => (
+      <G clipPath={`url(#${chartPlotClipId})`}>
+        {areas.map((area, index) => (
+          <Path key={`${keyPrefix}-area-${index}`} d={area} fill={`url(#${fillId})`} />
+        ))}
+      </G>
+    ),
+    [areas, chartPlotClipId],
+  );
+  const renderStrokeLayer = useCallback(
+    (keyPrefix: string, shadowColor: string, strokeId: string) => (
       <>
-        <G clipPath={`url(#${chartPlotClipId})`}>
-          {areas.map((area, index) => (
-            <Path key={`${keyPrefix}-area-${index}`} d={area} fill={`url(#${fillId})`} />
-          ))}
-        </G>
         {paths.map((path, index) => (
           <Path
             key={`${keyPrefix}-shadow-${index}`}
@@ -1106,7 +1111,7 @@ const HeartChartSvgPlot = memo(function HeartChartSvgPlot({
         ))}
       </>
     ),
-    [areas, chartPlotClipId, paths],
+    [paths],
   );
 
   return (
@@ -1206,6 +1211,45 @@ const HeartChartSvgPlot = memo(function HeartChartSvgPlot({
           ) : null}
         </Defs>
         <AnimatedSvgGroup animatedProps={animatedChartCameraProps}>
+          <G mask={`url(#${chartId}-fill-mask)`}>
+            <AnimatedSvgGroup animatedProps={animatedChartYAxisProps}>
+              <AnimatedSvgGroup animatedProps={animatedBasePlotOpacityProps}>
+                {renderAreaLayer(
+                  'base-previous',
+                  `${chartId}-fill-base-previous`,
+                )}
+              </AnimatedSvgGroup>
+              <AnimatedSvgGroup animatedProps={animatedNextBasePlotOpacityProps}>
+                {renderAreaLayer(
+                  'base-next',
+                  `${chartId}-fill-base-next`,
+                )}
+              </AnimatedSvgGroup>
+              <AnimatedSvgGroup animatedProps={animatedPreviousFocusedPlotOpacityProps}>
+                {renderAreaLayer(
+                  'focus-previous',
+                  `${chartId}-fill-focus-previous`,
+                )}
+              </AnimatedSvgGroup>
+              <AnimatedSvgGroup animatedProps={animatedFocusedPlotOpacityProps}>
+                {renderAreaLayer(
+                  'focus-next',
+                  `${chartId}-fill-focus-next`,
+                )}
+              </AnimatedSvgGroup>
+              {sleepStageHighlights.length > 0 && sleepStageHighlightClipId && sleepStageHighlightFillId && activeSleepStageColor ? (
+                <G clipPath={`url(#${sleepStageHighlightClipId})`}>
+                  {areas.map((area, areaIndex) => (
+                    <Path
+                      key={`stage-area-${areaIndex}`}
+                      d={area}
+                      fill={`url(#${sleepStageHighlightFillId})`}
+                    />
+                  ))}
+                </G>
+              ) : null}
+            </AnimatedSvgGroup>
+          </G>
           <AnimatedSvgGroup
             animatedProps={animatedChartYAxisProps}
             testID={chartTestID ? `${chartTestID}-y-domain` : undefined}>
@@ -1234,77 +1278,62 @@ const HeartChartSvgPlot = memo(function HeartChartSvgPlot({
                   vectorEffect="non-scaling-stroke"
                 />
               ))}
-              <AnimatedSvgGroup animatedProps={animatedBasePlotOpacityProps}>
-                {renderPlotLayer(
-                  'base-previous',
-                  `${chartId}-fill-base-previous`,
-                  previousBaseShadowColor,
-                  `${chartId}-stroke-base-previous`,
-                )}
-              </AnimatedSvgGroup>
-              <AnimatedSvgGroup animatedProps={animatedNextBasePlotOpacityProps}>
-                {renderPlotLayer(
-                  'base-next',
-                  `${chartId}-fill-base-next`,
-                  nextBaseShadowColor,
-                  `${chartId}-stroke-base-next`,
-                )}
-              </AnimatedSvgGroup>
-              <AnimatedSvgGroup animatedProps={animatedPreviousFocusedPlotOpacityProps}>
-                {renderPlotLayer(
-                  'focus-previous',
-                  `${chartId}-fill-focus-previous`,
-                  previousFocusShadowColor,
-                  `${chartId}-stroke-focus-previous`,
-                )}
-              </AnimatedSvgGroup>
-              <AnimatedSvgGroup animatedProps={animatedFocusedPlotOpacityProps}>
-                {renderPlotLayer(
-                  'focus-next',
-                  `${chartId}-fill-focus-next`,
-                  nextFocusShadowColor,
-                  `${chartId}-stroke-focus-next`,
-                )}
-              </AnimatedSvgGroup>
-              {sleepStageHighlights.length > 0 && sleepStageHighlightClipId && sleepStageHighlightFillId && activeSleepStageColor ? (
-                <G clipPath={`url(#${sleepStageHighlightClipId})`}>
-                  <G mask={`url(#${chartId}-fill-mask)`}>
-                    {areas.map((area, areaIndex) => (
-                      <Path
-                        key={`stage-area-${areaIndex}`}
-                        d={area}
-                        fill={`url(#${sleepStageHighlightFillId})`}
-                      />
-                    ))}
-                  </G>
-                  <G>
-                    {paths.map((path, pathIndex) => (
-                      <Path
-                        key={`stage-shadow-${pathIndex}`}
-                        d={path}
-                        fill="none"
-                        stroke={activeSleepStageColor}
-                        strokeOpacity="0.22"
-                        strokeWidth="2.4"
-                        vectorEffect="non-scaling-stroke"
-                      />
-                    ))}
-                    {paths.map((path, pathIndex) => (
-                      <Path
-                        key={`stage-line-${pathIndex}`}
-                        d={path}
-                        fill="none"
-                        stroke={activeSleepStageColor}
-                        strokeLinecap="round"
-                        strokeOpacity="0.96"
-                        strokeWidth="1.3"
-                        vectorEffect="non-scaling-stroke"
-                      />
-                    ))}
-                  </G>
-                </G>
-              ) : null}
             </G>
+            <AnimatedSvgGroup animatedProps={animatedBasePlotOpacityProps}>
+              {renderStrokeLayer(
+                'base-previous',
+                previousBaseShadowColor,
+                `${chartId}-stroke-base-previous`,
+              )}
+            </AnimatedSvgGroup>
+            <AnimatedSvgGroup animatedProps={animatedNextBasePlotOpacityProps}>
+              {renderStrokeLayer(
+                'base-next',
+                nextBaseShadowColor,
+                `${chartId}-stroke-base-next`,
+              )}
+            </AnimatedSvgGroup>
+            <AnimatedSvgGroup animatedProps={animatedPreviousFocusedPlotOpacityProps}>
+              {renderStrokeLayer(
+                'focus-previous',
+                previousFocusShadowColor,
+                `${chartId}-stroke-focus-previous`,
+              )}
+            </AnimatedSvgGroup>
+            <AnimatedSvgGroup animatedProps={animatedFocusedPlotOpacityProps}>
+              {renderStrokeLayer(
+                'focus-next',
+                nextFocusShadowColor,
+                `${chartId}-stroke-focus-next`,
+              )}
+            </AnimatedSvgGroup>
+            {sleepStageHighlights.length > 0 && sleepStageHighlightClipId && sleepStageHighlightFillId && activeSleepStageColor ? (
+              <G clipPath={`url(#${sleepStageHighlightClipId})`}>
+                {paths.map((path, pathIndex) => (
+                  <Path
+                    key={`stage-shadow-${pathIndex}`}
+                    d={path}
+                    fill="none"
+                    stroke={activeSleepStageColor}
+                    strokeOpacity="0.22"
+                    strokeWidth="2.4"
+                    vectorEffect="non-scaling-stroke"
+                  />
+                ))}
+                {paths.map((path, pathIndex) => (
+                  <Path
+                    key={`stage-line-${pathIndex}`}
+                    d={path}
+                    fill="none"
+                    stroke={activeSleepStageColor}
+                    strokeLinecap="round"
+                    strokeOpacity="0.96"
+                    strokeWidth="1.3"
+                    vectorEffect="non-scaling-stroke"
+                  />
+                ))}
+              </G>
+            ) : null}
           </AnimatedSvgGroup>
           <G clipPath={`url(#${chartPlotClipId})`}>
             {sleepStageHighlights.map((highlight, index) => (

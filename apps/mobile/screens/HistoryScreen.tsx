@@ -13,7 +13,6 @@ import {
 import { ScreenShell } from '@/components/layout/ScreenShell';
 import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
 import { colors, typography } from '@/constants/theme';
-import type { ManualActivityKind } from '@/data/HealthRepository';
 import { useHistoryOverview } from '@/hooks/useHealthData';
 import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
 import { useHealthRepository, useRefreshHealthData } from '@/providers/HealthDataProvider';
@@ -148,24 +147,6 @@ export function HistoryScreen() {
     await repository.relabelActivity(activityId, activity);
     refreshAfterActivityMutation();
   }, [refreshAfterActivityMutation, repository]);
-  const handleCreateManualHeartActivity = useCallback(async (activity: ManualActivityKind, start: Date, end: Date) => {
-    const activityId = await repository.createManualActivity(activity, start, end);
-    refreshAfterActivityMutation();
-    return activityId;
-  }, [refreshAfterActivityMutation, repository]);
-  const handleCreateManualHeartSleep = useCallback(async (start: Date, end: Date) => {
-    const sleepId = await repository.createManualSleep(start, end);
-    refreshAfterActivityMutation();
-    return sleepId;
-  }, [refreshAfterActivityMutation, repository]);
-  const handleUpdateHeartActivity = useCallback(async (activityId: string, activity: ManualActivityKind, start: Date, end: Date) => {
-    await repository.updateActivity(activityId, activity, start, end);
-    refreshAfterActivityMutation();
-  }, [refreshAfterActivityMutation, repository]);
-  const handleUpdateHeartSleep = useCallback(async (sleepId: string, start: Date, end: Date) => {
-    await repository.updateSleep(sleepId, start, end);
-    refreshAfterActivityMutation();
-  }, [refreshAfterActivityMutation, repository]);
 
   if (!data && state.status === 'loading') {
     return (
@@ -251,12 +232,8 @@ export function HistoryScreen() {
         <HeartCard
           activityReviewActions={{
             confirmActivity: handleConfirmHeartActivity,
-            createManualActivity: handleCreateManualHeartActivity,
-            createManualSleep: handleCreateManualHeartSleep,
             dismissActivity: handleDismissHeartActivity,
             relabelActivity: handleRelabelHeartActivity,
-            updateActivity: handleUpdateHeartActivity,
-            updateSleep: handleUpdateHeartSleep,
           }}
           chartTestID="history-heart-chart"
           cardData={data.heartCard}

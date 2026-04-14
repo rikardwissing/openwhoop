@@ -101,10 +101,10 @@ const REVIEW_DRAFT_OPTIONS: HeartMarkerDraftKind[] = [...REVIEW_ACTIVITY_OPTIONS
 const REVEAL_EASING = Easing.out(Easing.cubic);
 
 interface HeartActivityReviewActions {
-  createManualActivity: (activity: ManualActivityKind, start: Date, end: Date) => Promise<string>;
-  createManualSleep: (start: Date, end: Date) => Promise<string>;
-  updateActivity: (activityId: string, activity: ManualActivityKind, start: Date, end: Date) => Promise<void>;
-  updateSleep: (sleepId: string, start: Date, end: Date) => Promise<void>;
+  createManualActivity?: (activity: ManualActivityKind, start: Date, end: Date) => Promise<string>;
+  createManualSleep?: (start: Date, end: Date) => Promise<string>;
+  updateActivity?: (activityId: string, activity: ManualActivityKind, start: Date, end: Date) => Promise<void>;
+  updateSleep?: (sleepId: string, start: Date, end: Date) => Promise<void>;
   confirmActivity: (activityId: string) => Promise<void>;
   dismissActivity: (activityId: string) => Promise<void>;
   relabelActivity: (activityId: string, activity: ManualActivityKind) => Promise<void>;
@@ -1051,11 +1051,29 @@ export function HeartCard({
   const canEditFocusedActivity = Boolean(
     !isDraftEditing &&
       !isDraftNavigationPending &&
-      activityReviewActions &&
+      activityReviewActions?.updateActivity &&
       actionableFocusedMarker &&
       actionableFocusedMarker.kind !== 'sleep' &&
       !canManageHeartIntradayMarker(actionableFocusedMarker) &&
       actionableFocusedMarker.id !== 'draft-activity' &&
+      pendingActivityActionKey !== 'draft:save',
+  );
+  const canRemoveFocusedActivity = Boolean(
+    !isDraftEditing &&
+      !isDraftNavigationPending &&
+      activityReviewActions?.dismissActivity &&
+      actionableFocusedMarker &&
+      actionableFocusedMarker.kind !== 'sleep' &&
+      !canManageHeartIntradayMarker(actionableFocusedMarker) &&
+      actionableFocusedMarker.id !== 'draft-activity' &&
+      pendingActivityActionKey !== 'draft:save',
+  );
+  const canEditManagedActivity = Boolean(
+    !isDraftEditing &&
+      !isDraftNavigationPending &&
+      activityReviewActions?.updateActivity &&
+      actionableFocusedMarker &&
+      canManageHeartIntradayMarker(actionableFocusedMarker) &&
       pendingActivityActionKey !== 'draft:save',
   );
   const canEditFocusedSleep = Boolean(
@@ -1687,6 +1705,14 @@ export function HeartCard({
       return;
     }
 
+    if (actionableFocusedMarker.kind === 'sleep') {
+      if (!activityReviewActions?.updateSleep) {
+        return;
+      }
+    } else if (!activityReviewActions?.updateActivity) {
+      return;
+    }
+
     const nextDraft = buildHeartActivityDraftFromMarker(
       actionableFocusedMarker,
       cardData.series,
@@ -1719,7 +1745,15 @@ export function HeartCard({
         waitForChartOverview: true,
       },
     );
-  }, [actionableFocusedMarker, basePointIntervalMinutes, cardData.series, navigateHeartCard, viewportKey]);
+  }, [
+    actionableFocusedMarker,
+    activityReviewActions?.updateActivity,
+    activityReviewActions?.updateSleep,
+    basePointIntervalMinutes,
+    cardData.series,
+    navigateHeartCard,
+    viewportKey,
+  ]);
 
   const handleSelectDraftActivityType = useCallback((activity: HeartMarkerDraftKind) => {
     setActivityActionError(null);
@@ -1821,15 +1855,31 @@ export function HeartCard({
 
       if (draftToSave.kind === 'Sleep') {
         if (activityToEdit?.kind === 'sleep') {
+          if (!reviewActions.updateSleep) {
+            throw new Error('Sleep editing is not available for this heart chart.');
+          }
+
           await reviewActions.updateSleep(activityToEdit.id, start, end);
           nextFocusMarkerId = nextOptimisticFocusMarker.id;
         } else {
+          if (!reviewActions.createManualSleep) {
+            throw new Error('Sleep creation is not available for this heart chart.');
+          }
+
           nextFocusMarkerId = await reviewActions.createManualSleep(start, end);
         }
       } else if (activityToEdit) {
+        if (!reviewActions.updateActivity) {
+          throw new Error('Activity editing is not available for this heart chart.');
+        }
+
         await reviewActions.updateActivity(activityToEdit.id, draftToSave.kind, start, end);
         nextFocusMarkerId = nextOptimisticFocusMarker.id;
       } else {
+        if (!reviewActions.createManualActivity) {
+          throw new Error('Activity creation is not available for this heart chart.');
+        }
+
         nextFocusMarkerId = await reviewActions.createManualActivity(draftToSave.kind, start, end);
       }
 
@@ -2497,13 +2547,15 @@ export function HeartCard({
                     }}
                     testID={chartTestID ? `${chartTestID}-activity-confirm` : undefined}
                   />
-                  <ReviewActionButton
-                    accentColor={colors.heart}
-                    disabled={pendingActivityActionKey !== null}
-                    label="Edit"
-                    onPress={handleEditFocusedActivity}
-                    testID={chartTestID ? `${chartTestID}-activity-edit` : undefined}
-                  />
+                  {canEditManagedActivity ? (
+                    <ReviewActionButton
+                      accentColor={colors.heart}
+                      disabled={pendingActivityActionKey !== null}
+                      label="Edit"
+                      onPress={handleEditFocusedActivity}
+                      testID={chartTestID ? `${chartTestID}-activity-edit` : undefined}
+                    />
+                  ) : null}
                   <ReviewActionButton
                     accentColor={colors.alert}
                     disabled={pendingActivityActionKey !== null}
@@ -2524,24 +2576,28 @@ export function HeartCard({
                     testID={chartTestID ? `${chartTestID}-sleep-edit` : undefined}
                   />
                 </View>
-              ) : canEditFocusedActivity ? (
+              ) : canEditFocusedActivity || canRemoveFocusedActivity ? (
                 <View style={styles.reviewActionRow}>
-                  <ReviewActionButton
-                    accentColor={colors.heart}
-                    disabled={pendingActivityActionKey !== null}
-                    label="Edit"
-                    onPress={handleEditFocusedActivity}
-                    testID={chartTestID ? `${chartTestID}-activity-edit` : undefined}
-                  />
-                  <ReviewActionButton
-                    accentColor={colors.alert}
-                    disabled={pendingActivityActionKey !== null}
-                    label={pendingActivityActionKey === `dismiss:${actionableFocusedMarker?.id}` ? 'Removing...' : 'Remove'}
-                    onPress={() => {
-                      void handleDismissFocusedActivity();
-                    }}
-                    testID={chartTestID ? `${chartTestID}-activity-remove` : undefined}
-                  />
+                  {canEditFocusedActivity ? (
+                    <ReviewActionButton
+                      accentColor={colors.heart}
+                      disabled={pendingActivityActionKey !== null}
+                      label="Edit"
+                      onPress={handleEditFocusedActivity}
+                      testID={chartTestID ? `${chartTestID}-activity-edit` : undefined}
+                    />
+                  ) : null}
+                  {canRemoveFocusedActivity ? (
+                    <ReviewActionButton
+                      accentColor={colors.alert}
+                      disabled={pendingActivityActionKey !== null}
+                      label={pendingActivityActionKey === `dismiss:${actionableFocusedMarker?.id}` ? 'Removing...' : 'Remove'}
+                      onPress={() => {
+                        void handleDismissFocusedActivity();
+                      }}
+                      testID={chartTestID ? `${chartTestID}-activity-remove` : undefined}
+                    />
+                  ) : null}
                 </View>
               ) : null}
             </Animated.View>
