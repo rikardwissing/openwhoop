@@ -12,6 +12,7 @@ import {
 import Animated, {
   Easing,
   cancelAnimation,
+  interpolateColor,
   useAnimatedStyle,
   useSharedValue,
   withDelay,
@@ -92,7 +93,9 @@ const ACTIVITY_DETAIL_CHIP_STAGE_DELAY_MS = ACTIVITY_DETAIL_PANEL_STAGE_DELAY_MS
 const ACTIVITY_DRAFT_ACTION_STAGE_DELAY_MS = ACTIVITY_DETAIL_CHIP_STAGE_DELAY_MS + 50;
 const HEART_CARD_CHROME_SWAP_DELAY_MS = HEART_CARD_CHROME_OUT_DURATION_MS + HEART_CARD_CHROME_STAGE_DELAY_MS * 2;
 const HEART_CARD_CHROME_REVEAL_DELAY_AFTER_SWAP_MS = 40;
+const HEART_CARD_ACCENT_TRANSITION_DURATION_MS = 240;
 const DEFAULT_HEART_CHART_POINT_INTERVAL_MINUTES = 5;
+const MIN_HEART_ACTIVITY_DRAFT_MINUTE_SPAN = 1;
 const DEFAULT_NEW_ACTIVITY_DURATION_MINUTES = 60;
 const REVIEW_ACTIVITY_OPTIONS: ManualActivityKind[] = ['Activity', 'Walk', 'Workout', 'Nap'];
 const REVIEW_DRAFT_OPTIONS: HeartMarkerDraftKind[] = [...REVIEW_ACTIVITY_OPTIONS, 'Sleep'];
@@ -324,6 +327,34 @@ function resolveHeartPointDate(
   return addMinutes(latestPointDate, Math.round(minuteOffset) - totalSeriesMinutes);
 }
 
+function resolveHeartMinuteOffset(
+  points: readonly { label: string }[],
+  anchorDayKey: string | undefined,
+  timestampMs: number,
+  pointIntervalMinutes = DEFAULT_HEART_CHART_POINT_INTERVAL_MINUTES,
+) {
+  if (!anchorDayKey || points.length === 0 || !Number.isFinite(timestampMs)) {
+    return null;
+  }
+
+  const latestLabel = points.at(-1)?.label;
+  if (!latestLabel) {
+    return null;
+  }
+
+  const latestPointMinutes = parseHeartPointLabelMinutes(latestLabel);
+  if (latestPointMinutes === null) {
+    return null;
+  }
+
+  const anchorDate = new Date(`${anchorDayKey}T00:00:00`);
+  const latestPointDate = addMinutes(anchorDate, latestPointMinutes);
+  const totalSeriesMinutes = Math.max((points.length - 1) * pointIntervalMinutes, 1);
+  const minuteOffset = totalSeriesMinutes + (timestampMs - latestPointDate.getTime()) / 60000;
+
+  return clampIndex(minuteOffset, 0, totalSeriesMinutes);
+}
+
 function buildInitialHeartActivityDraft(
   kind: HeartMarkerDraftKind,
   viewportState: HeartChartViewportState,
@@ -379,22 +410,38 @@ function resolveDraftKind(marker: HeartIntradayMarker): HeartMarkerDraftKind {
 
 function buildHeartActivityDraftFromMarker(
   marker: HeartIntradayMarker,
-  pointCount: number,
+  points: readonly { label: string }[],
+  anchorDayKey: string | undefined,
   pointIntervalMinutes = DEFAULT_HEART_CHART_POINT_INTERVAL_MINUTES,
 ): HeartActivityDraft | null {
+  const pointCount = points.length;
   if (pointCount < 2) {
     return null;
   }
 
   const totalSeriesMinutes = Math.max((pointCount - 1) * pointIntervalMinutes, 1);
-  const startMinuteOffset = clampIndex(
+  const fractionStartMinuteOffset = clampIndex(
     Math.round(Math.max(0, Math.min(1, marker.startFraction)) * totalSeriesMinutes),
     0,
     totalSeriesMinutes,
   );
-  const endMinuteOffset = clampIndex(
+  const fractionEndMinuteOffset = clampIndex(
     Math.round(Math.max(0, Math.min(1, marker.endFraction)) * totalSeriesMinutes),
-    startMinuteOffset + 1,
+    fractionStartMinuteOffset + 1,
+    totalSeriesMinutes,
+  );
+  const exactStartMinuteOffset =
+    marker.startTimeMs !== undefined
+      ? resolveHeartMinuteOffset(points, anchorDayKey, marker.startTimeMs, pointIntervalMinutes)
+      : null;
+  const exactEndMinuteOffset =
+    marker.endTimeMs !== undefined
+      ? resolveHeartMinuteOffset(points, anchorDayKey, marker.endTimeMs, pointIntervalMinutes)
+      : null;
+  const startMinuteOffset = exactStartMinuteOffset ?? fractionStartMinuteOffset;
+  const endMinuteOffset = clampIndex(
+    exactEndMinuteOffset ?? fractionEndMinuteOffset,
+    startMinuteOffset + MIN_HEART_ACTIVITY_DRAFT_MINUTE_SPAN,
     totalSeriesMinutes,
   );
 
@@ -676,6 +723,9 @@ export function HeartCard({
     snapshot: null,
   });
   const [isChartFocusTransitioning, setIsChartFocusTransitioning] = useState(false);
+  const [cardAccentTransitionDurationMs, setCardAccentTransitionDurationMs] = useState(
+    HEART_CARD_ACCENT_TRANSITION_DURATION_MS,
+  );
   const [selectedSleepStage, setSelectedSleepStage] = useState<SleepStage | null>(null);
   const [isSleepStagePanelMounted, setIsSleepStagePanelMounted] = useState(false);
   const [isActivityDetailPanelMounted, setIsActivityDetailPanelMounted] = useState(false);
@@ -792,6 +842,9 @@ export function HeartCard({
   const chartAccentColor = focusedChartTargetContent?.chartAccentColor ?? colors.primary;
   const isSleepFocused = displayedFocusedMarker?.kind === 'sleep';
   const isActivityFocused = displayedFocusedMarker?.kind === 'activity' || displayedFocusedMarker?.kind === 'nap';
+  const cardAccentTransitionProgress = useSharedValue(1);
+  const previousCardAccentColor = useSharedValue(cardAccentColor);
+  const nextCardAccentColor = useSharedValue(cardAccentColor);
   const canManageFocusedActivity = Boolean(
     !isPresentedDraftEditing &&
       activityReviewActions &&
@@ -899,6 +952,79 @@ export function HeartCard({
       valueColor: colors.heart,
     },
   ];
+  const [previousRenderedCardAccentColor, setPreviousRenderedCardAccentColor] = useState(cardAccentColor);
+
+  useEffect(() => {
+    setPreviousRenderedCardAccentColor(nextCardAccentColor.value);
+    previousCardAccentColor.value = nextCardAccentColor.value;
+    nextCardAccentColor.value = cardAccentColor;
+    cardAccentTransitionProgress.value = 0;
+    cardAccentTransitionProgress.value = withTiming(1, {
+      duration: cardAccentTransitionDurationMs,
+      easing: Easing.out(Easing.cubic),
+    });
+  }, [
+    cardAccentColor,
+    cardAccentTransitionDurationMs,
+    cardAccentTransitionProgress,
+    nextCardAccentColor,
+    previousCardAccentColor,
+  ]);
+
+  const animatedFocusedCardTextAccentStyle = useAnimatedStyle(
+    () => ({
+      color: interpolateColor(
+        cardAccentTransitionProgress.value,
+        [0, 1],
+        [previousCardAccentColor.value, nextCardAccentColor.value],
+      ),
+    }),
+    [cardAccentTransitionProgress, nextCardAccentColor, previousCardAccentColor],
+  );
+  const animatedFocusedCardPreviousAccentOpacityStyle = useAnimatedStyle(
+    () => ({
+      opacity: 1 - cardAccentTransitionProgress.value,
+    }),
+    [cardAccentTransitionProgress],
+  );
+  const animatedFocusedCardNextAccentOpacityStyle = useAnimatedStyle(
+    () => ({
+      opacity: cardAccentTransitionProgress.value,
+    }),
+    [cardAccentTransitionProgress],
+  );
+
+  const animatedFocusedCardIconWrapStyle = useAnimatedStyle(
+    () => ({
+      backgroundColor: interpolateColor(
+        cardAccentTransitionProgress.value,
+        [0, 1],
+        [`${previousCardAccentColor.value}18`, `${nextCardAccentColor.value}18`],
+      ),
+      borderColor: interpolateColor(
+        cardAccentTransitionProgress.value,
+        [0, 1],
+        [`${previousCardAccentColor.value}33`, `${nextCardAccentColor.value}33`],
+      ),
+    }),
+    [cardAccentTransitionProgress, nextCardAccentColor, previousCardAccentColor],
+  );
+
+  const animatedFocusedActionButtonStyle = useAnimatedStyle(
+    () => ({
+      backgroundColor: interpolateColor(
+        cardAccentTransitionProgress.value,
+        [0, 1],
+        [`${previousCardAccentColor.value}14`, `${nextCardAccentColor.value}14`],
+      ),
+      borderColor: interpolateColor(
+        cardAccentTransitionProgress.value,
+        [0, 1],
+        [`${previousCardAccentColor.value}33`, `${nextCardAccentColor.value}33`],
+      ),
+    }),
+    [cardAccentTransitionProgress, nextCardAccentColor, previousCardAccentColor],
+  );
 
   const animateCardChromeStages = useCallback(
     (target: 0 | 1) => {
@@ -971,9 +1097,14 @@ export function HeartCard({
     });
   }, []);
 
-  const handleFocusTransitionStateChange = useCallback((isTransitioning: boolean) => {
+  const handleFocusTransitionStateChange = useCallback((isTransitioning: boolean, transitionDurationMs?: number) => {
     isFocusTransitioningRef.current = isTransitioning;
     setIsChartFocusTransitioning(isTransitioning);
+
+    if (typeof transitionDurationMs === 'number' && transitionDurationMs > 0) {
+      setCardAccentTransitionDurationMs(transitionDurationMs);
+    }
+
     const nextFocusedMarker = pendingFocusedMarkerRef.current;
 
     if (isTransitioning) {
@@ -1230,7 +1361,8 @@ export function HeartCard({
 
     const nextDraft = buildHeartActivityDraftFromMarker(
       actionableFocusedMarker,
-      cardData.series.length,
+      cardData.series,
+      viewportKey,
       basePointIntervalMinutes,
     );
     if (!nextDraft) {
@@ -1246,7 +1378,7 @@ export function HeartCard({
     setEditingActivityMarker(actionableFocusedMarker);
     setPendingEditActivityDraft(nextDraft);
     setLatestJumpVersion((current) => current + 1);
-  }, [actionableFocusedMarker, basePointIntervalMinutes, clearFocusedDetail, cardData.series.length]);
+  }, [actionableFocusedMarker, basePointIntervalMinutes, clearFocusedDetail, cardData.series, viewportKey]);
 
   const handleSelectDraftActivityType = useCallback((activity: HeartMarkerDraftKind) => {
     setActivityActionError(null);
@@ -1799,21 +1931,23 @@ export function HeartCard({
   }, [clearFocusedDetail]);
 
   return (
-    <GlassCard accentColor={cardAccentColor}>
+    <GlassCard accentColor={cardAccentColor} accentTransitionDurationMs={cardAccentTransitionDurationMs}>
       <Animated.View style={animatedCardHeaderStageStyle}>
         <View style={styles.cardHeader}>
           <View style={styles.cardHeaderLeft}>
             {displayedFocusedCardContent ? (
-              <View
+              <Animated.View
                 style={[
                   styles.cardIconWrap,
-                  {
-                    backgroundColor: `${cardAccentColor}18`,
-                    borderColor: `${cardAccentColor}33`,
-                  },
+                  animatedFocusedCardIconWrapStyle,
                 ]}>
-                <Ionicons color={cardAccentColor} name={displayedFocusedCardContent.iconName} size={16} />
-              </View>
+                <Animated.View pointerEvents="none" style={[styles.focusedAccentIconLayer, animatedFocusedCardPreviousAccentOpacityStyle]}>
+                  <Ionicons color={previousRenderedCardAccentColor} name={displayedFocusedCardContent.iconName} size={16} />
+                </Animated.View>
+                <Animated.View pointerEvents="none" style={[styles.focusedAccentIconLayer, animatedFocusedCardNextAccentOpacityStyle]}>
+                  <Ionicons color={cardAccentColor} name={displayedFocusedCardContent.iconName} size={16} />
+                </Animated.View>
+              </Animated.View>
             ) : (
               <PulsingHeartIcon
                 bpm={showLiveHeartRate ? Number(liveHeartRateLabel?.replace(' bpm', '') ?? 0) : null}
@@ -1838,17 +1972,19 @@ export function HeartCard({
                 <Pressable
                   accessibilityRole="button"
                   onPress={handleReturnFromFocus}
-                  style={({ pressed }) => [
-                    styles.focusedActionButton,
-                    {
-                      backgroundColor: `${cardAccentColor}14`,
-                      borderColor: `${cardAccentColor}33`,
-                    },
-                    pressed ? styles.actionPressed : null,
-                  ]}
+                  style={({ pressed }) => [pressed ? styles.actionPressed : null]}
                   testID={chartTestID ? `${chartTestID}-return-button` : undefined}>
-                  <Ionicons color={cardAccentColor} name="arrow-back-outline" size={12} />
-                  <Text style={[styles.focusedActionText, { color: cardAccentColor }]}>Return</Text>
+                  <Animated.View style={[styles.focusedActionButton, animatedFocusedActionButtonStyle]}>
+                    <View pointerEvents="none" style={styles.focusedActionIconWrap}>
+                      <Animated.View style={[styles.focusedAccentIconLayer, animatedFocusedCardPreviousAccentOpacityStyle]}>
+                        <Ionicons color={previousRenderedCardAccentColor} name="arrow-back-outline" size={12} />
+                      </Animated.View>
+                      <Animated.View style={[styles.focusedAccentIconLayer, animatedFocusedCardNextAccentOpacityStyle]}>
+                        <Ionicons color={cardAccentColor} name="arrow-back-outline" size={12} />
+                      </Animated.View>
+                    </View>
+                    <Animated.Text style={[styles.focusedActionText, animatedFocusedCardTextAccentStyle]}>Return</Animated.Text>
+                  </Animated.View>
                 </Pressable>
                 {onOpen ? (
                   <Pressable
@@ -2120,11 +2256,11 @@ export function HeartCard({
                     testID={chartTestID ? `${chartTestID}-activity-confirm` : undefined}
                   />
                   <ReviewActionButton
-                    accentColor={colors.aqua}
+                    accentColor={colors.heart}
                     disabled={pendingActivityActionKey !== null}
-                    label={pendingActivityActionKey === `relabel:${focusedMarker?.id}` ? 'Saving...' : 'Relabel'}
-                    onPress={() => setRelabelModalVisible(true)}
-                    testID={chartTestID ? `${chartTestID}-activity-relabel` : undefined}
+                    label="Edit"
+                    onPress={handleEditFocusedActivity}
+                    testID={chartTestID ? `${chartTestID}-activity-edit` : undefined}
                   />
                   <ReviewActionButton
                     accentColor={colors.alert}
@@ -2569,6 +2705,16 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     marginTop: 1,
     width: 28,
+  },
+  focusedAccentIconLayer: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  focusedActionIconWrap: {
+    height: 12,
+    position: 'relative',
+    width: 12,
   },
   cardTitleIcon: {
     marginTop: 2,

@@ -17,10 +17,12 @@ export function GlassCard({
   children,
   style,
   accentColor,
+  accentTransitionDurationMs = 240,
 }: {
   children: ReactNode;
   style?: StyleProp<ViewStyle>;
   accentColor?: string;
+  accentTransitionDurationMs?: number;
 }) {
   const accentTransitionProgress = useSharedValue(1);
   const previousAccentColor = useSharedValue(accentColor ?? TRANSPARENT_ACCENT);
@@ -33,10 +35,10 @@ export function GlassCard({
     nextAccentColor.value = resolvedAccentColor;
     accentTransitionProgress.value = 0;
     accentTransitionProgress.value = withTiming(1, {
-      duration: 240,
+      duration: accentTransitionDurationMs,
       easing: Easing.out(Easing.cubic),
     });
-  }, [accentColor, accentTransitionProgress, nextAccentColor, previousAccentColor]);
+  }, [accentColor, accentTransitionDurationMs, accentTransitionProgress, nextAccentColor, previousAccentColor]);
 
   const animatedAccentGlowStyle = useAnimatedStyle(
     () => ({

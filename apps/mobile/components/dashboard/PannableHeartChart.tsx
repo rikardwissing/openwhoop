@@ -60,7 +60,10 @@ const DEFAULT_HEART_POINT_INTERVAL_MINUTES = 5;
 const LOAD_MORE_EDGE_THRESHOLD_POINTS = 2;
 const LOAD_MORE_TRIGGER_DRAG_PX = 18;
 const SNAP_DURATION_MS = 110;
+const SNAP_MAX_DURATION_MS = 720;
 const FOCUS_ZOOM_DURATION_MS = 220;
+const FOCUS_ZOOM_MAX_DURATION_MS = 420;
+const FOCUS_ZOOM_DURATION_PER_OCTAVE_MS = 42;
 const Y_AXIS_LAG_DURATION_MS = 180;
 const HEART_CHART_VIEWBOX_HEIGHT = 40;
 const MARKER_BADGE_SIZE = 24;
@@ -211,6 +214,37 @@ export function getHeartViewportZoomScale(baseWindowPointCount: number, windowPo
   }
 
   return baseViewBoxWidth / visibleViewBoxWidth;
+}
+
+export function getHeartFocusZoomTransitionDurationMs(currentZoomScale: number, nextZoomScale: number) {
+  const safeCurrentZoomScale = Math.max(currentZoomScale, 0.0001);
+  const safeNextZoomScale = Math.max(nextZoomScale, 0.0001);
+  const zoomOctaves = Math.abs(Math.log2(safeNextZoomScale / safeCurrentZoomScale));
+
+  if (!Number.isFinite(zoomOctaves) || zoomOctaves <= 0.01) {
+    return FOCUS_ZOOM_DURATION_MS;
+  }
+
+  return clamp(
+    Math.round(FOCUS_ZOOM_DURATION_MS + zoomOctaves * FOCUS_ZOOM_DURATION_PER_OCTAVE_MS),
+    FOCUS_ZOOM_DURATION_MS,
+    FOCUS_ZOOM_MAX_DURATION_MS,
+  );
+}
+
+export function getHeartJumpToLatestTransitionDurationMs(distancePx: number, viewportWidth: number) {
+  const safeDistancePx = Math.max(distancePx, 0);
+  const referenceDistancePx = Math.max(viewportWidth, 1);
+
+  if (!Number.isFinite(safeDistancePx) || safeDistancePx <= 0) {
+    return SNAP_DURATION_MS;
+  }
+
+  return clamp(
+    Math.round((safeDistancePx / referenceDistancePx) * SNAP_DURATION_MS),
+    SNAP_DURATION_MS,
+    SNAP_MAX_DURATION_MS,
+  );
 }
 
 export function getHeartWindowPointCountForZoomScale(baseWindowPointCount: number, zoomScale: number) {
@@ -795,6 +829,9 @@ function HeartMarkerBadge({
 const HeartChartSvgPlot = memo(function HeartChartSvgPlot({
   activeSleepStageColor,
   areas,
+  baseGradientEnd,
+  baseGradientStart,
+  baseShadowColor,
   baseDomain,
   bridgePaths,
   chartContentWidth,
@@ -802,11 +839,12 @@ const HeartChartSvgPlot = memo(function HeartChartSvgPlot({
   chartId,
   chartPointSpacingValue,
   chartTestID,
-  gradientEnd,
-  gradientStart,
+  focusGradientEnd,
+  focusGradientStart,
+  focusShadowColor,
+  focusTransitionProgress,
   guideLineY,
   paths,
-  shadowColor,
   sleepStageHighlightClipId,
   sleepStageHighlightFillId,
   sleepStageHighlights,
@@ -819,6 +857,9 @@ const HeartChartSvgPlot = memo(function HeartChartSvgPlot({
 }: {
   activeSleepStageColor: string | null;
   areas: string[];
+  baseGradientEnd: string;
+  baseGradientStart: string;
+  baseShadowColor: string;
   baseDomain: ReturnType<typeof buildTrendDomain>;
   bridgePaths: string[];
   chartContentWidth: number;
@@ -826,11 +867,12 @@ const HeartChartSvgPlot = memo(function HeartChartSvgPlot({
   chartId: string;
   chartPointSpacingValue: SharedValue<number>;
   chartTestID?: string;
-  gradientEnd: string;
-  gradientStart: string;
+  focusGradientEnd: string;
+  focusGradientStart: string;
+  focusShadowColor: string;
+  focusTransitionProgress: SharedValue<number>;
   guideLineY: number;
   paths: string[];
-  shadowColor: string;
   sleepStageHighlightClipId: string | null;
   sleepStageHighlightFillId: string | null;
   sleepStageHighlights: HeartSleepStageHighlight[];
@@ -896,6 +938,18 @@ const HeartChartSvgPlot = memo(function HeartChartSvgPlot({
     },
     [baseDomain, yAxisDomainMax, yAxisDomainMin],
   );
+  const animatedBasePlotOpacityProps = useAnimatedProps(
+    () => ({
+      opacity: 1 - focusTransitionProgress.value,
+    }),
+    [focusTransitionProgress],
+  );
+  const animatedFocusedPlotOpacityProps = useAnimatedProps(
+    () => ({
+      opacity: focusTransitionProgress.value,
+    }),
+    [focusTransitionProgress],
+  );
 
   return (
     <Animated.View pointerEvents="none" style={styles.chartCanvas}>
@@ -905,14 +959,23 @@ const HeartChartSvgPlot = memo(function HeartChartSvgPlot({
         viewBox={`0 0 ${Math.max(viewportWidth, 1)} ${HEART_CHART_VIEWBOX_HEIGHT}`}
         width="100%">
         <Defs>
-          <SvgLinearGradient id={`${chartId}-stroke`} x1="0%" x2="100%" y1="100%" y2="0%">
-            <Stop offset="0%" stopColor={gradientStart} />
-            <Stop offset="100%" stopColor={gradientEnd} />
+          <SvgLinearGradient id={`${chartId}-stroke-base`} x1="0%" x2="100%" y1="100%" y2="0%">
+            <Stop offset="0%" stopColor={baseGradientStart} />
+            <Stop offset="100%" stopColor={baseGradientEnd} />
           </SvgLinearGradient>
-          <SvgLinearGradient id={`${chartId}-fill`} x1="0%" x2="0%" y1="0%" y2="100%">
-            <Stop offset="0%" stopColor={gradientEnd} stopOpacity="0.6" />
-            <Stop offset="58%" stopColor={gradientStart} stopOpacity="0.2" />
-            <Stop offset="100%" stopColor={gradientStart} stopOpacity="0" />
+          <SvgLinearGradient id={`${chartId}-fill-base`} x1="0%" x2="0%" y1="0%" y2="100%">
+            <Stop offset="0%" stopColor={baseGradientEnd} stopOpacity="0.6" />
+            <Stop offset="58%" stopColor={baseGradientStart} stopOpacity="0.2" />
+            <Stop offset="100%" stopColor={baseGradientStart} stopOpacity="0" />
+          </SvgLinearGradient>
+          <SvgLinearGradient id={`${chartId}-stroke-focus`} x1="0%" x2="100%" y1="100%" y2="0%">
+            <Stop offset="0%" stopColor={focusGradientStart} />
+            <Stop offset="100%" stopColor={focusGradientEnd} />
+          </SvgLinearGradient>
+          <SvgLinearGradient id={`${chartId}-fill-focus`} x1="0%" x2="0%" y1="0%" y2="100%">
+            <Stop offset="0%" stopColor={focusGradientEnd} stopOpacity="0.6" />
+            <Stop offset="58%" stopColor={focusGradientStart} stopOpacity="0.2" />
+            <Stop offset="100%" stopColor={focusGradientStart} stopOpacity="0" />
           </SvgLinearGradient>
           <SvgLinearGradient
             gradientUnits="userSpaceOnUse"
@@ -971,11 +1034,6 @@ const HeartChartSvgPlot = memo(function HeartChartSvgPlot({
             animatedProps={animatedChartYAxisProps}
             testID={chartTestID ? `${chartTestID}-y-domain` : undefined}>
             <G clipPath={`url(#${chartPlotClipId})`}>
-              {areas.map((area, index) => (
-                <Path key={`area-${index}`} d={area} fill={`url(#${chartId}-fill)`} />
-              ))}
-            </G>
-            <G clipPath={`url(#${chartPlotClipId})`}>
               <Line
                 stroke="rgba(149, 162, 188, 0.22)"
                 strokeDasharray="0.36 0.36"
@@ -1000,29 +1058,62 @@ const HeartChartSvgPlot = memo(function HeartChartSvgPlot({
                   vectorEffect="non-scaling-stroke"
                 />
               ))}
-              <G>
+              <AnimatedSvgGroup animatedProps={animatedBasePlotOpacityProps}>
+                <G clipPath={`url(#${chartPlotClipId})`}>
+                  {areas.map((area, index) => (
+                    <Path key={`base-area-${index}`} d={area} fill={`url(#${chartId}-fill-base)`} />
+                  ))}
+                </G>
                 {paths.map((path, index) => (
                   <Path
-                    key={`shadow-${index}`}
+                    key={`base-shadow-${index}`}
                     d={path}
                     fill="none"
-                    stroke={shadowColor}
+                    stroke={baseShadowColor}
                     strokeWidth="1.6"
                     vectorEffect="non-scaling-stroke"
                   />
                 ))}
                 {paths.map((path, index) => (
                   <Path
-                    key={`line-${index}`}
+                    key={`base-line-${index}`}
                     d={path}
                     fill="none"
-                    stroke={`url(#${chartId}-stroke)`}
+                    stroke={`url(#${chartId}-stroke-base)`}
                     strokeLinecap="round"
                     strokeWidth="0.8"
                     vectorEffect="non-scaling-stroke"
                   />
                 ))}
-              </G>
+              </AnimatedSvgGroup>
+              <AnimatedSvgGroup animatedProps={animatedFocusedPlotOpacityProps}>
+                <G clipPath={`url(#${chartPlotClipId})`}>
+                  {areas.map((area, index) => (
+                    <Path key={`focus-area-${index}`} d={area} fill={`url(#${chartId}-fill-focus)`} />
+                  ))}
+                </G>
+                {paths.map((path, index) => (
+                  <Path
+                    key={`focus-shadow-${index}`}
+                    d={path}
+                    fill="none"
+                    stroke={focusShadowColor}
+                    strokeWidth="1.6"
+                    vectorEffect="non-scaling-stroke"
+                  />
+                ))}
+                {paths.map((path, index) => (
+                  <Path
+                    key={`focus-line-${index}`}
+                    d={path}
+                    fill="none"
+                    stroke={`url(#${chartId}-stroke-focus)`}
+                    strokeLinecap="round"
+                    strokeWidth="0.8"
+                    vectorEffect="non-scaling-stroke"
+                  />
+                ))}
+              </AnimatedSvgGroup>
               {sleepStageHighlights.length > 0 && sleepStageHighlightClipId && sleepStageHighlightFillId && activeSleepStageColor ? (
                 <G clipPath={`url(#${sleepStageHighlightClipId})`}>
                   <G mask={`url(#${chartId}-fill-mask)`}>
@@ -1122,7 +1213,7 @@ export function PannableHeartChart({
   markers?: readonly HeartIntradayMarker[];
   onActivityDraftChange?: (draft: HeartActivityDraft) => void;
   onFocusedMarkerChange?: (marker: HeartIntradayMarker | null) => void;
-  onFocusTransitionStateChange?: (isTransitioning: boolean) => void;
+  onFocusTransitionStateChange?: (isTransitioning: boolean, transitionDurationMs?: number) => void;
   onLoadMore?: () => void;
   onPinchZoomStepChange?: (value: string) => void;
   onViewportWindowChange?: (window: HeartViewportWindowState) => void;
@@ -1168,7 +1259,10 @@ export function PannableHeartChart({
   const pendingLoadMoreRef = useRef(false);
   const previousJumpToLatestSignalRef = useRef<number | undefined>(jumpToLatestSignal);
   const skipLatestWindowChangeRef = useRef(true);
+  const baseAccentColorRef = useRef(accentColor);
+  const focusedAccentColorRef = useRef(accentColor);
   const focusTransitionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const focusTransitionDurationRef = useRef(FOCUS_ZOOM_DURATION_MS);
   const yAxisTransitionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingPinchZoomSyncRef = useRef<{ windowPointCount: number } | null>(null);
   const chartId = useId().replace(/[:]/g, '');
@@ -1306,8 +1400,8 @@ export function PannableHeartChart({
     [focusedMarkerId, markers, requestedFocusedMarker],
   );
   const reportFocusTransitionStateChange = useCallback(
-    (isTransitioning: boolean) => {
-      onFocusTransitionStateChange?.(isTransitioning);
+    (isTransitioning: boolean, transitionDurationMs?: number) => {
+      onFocusTransitionStateChange?.(isTransitioning, transitionDurationMs);
     },
     [onFocusTransitionStateChange],
   );
@@ -1319,12 +1413,12 @@ export function PannableHeartChart({
     clearTimeout(focusTransitionTimeoutRef.current);
     focusTransitionTimeoutRef.current = null;
   }, []);
-  const scheduleFocusTransitionSettled = useCallback(() => {
+  const scheduleFocusTransitionSettled = useCallback((durationMs: number) => {
     clearFocusTransitionTimeout();
     focusTransitionTimeoutRef.current = setTimeout(() => {
       focusTransitionTimeoutRef.current = null;
       reportFocusTransitionStateChange(false);
-    }, FOCUS_ZOOM_DURATION_MS);
+    }, durationMs);
   }, [clearFocusTransitionTimeout, reportFocusTransitionStateChange]);
   const clearYAxisTransitionTimeout = useCallback(() => {
     if (yAxisTransitionTimeoutRef.current === null) {
@@ -1413,56 +1507,30 @@ export function PannableHeartChart({
     () => buildHeartSleepStageSelectionRanges(points.length, focusedMarker, highlightedSleepStage),
     [focusedMarker, highlightedSleepStage, points.length],
   );
-  const draftVisibleWindowStartMinuteOffset = windowStart * pointIntervalMinutes;
-  const draftVisibleWindowEndMinuteOffset = Math.max(
-    draftVisibleWindowStartMinuteOffset + MIN_ACTIVITY_DRAFT_MINUTE_SPAN,
-    (windowStart + safeWindowPointCount - 1) * pointIntervalMinutes,
-  );
   const activityDraftVisual = useMemo(() => {
-    if (!activityDraft || viewportWidth <= 0 || pointSpacing <= 0 || viewportHeight <= 0) {
+    if (!activityDraft || fullSeriesSpan <= 0 || viewportHeight <= 0) {
       return null;
     }
 
-    const minuteSpacing = pointSpacing / pointIntervalMinutes;
-    if (minuteSpacing <= 0) {
+    const totalSeriesMinutes = Math.max((points.length - 1) * pointIntervalMinutes, 1);
+    const startFraction = clampFraction(activityDraft.startMinuteOffset / totalSeriesMinutes);
+    const endFraction = clampFraction(
+      Math.max(activityDraft.startMinuteOffset, activityDraft.endMinuteOffset) / totalSeriesMinutes,
+    );
+    if (endFraction <= startFraction) {
       return null;
     }
 
-    const clampedStartMinuteOffset = clamp(
-      activityDraft.startMinuteOffset,
-      draftVisibleWindowStartMinuteOffset,
-      Math.max(
-        draftVisibleWindowStartMinuteOffset,
-        draftVisibleWindowEndMinuteOffset - MIN_ACTIVITY_DRAFT_MINUTE_SPAN,
-      ),
-    );
-    const clampedEndMinuteOffset = clamp(
-      activityDraft.endMinuteOffset,
-      clampedStartMinuteOffset + MIN_ACTIVITY_DRAFT_MINUTE_SPAN,
-      draftVisibleWindowEndMinuteOffset,
-    );
-    const startX = Math.max(0, (clampedStartMinuteOffset - draftVisibleWindowStartMinuteOffset) * minuteSpacing);
-    const endX = Math.min(
-      viewportWidth,
-      (clampedEndMinuteOffset - draftVisibleWindowStartMinuteOffset) * minuteSpacing,
-    );
+    const startX = startFraction * fullSeriesSpan;
+    const endX = endFraction * fullSeriesSpan;
     const bandWidth = Math.max(endX - startX, 2);
-    const handleMaxLeft = Math.max(viewportWidth - ACTIVITY_DRAFT_HANDLE_WIDTH, 0);
-    const startHandleLeft = clamp(startX - ACTIVITY_DRAFT_HANDLE_WIDTH / 2, 0, handleMaxLeft);
-    const endHandleLeft = clamp(endX - ACTIVITY_DRAFT_HANDLE_WIDTH / 2, 0, handleMaxLeft);
+    const startHandleLeft = startX - ACTIVITY_DRAFT_HANDLE_WIDTH / 2;
+    const endHandleLeft = endX - ACTIVITY_DRAFT_HANDLE_WIDTH / 2;
     const bodyWidth = Math.max(bandWidth + 24, ACTIVITY_DRAFT_BODY_MIN_WIDTH);
-    const bodyLeft = clamp(
-      startX + bandWidth / 2 - bodyWidth / 2,
-      0,
-      Math.max(viewportWidth - bodyWidth, 0),
-    );
+    const bodyLeft = startX + bandWidth / 2 - bodyWidth / 2;
     const bandTop = viewportHeight * (ACTIVITY_DRAFT_BAND_TOP / HEART_CHART_VIEWBOX_HEIGHT);
     const bandHeight = viewportHeight * (ACTIVITY_DRAFT_BAND_HEIGHT / HEART_CHART_VIEWBOX_HEIGHT);
-    const inlineBadgeLeft = clamp(
-      startX + bandWidth / 2 - MARKER_BADGE_SIZE / 2,
-      0,
-      Math.max(viewportWidth - MARKER_BADGE_SIZE, 0),
-    );
+    const inlineBadgeLeft = startX + bandWidth / 2 - MARKER_BADGE_SIZE / 2;
     const inlineBadgeTop = 8;
     const handleHeight = Math.min(Math.max(32, bandHeight * 0.38), bandHeight + 8);
     const handleTop = bandTop + (bandHeight - handleHeight) / 2;
@@ -1484,11 +1552,10 @@ export function PannableHeartChart({
     };
   }, [
     activityDraft,
-    draftVisibleWindowEndMinuteOffset,
-    draftVisibleWindowStartMinuteOffset,
-    pointSpacing,
+    fullSeriesSpan,
+    pointIntervalMinutes,
+    points.length,
     viewportHeight,
-    viewportWidth,
   ]);
   const activityDraftBadgeMarker = useMemo(() => {
     if (!activityDraft || !activityDraftVisual) {
@@ -1566,12 +1633,14 @@ export function PannableHeartChart({
   }, []);
 
   const commitSelection = useCallback((nextSelectionIndex: number | null) => {
-    if (selectionRef.current === nextSelectionIndex) {
+    const normalizedSelectionIndex = nextSelectionIndex === null ? null : Math.round(nextSelectionIndex);
+
+    if (selectionRef.current === normalizedSelectionIndex) {
       return;
     }
 
-    selectionRef.current = nextSelectionIndex;
-    setSelectionIndex(nextSelectionIndex);
+    selectionRef.current = normalizedSelectionIndex;
+    setSelectionIndex(normalizedSelectionIndex);
   }, []);
 
   const handlePinchZoomStart = useCallback(() => {
@@ -1597,8 +1666,17 @@ export function PannableHeartChart({
         return;
       }
 
-      const pointOffset = clamp(Math.round(touchX / pointSpacing), 0, safeWindowPointCount - 1);
-      const nextIndex = clamp(windowStartRef.current + pointOffset, 0, points.length - 1);
+      const minVisibleIndex = clamp(Math.ceil(windowStartRef.current), 0, points.length - 1);
+      const maxVisibleIndex = clamp(
+        Math.floor(windowStartRef.current + Math.max(safeWindowPointCount - 1, 0)),
+        minVisibleIndex,
+        points.length - 1,
+      );
+      const nextIndex = clamp(
+        Math.round(windowStartRef.current + touchX / pointSpacing),
+        minVisibleIndex,
+        maxVisibleIndex,
+      );
 
       if (
         sleepStageSelectionRanges.length > 0 &&
@@ -1632,6 +1710,7 @@ export function PannableHeartChart({
       previousAnimatedWindowStart,
       reportTransitionSettledWhenComplete,
       resolvedWindowPointCount,
+      transitionDurationMs,
     }: {
       currentAnchorScreenX: number;
       clampedWindowStart: number;
@@ -1642,12 +1721,14 @@ export function PannableHeartChart({
       previousAnimatedWindowStart: number;
       reportTransitionSettledWhenComplete: boolean;
       resolvedWindowPointCount: number;
+      transitionDurationMs: number;
     }) => {
       activeWindowPointCountRef.current = resolvedWindowPointCount;
       windowStartRef.current = clampedWindowStart;
       gestureStartWindowStart.value = clampedWindowStart;
       reportedWindowStart.value = clampedWindowStart;
       viewportZoomAnchorIndex.value = nextAnchorIndex;
+      focusTransitionDurationRef.current = transitionDurationMs;
 
       startTransition(() => {
         setActiveWindowPointCount(resolvedWindowPointCount);
@@ -1662,7 +1743,7 @@ export function PannableHeartChart({
 
         if (reportTransitionSettledWhenComplete) {
           clearFocusTransitionTimeout();
-          reportFocusTransitionStateChange(false);
+          reportFocusTransitionStateChange(false, transitionDurationMs);
         }
 
         return;
@@ -1670,9 +1751,9 @@ export function PannableHeartChart({
 
       viewportZoomAnchorScreenX.value = currentAnchorScreenX;
       animatedWindowStart.value = previousAnimatedWindowStart;
-      animatedWindowStart.value = withTiming(clampedWindowStart, { duration: FOCUS_ZOOM_DURATION_MS });
-      viewportZoomScale.value = withTiming(nextZoomScale, { duration: FOCUS_ZOOM_DURATION_MS });
-      viewportZoomAnchorScreenX.value = withTiming(nextAnchorScreenX, { duration: FOCUS_ZOOM_DURATION_MS });
+      animatedWindowStart.value = withTiming(clampedWindowStart, { duration: transitionDurationMs });
+      viewportZoomScale.value = withTiming(nextZoomScale, { duration: transitionDurationMs });
+      viewportZoomAnchorScreenX.value = withTiming(nextAnchorScreenX, { duration: transitionDurationMs });
     },
     [
       animatedWindowStart,
@@ -1725,6 +1806,9 @@ export function PannableHeartChart({
       const nextAnchorScreenX = nextZoomScale * (nextAnchorIndex - clampedWindowStart) * chartPointSpacing;
       const isFocusStateChanging = focusedMarkerId !== nextFocusedMarkerId;
       const isReturningFromFocusedMarker = focusedMarkerId !== null && nextFocusedMarkerId === null;
+      const transitionDurationMs = isFocusStateChanging
+        ? getHeartFocusZoomTransitionDurationMs(viewportZoomScale.value, nextZoomScale)
+        : FOCUS_ZOOM_DURATION_MS;
 
       pendingLoadMoreRef.current = false;
       loadRequested.value = false;
@@ -1737,17 +1821,17 @@ export function PannableHeartChart({
 
       if (viewportWidth > 0) {
         if (isReturningFromFocusedMarker) {
-          animateYAxisDomainWhileLocked(nextVisibleDomain, FOCUS_ZOOM_DURATION_MS);
+          animateYAxisDomainWhileLocked(nextVisibleDomain, transitionDurationMs);
         } else {
-          scheduleYAxisDomainUnlock(FOCUS_ZOOM_DURATION_MS);
+          scheduleYAxisDomainUnlock(transitionDurationMs);
         }
       } else {
         unlockYAxisDomain();
       }
 
       if (isFocusStateChanging) {
-        reportFocusTransitionStateChange(true);
-        scheduleFocusTransitionSettled();
+        reportFocusTransitionStateChange(true, transitionDurationMs);
+        scheduleFocusTransitionSettled(transitionDurationMs);
       }
 
       if (nextFocusedMarkerId !== null && currentVisibleDomain && nextFocusedDomain) {
@@ -1776,6 +1860,7 @@ export function PannableHeartChart({
         previousAnimatedWindowStart,
         reportTransitionSettledWhenComplete: isFocusStateChanging,
         resolvedWindowPointCount,
+        transitionDurationMs,
       });
     },
     [
@@ -2036,11 +2121,14 @@ export function PannableHeartChart({
 
     cancelAnimation(animatedWindowStart);
     cancelAnimation(viewportZoomAnchorScreenX);
+    const currentWindowStart = clamp(animatedWindowStart.value, 0, maxWindowStartRef.current);
+    const jumpDistancePx = Math.abs(nextWindowStart - currentWindowStart) * chartPointSpacing;
+    const jumpDurationMs = getHeartJumpToLatestTransitionDurationMs(jumpDistancePx, viewportWidth);
     gestureStartWindowStart.value = nextWindowStart;
-    viewportZoomAnchorIndex.value = animatedWindowStart.value;
+    viewportZoomAnchorIndex.value = currentWindowStart;
     viewportZoomAnchorScreenX.value = 0;
-    scheduleYAxisDomainUnlock(SNAP_DURATION_MS);
-    animatedWindowStart.value = withTiming(nextWindowStart, { duration: SNAP_DURATION_MS }, (finished) => {
+    scheduleYAxisDomainUnlock(jumpDurationMs);
+    animatedWindowStart.value = withTiming(nextWindowStart, { duration: jumpDurationMs }, (finished) => {
       if (!finished) {
         return;
       }
@@ -2048,10 +2136,11 @@ export function PannableHeartChart({
       reportedWindowStart.value = nextWindowStart;
       runOnJS(syncWindowStart)(nextWindowStart);
     });
-    viewportZoomAnchorIndex.value = withTiming(nextWindowStart, { duration: SNAP_DURATION_MS });
+    viewportZoomAnchorIndex.value = withTiming(nextWindowStart, { duration: jumpDurationMs });
   }, [
     animatedWindowStart,
     cancelAnimation,
+    chartPointSpacing,
     commitSelection,
     gestureStartWindowStart,
     applyWindowZoom,
@@ -2063,6 +2152,7 @@ export function PannableHeartChart({
     reportedWindowStart,
     scheduleYAxisDomainUnlock,
     syncWindowStart,
+    viewportWidth,
     viewportZoomAnchorIndex,
     viewportZoomAnchorScreenX,
   ]);
@@ -2322,6 +2412,17 @@ export function PannableHeartChart({
   }, [activityDraft]);
 
   useEffect(() => {
+    const hasFocusTarget = requestedFocusedMarker !== null || requestedFocusedMarkerId !== null || focusedMarkerId !== null;
+
+    if (hasFocusTarget) {
+      focusedAccentColorRef.current = accentColor;
+      return;
+    }
+
+    baseAccentColorRef.current = accentColor;
+  }, [accentColor, focusedMarkerId, requestedFocusedMarker, requestedFocusedMarkerId]);
+
+  useEffect(() => {
     if (skipLatestWindowChangeRef.current) {
       skipLatestWindowChangeRef.current = false;
       return;
@@ -2350,7 +2451,7 @@ export function PannableHeartChart({
     focusTransitionProgress.value = withTiming(
       focusedMarkerId !== null ? 1 : 0,
       {
-        duration: FOCUS_ZOOM_DURATION_MS,
+        duration: focusTransitionDurationRef.current,
         easing: Easing.out(Easing.cubic),
       },
     );
@@ -2758,13 +2859,24 @@ export function PannableHeartChart({
     }),
     [focusTransitionProgress],
   );
+  const animatedActivityDraftControlScaleStyle = useAnimatedStyle(
+    () => ({
+      transform: [{ scaleX: 1 / Math.max(viewportZoomScale.value, 0.0001) }],
+    }),
+    [viewportZoomScale],
+  );
 
   if (points.length === 0) {
     return null;
   }
 
-  const [gradientStart, gradientEnd] = colorStops(accentColor);
-  const shadowColor = chartShadowColor(accentColor);
+  const hasFocusTarget = requestedFocusedMarker !== null || requestedFocusedMarkerId !== null || focusedMarkerId !== null;
+  const baseChartAccentColor = baseAccentColorRef.current;
+  const focusedChartAccentColor = hasFocusTarget ? accentColor : focusedAccentColorRef.current;
+  const [baseGradientStart, baseGradientEnd] = colorStops(baseChartAccentColor);
+  const [focusGradientStart, focusGradientEnd] = colorStops(focusedChartAccentColor);
+  const baseShadowColor = chartShadowColor(baseChartAccentColor);
+  const focusShadowColor = chartShadowColor(focusedChartAccentColor);
 
   useRenderTrace(`chart.heart.container.${chartTestID ?? 'default'}`, {
     activeWindowPointCount,
@@ -2830,6 +2942,9 @@ export function PannableHeartChart({
           <HeartChartSvgPlot
             activeSleepStageColor={activeSleepStageColor}
             areas={areas}
+            baseGradientEnd={baseGradientEnd}
+            baseGradientStart={baseGradientStart}
+            baseShadowColor={baseShadowColor}
             baseDomain={baseDomain}
             bridgePaths={bridgePaths}
             chartContentWidth={chartContentWidth}
@@ -2837,11 +2952,12 @@ export function PannableHeartChart({
             chartId={chartId}
             chartPointSpacingValue={chartPointSpacingValue}
             chartTestID={chartTestID}
-            gradientEnd={gradientEnd}
-            gradientStart={gradientStart}
+            focusGradientEnd={focusGradientEnd}
+            focusGradientStart={focusGradientStart}
+            focusShadowColor={focusShadowColor}
+            focusTransitionProgress={focusTransitionProgress}
             guideLineY={guideLineY}
             paths={paths}
-            shadowColor={shadowColor}
             sleepStageHighlightClipId={sleepStageHighlightClipId}
             sleepStageHighlightFillId={sleepStageHighlightFillId}
             sleepStageHighlights={sleepStageHighlights}
@@ -2871,93 +2987,105 @@ export function PannableHeartChart({
             />
           </View>
           {activityDraftVisual && activityDraft ? (
-            <View pointerEvents="box-none" style={styles.activityDraftLayer}>
-              <View
-                pointerEvents="none"
-                style={[
-                  styles.activityDraftBand,
-                  {
-                    backgroundColor: activityDraftFillColor,
-                    borderColor: activityDraftAccentColor,
-                    height: activityDraftVisual.bandHeight,
-                    left: activityDraftVisual.startX,
-                    top: activityDraftVisual.bandTop,
-                    width: activityDraftVisual.bandWidth,
-                  },
-                ]}
-                testID={chartTestID ? `${chartTestID}-draft-band` : undefined}
-              />
-              {activityDraftBadgeMarker ? (
-                <View
-                  pointerEvents="none"
-                  style={[
-                    styles.activityDraftInlineBadgeWrap,
-                    {
-                      left: activityDraftVisual.inlineBadgeLeft,
-                      top: activityDraftVisual.inlineBadgeTop,
-                    },
-                  ]}
-                  testID={activityDraftBadgeMarker.testID}>
-                  <View
-                    style={[
-                      styles.activityDraftInlineBadge,
-                      { borderColor: activityDraftBadgeMarker.accentColor },
-                    ]}>
-                    <Ionicons color={activityDraftBadgeMarker.accentColor} name={activityDraftBadgeMarker.iconName} size={12} />
-                  </View>
-                </View>
-              ) : null}
-              <View
-                style={[
-                  styles.activityDraftDragBody,
-                  {
-                    height: activityDraftVisual.bandHeight,
-                    left: activityDraftVisual.bodyLeft,
-                    top: activityDraftVisual.bandTop,
-                    width: activityDraftVisual.bodyWidth,
-                  },
-                ]}
-                testID={chartTestID ? `${chartTestID}-draft-body` : undefined}
-                {...activityDraftBodyResponder.panHandlers}
-              />
-              <View
-                style={[
-                  styles.activityDraftHandle,
-                  {
-                    height: activityDraftVisual.handleHeight,
-                    left: activityDraftVisual.startHandleLeft,
-                    top: activityDraftVisual.handleTop,
-                  },
-                ]}
-                testID={chartTestID ? `${chartTestID}-draft-start-handle` : undefined}
-                {...activityDraftStartHandleResponder.panHandlers}>
-                <View
-                  pointerEvents="none"
-                  style={[
-                    styles.activityDraftHandleGrip,
-                    { backgroundColor: activityDraftAccentColor },
-                  ]}
-                />
-              </View>
-              <View
-                style={[
-                  styles.activityDraftHandle,
-                  {
-                    height: activityDraftVisual.handleHeight,
-                    left: activityDraftVisual.endHandleLeft,
-                    top: activityDraftVisual.handleTop,
-                  },
-                ]}
-                testID={chartTestID ? `${chartTestID}-draft-end-handle` : undefined}
-                {...activityDraftEndHandleResponder.panHandlers}>
-                <View
-                  pointerEvents="none"
-                  style={[
-                    styles.activityDraftHandleGrip,
-                    { backgroundColor: activityDraftAccentColor },
-                  ]}
-                />
-              </View>
+            <View pointerEvents="box-none" style={styles.activityDraftViewport}>
+              <Animated.View pointerEvents="box-none" style={[styles.chartCameraLayer, animatedViewportCameraStyle]}>
+                <Animated.View pointerEvents="box-none" style={[styles.chartZoomLayer, animatedViewportZoomStyle]}>
+                  <Animated.View
+                    pointerEvents="box-none"
+                    style={[styles.chartContent, animatedChartContentStyle, { width: chartContentWidth }]}
+                    testID={chartTestID ? `${chartTestID}-draft-content` : undefined}>
+                    <View
+                      pointerEvents="none"
+                      style={[
+                        styles.activityDraftBand,
+                        {
+                          backgroundColor: activityDraftFillColor,
+                          borderColor: activityDraftAccentColor,
+                          height: activityDraftVisual.bandHeight,
+                          left: activityDraftVisual.startX,
+                          top: activityDraftVisual.bandTop,
+                          width: activityDraftVisual.bandWidth,
+                        },
+                      ]}
+                      testID={chartTestID ? `${chartTestID}-draft-band` : undefined}
+                    />
+                    {activityDraftBadgeMarker ? (
+                      <Animated.View
+                        pointerEvents="none"
+                        style={[
+                          styles.activityDraftInlineBadgeWrap,
+                          animatedActivityDraftControlScaleStyle,
+                          {
+                            left: activityDraftVisual.inlineBadgeLeft,
+                            top: activityDraftVisual.inlineBadgeTop,
+                          },
+                        ]}
+                        testID={activityDraftBadgeMarker.testID}>
+                        <View
+                          style={[
+                            styles.activityDraftInlineBadge,
+                            { borderColor: activityDraftBadgeMarker.accentColor },
+                          ]}>
+                          <Ionicons color={activityDraftBadgeMarker.accentColor} name={activityDraftBadgeMarker.iconName} size={12} />
+                        </View>
+                      </Animated.View>
+                    ) : null}
+                    <View
+                      style={[
+                        styles.activityDraftDragBody,
+                        {
+                          height: activityDraftVisual.bandHeight,
+                          left: activityDraftVisual.bodyLeft,
+                          top: activityDraftVisual.bandTop,
+                          width: activityDraftVisual.bodyWidth,
+                        },
+                      ]}
+                      testID={chartTestID ? `${chartTestID}-draft-body` : undefined}
+                      {...activityDraftBodyResponder.panHandlers}
+                    />
+                    <Animated.View
+                      style={[
+                        styles.activityDraftHandle,
+                        animatedActivityDraftControlScaleStyle,
+                        {
+                          height: activityDraftVisual.handleHeight,
+                          left: activityDraftVisual.startHandleLeft,
+                          top: activityDraftVisual.handleTop,
+                        },
+                      ]}
+                      testID={chartTestID ? `${chartTestID}-draft-start-handle` : undefined}
+                      {...activityDraftStartHandleResponder.panHandlers}>
+                      <View
+                        pointerEvents="none"
+                        style={[
+                          styles.activityDraftHandleGrip,
+                          { backgroundColor: activityDraftAccentColor },
+                        ]}
+                      />
+                    </Animated.View>
+                    <Animated.View
+                      style={[
+                        styles.activityDraftHandle,
+                        animatedActivityDraftControlScaleStyle,
+                        {
+                          height: activityDraftVisual.handleHeight,
+                          left: activityDraftVisual.endHandleLeft,
+                          top: activityDraftVisual.handleTop,
+                        },
+                      ]}
+                      testID={chartTestID ? `${chartTestID}-draft-end-handle` : undefined}
+                      {...activityDraftEndHandleResponder.panHandlers}>
+                      <View
+                        pointerEvents="none"
+                        style={[
+                          styles.activityDraftHandleGrip,
+                          { backgroundColor: activityDraftAccentColor },
+                        ]}
+                      />
+                    </Animated.View>
+                  </Animated.View>
+                </Animated.View>
+              </Animated.View>
             </View>
           ) : null}
           <View pointerEvents={isFocusedWindow || activityDraft ? 'none' : 'box-none'} style={styles.markerViewport}>
@@ -3051,7 +3179,7 @@ const styles = StyleSheet.create({
   overlay: {
     ...StyleSheet.absoluteFillObject,
   },
-  activityDraftLayer: {
+  activityDraftViewport: {
     ...StyleSheet.absoluteFillObject,
     zIndex: 4,
   },
