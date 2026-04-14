@@ -3482,22 +3482,24 @@ export function PannableHeartChart({
                 },
               ]}>
               {markerVisuals.length > 0 ? (
-                <View pointerEvents="none" style={styles.markerBandViewport}>
-                  <Animated.View pointerEvents="none" style={[styles.markerBandLayer, animatedMarkerLayerStyle]}>
-                    {markerVisuals.map((marker) => (
-                      <HeartMarkerBand
-                        key={`marker-band-${marker.id}`}
-                        chartPointSpacingValue={chartPointSpacingValue}
-                        marker={marker}
-                        markerBandHeight={markerBandHeight}
-                        markerBandRadius={markerBandRadius}
-                        markerBandTop={markerBandTop}
-                        viewportZoomAnchorIndex={viewportZoomAnchorIndex}
-                        viewportZoomAnchorScreenX={viewportZoomAnchorScreenX}
-                        viewportZoomScale={viewportZoomScale}
-                      />
-                    ))}
-                  </Animated.View>
+                <View pointerEvents="none" style={styles.markerBandClipViewport}>
+                  <View pointerEvents="none" style={styles.markerBandViewport}>
+                    <Animated.View pointerEvents="none" style={[styles.markerBandLayer, animatedMarkerLayerStyle]}>
+                      {markerVisuals.map((marker) => (
+                        <HeartMarkerBand
+                          key={`marker-band-${marker.id}`}
+                          chartPointSpacingValue={chartPointSpacingValue}
+                          marker={marker}
+                          markerBandHeight={markerBandHeight}
+                          markerBandRadius={markerBandRadius}
+                          markerBandTop={markerBandTop}
+                          viewportZoomAnchorIndex={viewportZoomAnchorIndex}
+                          viewportZoomAnchorScreenX={viewportZoomAnchorScreenX}
+                          viewportZoomScale={viewportZoomScale}
+                        />
+                      ))}
+                    </Animated.View>
+                  </View>
                 </View>
               ) : null}
               <HeartChartSvgPlot
@@ -3528,44 +3530,102 @@ export function PannableHeartChart({
                 yAxisDomainMax={focusedDomainMax}
                 yAxisDomainMin={focusedDomainMin}
               />
-              <View collapsable={false} style={styles.overlay} testID={chartTestID} {...panResponder.panHandlers}>
-                <ChartScrubOverlay
-                  backgroundColor={colors.background}
-                  chartHeight={plotViewportHeight}
-                  chartWidth={viewportWidth}
-                  dotTestID={chartTestID ? `${chartTestID}-active-dot` : undefined}
-                  dotX={selectionX}
-                  dotY={selectionY}
-                  guideTestID={chartTestID ? `${chartTestID}-active-guide` : undefined}
-                  lineBottom={HEART_CHART_VIEWBOX_HEIGHT}
-                  lineOverflowBottom={CHART_OVERLAY_OVERHANG_PX}
-                  lineOpacity={0.35}
-                  lineOverflowTop={CHART_OVERLAY_OVERHANG_PX}
-                  lineTop={0}
-                  lineX={selectionX}
-                  strokeColor={accentColor}
-                  viewBoxHeight={HEART_CHART_VIEWBOX_HEIGHT}
-                  viewBoxWidth={100}
-                />
+              <View pointerEvents="box-none" style={styles.overlayClipViewport}>
+                <View pointerEvents="box-none" style={styles.overlayClipContent}>
+                  <View collapsable={false} style={styles.overlay} testID={chartTestID} {...panResponder.panHandlers}>
+                    <ChartScrubOverlay
+                      backgroundColor={colors.background}
+                      chartHeight={plotViewportHeight}
+                      chartWidth={viewportWidth}
+                      dotTestID={chartTestID ? `${chartTestID}-active-dot` : undefined}
+                      dotX={selectionX}
+                      dotY={selectionY}
+                      guideTestID={chartTestID ? `${chartTestID}-active-guide` : undefined}
+                      lineBottom={HEART_CHART_VIEWBOX_HEIGHT}
+                      lineOverflowBottom={CHART_OVERLAY_OVERHANG_PX}
+                      lineOpacity={0.35}
+                      lineOverflowTop={CHART_OVERLAY_OVERHANG_PX}
+                      lineTop={0}
+                      lineX={selectionX}
+                      strokeColor={accentColor}
+                      viewBoxHeight={HEART_CHART_VIEWBOX_HEIGHT}
+                      viewBoxWidth={100}
+                    />
+                  </View>
+                  {activityDraftVisual && visibleActivityDraft ? (
+                    <Animated.View
+                      pointerEvents={activityDraft ? 'box-none' : 'none'}
+                      style={[styles.activityDraftViewport, animatedActivityDraftViewportStyle]}>
+                      <Animated.View
+                        pointerEvents="none"
+                        style={[
+                          styles.activityDraftBand,
+                          animatedActivityDraftBandStyle,
+                          {
+                            backgroundColor: activityDraftFillColor,
+                            borderColor: activityDraftAccentColor,
+                            height: activityDraftVisual.bandHeight,
+                            top: activityDraftVisual.bandTop,
+                          },
+                        ]}
+                        testID={chartTestID ? `${chartTestID}-draft-band` : undefined}
+                      />
+                      <Animated.View
+                        style={[
+                          styles.activityDraftDragBody,
+                          animatedActivityDraftBodyStyle,
+                          {
+                            height: activityDraftVisual.bandHeight,
+                            top: activityDraftVisual.bandTop,
+                          },
+                        ]}
+                        testID={chartTestID ? `${chartTestID}-draft-body` : undefined}
+                        {...activityDraftBodyResponder.panHandlers}
+                      />
+                      <Animated.View
+                        style={[
+                          styles.activityDraftHandle,
+                          animatedActivityDraftStartHandleStyle,
+                          {
+                            height: activityDraftVisual.handleHeight,
+                            top: activityDraftVisual.handleTop,
+                          },
+                        ]}
+                        testID={chartTestID ? `${chartTestID}-draft-start-handle` : undefined}
+                        {...activityDraftStartHandleResponder.panHandlers}>
+                        <View
+                          pointerEvents="none"
+                          style={[
+                            styles.activityDraftHandleGrip,
+                            { backgroundColor: activityDraftAccentColor },
+                          ]}
+                        />
+                      </Animated.View>
+                      <Animated.View
+                        style={[
+                          styles.activityDraftHandle,
+                          animatedActivityDraftEndHandleStyle,
+                          {
+                            height: activityDraftVisual.handleHeight,
+                            top: activityDraftVisual.handleTop,
+                          },
+                        ]}
+                        testID={chartTestID ? `${chartTestID}-draft-end-handle` : undefined}
+                        {...activityDraftEndHandleResponder.panHandlers}>
+                        <View
+                          pointerEvents="none"
+                          style={[
+                            styles.activityDraftHandleGrip,
+                            { backgroundColor: activityDraftAccentColor },
+                          ]}
+                        />
+                      </Animated.View>
+                    </Animated.View>
+                  ) : null}
+                </View>
               </View>
-              {activityDraftVisual && visibleActivityDraft ? (
-                <Animated.View
-                  pointerEvents={activityDraft ? 'box-none' : 'none'}
-                  style={[styles.activityDraftViewport, animatedActivityDraftViewportStyle]}>
-                  <Animated.View
-                    pointerEvents="none"
-                    style={[
-                      styles.activityDraftBand,
-                      animatedActivityDraftBandStyle,
-                      {
-                        backgroundColor: activityDraftFillColor,
-                        borderColor: activityDraftAccentColor,
-                        height: activityDraftVisual.bandHeight,
-                        top: activityDraftVisual.bandTop,
-                      },
-                    ]}
-                    testID={chartTestID ? `${chartTestID}-draft-band` : undefined}
-                  />
+              <View pointerEvents="box-none" style={styles.markerClipViewport}>
+                <View pointerEvents="box-none" style={styles.markerClipContent}>
                   {activityDraftBadgeMarker ? (
                     <Animated.View
                       pointerEvents="none"
@@ -3573,7 +3633,7 @@ export function PannableHeartChart({
                         styles.activityDraftInlineBadgeWrap,
                         animatedActivityDraftBadgeStyle,
                         {
-                          top: activityDraftVisual.inlineBadgeTop,
+                          top: activityDraftVisual?.inlineBadgeTop ?? 0,
                         },
                       ]}
                       testID={activityDraftBadgeMarker.testID}>
@@ -3586,74 +3646,24 @@ export function PannableHeartChart({
                       </View>
                     </Animated.View>
                   ) : null}
-                  <Animated.View
-                    style={[
-                      styles.activityDraftDragBody,
-                      animatedActivityDraftBodyStyle,
-                      {
-                        height: activityDraftVisual.bandHeight,
-                        top: activityDraftVisual.bandTop,
-                      },
-                    ]}
-                    testID={chartTestID ? `${chartTestID}-draft-body` : undefined}
-                    {...activityDraftBodyResponder.panHandlers}
-                  />
-                  <Animated.View
-                    style={[
-                      styles.activityDraftHandle,
-                      animatedActivityDraftStartHandleStyle,
-                      {
-                        height: activityDraftVisual.handleHeight,
-                        top: activityDraftVisual.handleTop,
-                      },
-                    ]}
-                    testID={chartTestID ? `${chartTestID}-draft-start-handle` : undefined}
-                    {...activityDraftStartHandleResponder.panHandlers}>
-                    <View
-                      pointerEvents="none"
-                      style={[
-                        styles.activityDraftHandleGrip,
-                        { backgroundColor: activityDraftAccentColor },
-                      ]}
-                    />
-                  </Animated.View>
-                  <Animated.View
-                    style={[
-                      styles.activityDraftHandle,
-                      animatedActivityDraftEndHandleStyle,
-                      {
-                        height: activityDraftVisual.handleHeight,
-                        top: activityDraftVisual.handleTop,
-                      },
-                    ]}
-                    testID={chartTestID ? `${chartTestID}-draft-end-handle` : undefined}
-                    {...activityDraftEndHandleResponder.panHandlers}>
-                    <View
-                      pointerEvents="none"
-                      style={[
-                        styles.activityDraftHandleGrip,
-                        { backgroundColor: activityDraftAccentColor },
-                      ]}
-                    />
-                  </Animated.View>
-                </Animated.View>
-              ) : null}
-              <View pointerEvents={isFocusedWindow || activityDraft ? 'none' : 'box-none'} style={styles.markerViewport}>
-                {markerVisuals.length > 0 ? (
-                  <Animated.View pointerEvents="box-none" style={[styles.markerLayer, animatedMarkerLayerStyle]}>
-                    {markerVisuals.map((marker) => (
-                      <HeartMarkerBadge
-                        key={`marker-badge-${marker.id}`}
-                        chartPointSpacingValue={chartPointSpacingValue}
-                        marker={marker}
-                        onPress={marker.isZoomable ? () => handleMarkerZoomPress(marker) : undefined}
-                        viewportZoomAnchorIndex={viewportZoomAnchorIndex}
-                        viewportZoomAnchorScreenX={viewportZoomAnchorScreenX}
-                        viewportZoomScale={viewportZoomScale}
-                      />
-                    ))}
-                  </Animated.View>
-                ) : null}
+                  <View pointerEvents={isFocusedWindow || activityDraft ? 'none' : 'box-none'} style={styles.markerViewport}>
+                    {markerVisuals.length > 0 ? (
+                      <Animated.View pointerEvents="box-none" style={[styles.markerLayer, animatedMarkerLayerStyle]}>
+                        {markerVisuals.map((marker) => (
+                          <HeartMarkerBadge
+                            key={`marker-badge-${marker.id}`}
+                            chartPointSpacingValue={chartPointSpacingValue}
+                            marker={marker}
+                            onPress={marker.isZoomable ? () => handleMarkerZoomPress(marker) : undefined}
+                            viewportZoomAnchorIndex={viewportZoomAnchorIndex}
+                            viewportZoomAnchorScreenX={viewportZoomAnchorScreenX}
+                            viewportZoomScale={viewportZoomScale}
+                          />
+                        ))}
+                      </Animated.View>
+                    ) : null}
+                  </View>
+                </View>
               </View>
             </View>
           {selectionPoint ? (
@@ -3703,13 +3713,45 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     overflow: 'visible',
   },
+  markerBandClipViewport: {
+    ...StyleSheet.absoluteFillObject,
+    overflow: 'hidden',
+  },
   markerBandViewport: {
     ...StyleSheet.absoluteFillObject,
-    overflow: 'visible',
+  },
+  overlayClipViewport: {
+    bottom: -CHART_OVERLAY_OVERHANG_PX,
+    left: 0,
+    overflow: 'hidden',
+    position: 'absolute',
+    right: 0,
+    top: -CHART_OVERLAY_OVERHANG_PX,
+  },
+  overlayClipContent: {
+    bottom: CHART_OVERLAY_OVERHANG_PX,
+    left: 0,
+    position: 'absolute',
+    right: 0,
+    top: CHART_OVERLAY_OVERHANG_PX,
+  },
+  markerClipViewport: {
+    bottom: 0,
+    left: 0,
+    overflow: 'hidden',
+    position: 'absolute',
+    right: 0,
+    top: -MARKER_BADGE_SIZE / 2,
+  },
+  markerClipContent: {
+    bottom: 0,
+    left: 0,
+    position: 'absolute',
+    right: 0,
+    top: MARKER_BADGE_SIZE / 2,
   },
   markerViewport: {
     ...StyleSheet.absoluteFillObject,
-    overflow: 'visible',
   },
   chartCameraLayer: {
     ...StyleSheet.absoluteFillObject,
@@ -3729,11 +3771,9 @@ const styles = StyleSheet.create({
   },
   overlay: {
     ...StyleSheet.absoluteFillObject,
-    overflow: 'visible',
   },
   activityDraftViewport: {
     ...StyleSheet.absoluteFillObject,
-    overflow: 'visible',
     zIndex: 4,
   },
   activityDraftBand: {
