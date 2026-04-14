@@ -64,6 +64,7 @@ const FOCUS_ZOOM_DURATION_MS = 220;
 const FOCUS_ZOOM_MAX_DURATION_MS = 420;
 const FOCUS_ZOOM_DURATION_PER_OCTAVE_MS = 42;
 const Y_AXIS_LAG_DURATION_MS = 180;
+const DEFAULT_HEART_ACCENT_TRANSITION_DURATION_MS = 240;
 const HEART_CHART_VIEWBOX_HEIGHT = 40;
 const MARKER_BADGE_SIZE = 24;
 const MIN_MARKER_BAND_WIDTH = 0.15;
@@ -824,11 +825,9 @@ function HeartMarkerBadge({
 }
 
 const HeartChartSvgPlot = memo(function HeartChartSvgPlot({
+  accentTransitionProgress,
   activeSleepStageColor,
   areas,
-  baseGradientEnd,
-  baseGradientStart,
-  baseShadowColor,
   baseDomain,
   bridgePaths,
   chartContentWidth,
@@ -836,12 +835,13 @@ const HeartChartSvgPlot = memo(function HeartChartSvgPlot({
   chartId,
   chartPointSpacingValue,
   chartTestID,
-  focusGradientEnd,
-  focusGradientStart,
-  focusShadowColor,
   focusTransitionProgress,
   guideLineY,
+  nextBaseAccentColor,
+  nextFocusedAccentColor,
   paths,
+  previousBaseAccentColor,
+  previousFocusedAccentColor,
   sleepStageHighlightClipId,
   sleepStageHighlightFillId,
   sleepStageHighlights,
@@ -852,11 +852,9 @@ const HeartChartSvgPlot = memo(function HeartChartSvgPlot({
   yAxisDomainMax,
   yAxisDomainMin,
 }: {
+  accentTransitionProgress: SharedValue<number>;
   activeSleepStageColor: string | null;
   areas: string[];
-  baseGradientEnd: string;
-  baseGradientStart: string;
-  baseShadowColor: string;
   baseDomain: ReturnType<typeof buildTrendDomain>;
   bridgePaths: string[];
   chartContentWidth: number;
@@ -864,12 +862,13 @@ const HeartChartSvgPlot = memo(function HeartChartSvgPlot({
   chartId: string;
   chartPointSpacingValue: SharedValue<number>;
   chartTestID?: string;
-  focusGradientEnd: string;
-  focusGradientStart: string;
-  focusShadowColor: string;
   focusTransitionProgress: SharedValue<number>;
   guideLineY: number;
+  nextBaseAccentColor: string;
+  nextFocusedAccentColor: string;
   paths: string[];
+  previousBaseAccentColor: string;
+  previousFocusedAccentColor: string;
   sleepStageHighlightClipId: string | null;
   sleepStageHighlightFillId: string | null;
   sleepStageHighlights: HeartSleepStageHighlight[];
@@ -890,6 +889,14 @@ const HeartChartSvgPlot = memo(function HeartChartSvgPlot({
           .map((highlight) => `${highlight.stage}:${Math.round(highlight.startX * 10)}:${Math.round(highlight.width * 10)}`)
           .join(',')
       : 'none';
+  const [previousBaseGradientStart, previousBaseGradientEnd] = colorStops(previousBaseAccentColor);
+  const [nextBaseGradientStart, nextBaseGradientEnd] = colorStops(nextBaseAccentColor);
+  const [previousFocusGradientStart, previousFocusGradientEnd] = colorStops(previousFocusedAccentColor);
+  const [nextFocusGradientStart, nextFocusGradientEnd] = colorStops(nextFocusedAccentColor);
+  const previousBaseShadowColor = chartShadowColor(previousBaseAccentColor);
+  const nextBaseShadowColor = chartShadowColor(nextBaseAccentColor);
+  const previousFocusShadowColor = chartShadowColor(previousFocusedAccentColor);
+  const nextFocusShadowColor = chartShadowColor(nextFocusedAccentColor);
 
   const animatedChartCameraProps = useAnimatedProps(
     () => ({
@@ -926,15 +933,61 @@ const HeartChartSvgPlot = memo(function HeartChartSvgPlot({
   );
   const animatedBasePlotOpacityProps = useAnimatedProps(
     () => ({
-      opacity: 1 - focusTransitionProgress.value,
+      opacity: (1 - focusTransitionProgress.value) * (1 - accentTransitionProgress.value),
     }),
-    [focusTransitionProgress],
+    [accentTransitionProgress, focusTransitionProgress],
+  );
+  const animatedNextBasePlotOpacityProps = useAnimatedProps(
+    () => ({
+      opacity: (1 - focusTransitionProgress.value) * accentTransitionProgress.value,
+    }),
+    [accentTransitionProgress, focusTransitionProgress],
+  );
+  const animatedPreviousFocusedPlotOpacityProps = useAnimatedProps(
+    () => ({
+      opacity: focusTransitionProgress.value * (1 - accentTransitionProgress.value),
+    }),
+    [accentTransitionProgress, focusTransitionProgress],
   );
   const animatedFocusedPlotOpacityProps = useAnimatedProps(
     () => ({
-      opacity: focusTransitionProgress.value,
+      opacity: focusTransitionProgress.value * accentTransitionProgress.value,
     }),
-    [focusTransitionProgress],
+    [accentTransitionProgress, focusTransitionProgress],
+  );
+
+  const renderPlotLayer = useCallback(
+    (keyPrefix: string, fillId: string, shadowColor: string, strokeId: string) => (
+      <>
+        <G clipPath={`url(#${chartPlotClipId})`}>
+          {areas.map((area, index) => (
+            <Path key={`${keyPrefix}-area-${index}`} d={area} fill={`url(#${fillId})`} />
+          ))}
+        </G>
+        {paths.map((path, index) => (
+          <Path
+            key={`${keyPrefix}-shadow-${index}`}
+            d={path}
+            fill="none"
+            stroke={shadowColor}
+            strokeWidth="1.6"
+            vectorEffect="non-scaling-stroke"
+          />
+        ))}
+        {paths.map((path, index) => (
+          <Path
+            key={`${keyPrefix}-line-${index}`}
+            d={path}
+            fill="none"
+            stroke={`url(#${strokeId})`}
+            strokeLinecap="round"
+            strokeWidth="0.8"
+            vectorEffect="non-scaling-stroke"
+          />
+        ))}
+      </>
+    ),
+    [areas, chartPlotClipId, paths],
   );
 
   return (
@@ -945,23 +998,41 @@ const HeartChartSvgPlot = memo(function HeartChartSvgPlot({
         viewBox={`0 0 ${Math.max(viewportWidth, 1)} ${HEART_CHART_VIEWBOX_HEIGHT}`}
         width="100%">
         <Defs>
-          <SvgLinearGradient id={`${chartId}-stroke-base`} x1="0%" x2="100%" y1="100%" y2="0%">
-            <Stop offset="0%" stopColor={baseGradientStart} />
-            <Stop offset="100%" stopColor={baseGradientEnd} />
+          <SvgLinearGradient id={`${chartId}-stroke-base-previous`} x1="0%" x2="100%" y1="100%" y2="0%">
+            <Stop offset="0%" stopColor={previousBaseGradientStart} />
+            <Stop offset="100%" stopColor={previousBaseGradientEnd} />
           </SvgLinearGradient>
-          <SvgLinearGradient id={`${chartId}-fill-base`} x1="0%" x2="0%" y1="0%" y2="100%">
-            <Stop offset="0%" stopColor={baseGradientEnd} stopOpacity="0.6" />
-            <Stop offset="58%" stopColor={baseGradientStart} stopOpacity="0.2" />
-            <Stop offset="100%" stopColor={baseGradientStart} stopOpacity="0" />
+          <SvgLinearGradient id={`${chartId}-fill-base-previous`} x1="0%" x2="0%" y1="0%" y2="100%">
+            <Stop offset="0%" stopColor={previousBaseGradientEnd} stopOpacity="0.6" />
+            <Stop offset="58%" stopColor={previousBaseGradientStart} stopOpacity="0.2" />
+            <Stop offset="100%" stopColor={previousBaseGradientStart} stopOpacity="0" />
           </SvgLinearGradient>
-          <SvgLinearGradient id={`${chartId}-stroke-focus`} x1="0%" x2="100%" y1="100%" y2="0%">
-            <Stop offset="0%" stopColor={focusGradientStart} />
-            <Stop offset="100%" stopColor={focusGradientEnd} />
+          <SvgLinearGradient id={`${chartId}-stroke-base-next`} x1="0%" x2="100%" y1="100%" y2="0%">
+            <Stop offset="0%" stopColor={nextBaseGradientStart} />
+            <Stop offset="100%" stopColor={nextBaseGradientEnd} />
           </SvgLinearGradient>
-          <SvgLinearGradient id={`${chartId}-fill-focus`} x1="0%" x2="0%" y1="0%" y2="100%">
-            <Stop offset="0%" stopColor={focusGradientEnd} stopOpacity="0.6" />
-            <Stop offset="58%" stopColor={focusGradientStart} stopOpacity="0.2" />
-            <Stop offset="100%" stopColor={focusGradientStart} stopOpacity="0" />
+          <SvgLinearGradient id={`${chartId}-fill-base-next`} x1="0%" x2="0%" y1="0%" y2="100%">
+            <Stop offset="0%" stopColor={nextBaseGradientEnd} stopOpacity="0.6" />
+            <Stop offset="58%" stopColor={nextBaseGradientStart} stopOpacity="0.2" />
+            <Stop offset="100%" stopColor={nextBaseGradientStart} stopOpacity="0" />
+          </SvgLinearGradient>
+          <SvgLinearGradient id={`${chartId}-stroke-focus-previous`} x1="0%" x2="100%" y1="100%" y2="0%">
+            <Stop offset="0%" stopColor={previousFocusGradientStart} />
+            <Stop offset="100%" stopColor={previousFocusGradientEnd} />
+          </SvgLinearGradient>
+          <SvgLinearGradient id={`${chartId}-fill-focus-previous`} x1="0%" x2="0%" y1="0%" y2="100%">
+            <Stop offset="0%" stopColor={previousFocusGradientEnd} stopOpacity="0.6" />
+            <Stop offset="58%" stopColor={previousFocusGradientStart} stopOpacity="0.2" />
+            <Stop offset="100%" stopColor={previousFocusGradientStart} stopOpacity="0" />
+          </SvgLinearGradient>
+          <SvgLinearGradient id={`${chartId}-stroke-focus-next`} x1="0%" x2="100%" y1="100%" y2="0%">
+            <Stop offset="0%" stopColor={nextFocusGradientStart} />
+            <Stop offset="100%" stopColor={nextFocusGradientEnd} />
+          </SvgLinearGradient>
+          <SvgLinearGradient id={`${chartId}-fill-focus-next`} x1="0%" x2="0%" y1="0%" y2="100%">
+            <Stop offset="0%" stopColor={nextFocusGradientEnd} stopOpacity="0.6" />
+            <Stop offset="58%" stopColor={nextFocusGradientStart} stopOpacity="0.2" />
+            <Stop offset="100%" stopColor={nextFocusGradientStart} stopOpacity="0" />
           </SvgLinearGradient>
           <SvgLinearGradient
             gradientUnits="userSpaceOnUse"
@@ -1045,60 +1116,36 @@ const HeartChartSvgPlot = memo(function HeartChartSvgPlot({
                 />
               ))}
               <AnimatedSvgGroup animatedProps={animatedBasePlotOpacityProps}>
-                <G clipPath={`url(#${chartPlotClipId})`}>
-                  {areas.map((area, index) => (
-                    <Path key={`base-area-${index}`} d={area} fill={`url(#${chartId}-fill-base)`} />
-                  ))}
-                </G>
-                {paths.map((path, index) => (
-                  <Path
-                    key={`base-shadow-${index}`}
-                    d={path}
-                    fill="none"
-                    stroke={baseShadowColor}
-                    strokeWidth="1.6"
-                    vectorEffect="non-scaling-stroke"
-                  />
-                ))}
-                {paths.map((path, index) => (
-                  <Path
-                    key={`base-line-${index}`}
-                    d={path}
-                    fill="none"
-                    stroke={`url(#${chartId}-stroke-base)`}
-                    strokeLinecap="round"
-                    strokeWidth="0.8"
-                    vectorEffect="non-scaling-stroke"
-                  />
-                ))}
+                {renderPlotLayer(
+                  'base-previous',
+                  `${chartId}-fill-base-previous`,
+                  previousBaseShadowColor,
+                  `${chartId}-stroke-base-previous`,
+                )}
+              </AnimatedSvgGroup>
+              <AnimatedSvgGroup animatedProps={animatedNextBasePlotOpacityProps}>
+                {renderPlotLayer(
+                  'base-next',
+                  `${chartId}-fill-base-next`,
+                  nextBaseShadowColor,
+                  `${chartId}-stroke-base-next`,
+                )}
+              </AnimatedSvgGroup>
+              <AnimatedSvgGroup animatedProps={animatedPreviousFocusedPlotOpacityProps}>
+                {renderPlotLayer(
+                  'focus-previous',
+                  `${chartId}-fill-focus-previous`,
+                  previousFocusShadowColor,
+                  `${chartId}-stroke-focus-previous`,
+                )}
               </AnimatedSvgGroup>
               <AnimatedSvgGroup animatedProps={animatedFocusedPlotOpacityProps}>
-                <G clipPath={`url(#${chartPlotClipId})`}>
-                  {areas.map((area, index) => (
-                    <Path key={`focus-area-${index}`} d={area} fill={`url(#${chartId}-fill-focus)`} />
-                  ))}
-                </G>
-                {paths.map((path, index) => (
-                  <Path
-                    key={`focus-shadow-${index}`}
-                    d={path}
-                    fill="none"
-                    stroke={focusShadowColor}
-                    strokeWidth="1.6"
-                    vectorEffect="non-scaling-stroke"
-                  />
-                ))}
-                {paths.map((path, index) => (
-                  <Path
-                    key={`focus-line-${index}`}
-                    d={path}
-                    fill="none"
-                    stroke={`url(#${chartId}-stroke-focus)`}
-                    strokeLinecap="round"
-                    strokeWidth="0.8"
-                    vectorEffect="non-scaling-stroke"
-                  />
-                ))}
+                {renderPlotLayer(
+                  'focus-next',
+                  `${chartId}-fill-focus-next`,
+                  nextFocusShadowColor,
+                  `${chartId}-stroke-focus-next`,
+                )}
               </AnimatedSvgGroup>
               {sleepStageHighlights.length > 0 && sleepStageHighlightClipId && sleepStageHighlightFillId && activeSleepStageColor ? (
                 <G clipPath={`url(#${sleepStageHighlightClipId})`}>
@@ -1161,6 +1208,7 @@ const HeartChartSvgPlot = memo(function HeartChartSvgPlot({
 
 export function PannableHeartChart({
   accentColor = colors.primary,
+  accentTransitionDurationMs = DEFAULT_HEART_ACCENT_TRANSITION_DURATION_MS,
   activityDraft = null,
   anchorDayKey,
   axisTestID,
@@ -1187,6 +1235,7 @@ export function PannableHeartChart({
   windowPointCount,
 }: {
   accentColor?: string;
+  accentTransitionDurationMs?: number;
   activityDraft?: HeartActivityDraft | null;
   anchorDayKey?: string;
   axisTestID?: string;
@@ -1248,6 +1297,14 @@ export function PannableHeartChart({
   const skipLatestWindowChangeRef = useRef(true);
   const baseAccentColorRef = useRef(accentColor);
   const focusedAccentColorRef = useRef(accentColor);
+  const hasFocusTarget = requestedFocusedMarker !== null || requestedFocusedMarkerId !== null || focusedMarkerId !== null;
+  const baseChartAccentColor = baseAccentColorRef.current;
+  const focusedChartAccentColor = hasFocusTarget ? accentColor : focusedAccentColorRef.current;
+  const chartAccentTransitionProgress = useSharedValue(1);
+  const [previousRenderedBaseChartAccentColor, setPreviousRenderedBaseChartAccentColor] = useState(baseChartAccentColor);
+  const [previousRenderedFocusedChartAccentColor, setPreviousRenderedFocusedChartAccentColor] = useState(focusedChartAccentColor);
+  const latestRenderedBaseChartAccentColorRef = useRef(baseChartAccentColor);
+  const latestRenderedFocusedChartAccentColorRef = useRef(focusedChartAccentColor);
   const focusTransitionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const focusTransitionDurationRef = useRef(FOCUS_ZOOM_DURATION_MS);
   const yAxisTransitionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -2508,8 +2565,11 @@ export function PannableHeartChart({
   useEffect(() => releaseScrollLock, [releaseScrollLock]);
 
   const shouldCaptureScrub = useCallback(
-    (_: unknown, gestureState: { dx: number; dy: number }) =>
-      activityDraft === null && Math.abs(gestureState.dx) > 6 && Math.abs(gestureState.dx) > Math.abs(gestureState.dy),
+    (_: unknown, gestureState: { dx: number; dy: number; numberActiveTouches?: number }) =>
+      activityDraft === null &&
+      (gestureState.numberActiveTouches ?? 1) === 1 &&
+      Math.abs(gestureState.dx) > 6 &&
+      Math.abs(gestureState.dx) > Math.abs(gestureState.dy),
     [activityDraft],
   );
 
@@ -2641,86 +2701,138 @@ export function PannableHeartChart({
     [commitSelection, ensureScrollLock, releaseScrollLock, shouldCaptureScrub, updateSelection],
   );
 
+  const beginViewportPan = useCallback(() => {
+    'worklet';
+
+    cancelAnimation(animatedWindowStart);
+    cancelAnimation(viewportZoomScale);
+    cancelAnimation(viewportZoomAnchorScreenX);
+    isAxisDragging.value = true;
+    gestureStartWindowStart.value = animatedWindowStart.value;
+    viewportZoomAnchorIndex.value = animatedWindowStart.value;
+    viewportZoomAnchorScreenX.value = 0;
+    reportedWindowStart.value = clamp(Math.floor(animatedWindowStart.value), 0, maxWindowStartValue.value);
+    runOnJS(handleAxisPanStart)();
+  }, [
+    animatedWindowStart,
+    cancelAnimation,
+    gestureStartWindowStart,
+    handleAxisPanStart,
+    isAxisDragging,
+    maxWindowStartValue,
+    reportedWindowStart,
+    viewportZoomAnchorIndex,
+    viewportZoomAnchorScreenX,
+    viewportZoomScale,
+  ]);
+
+  const updateViewportPan = useCallback(
+    (translationX: number) => {
+      'worklet';
+
+      const nextSafePointSpacing = chartPointSpacingValue.value;
+      const visiblePointSpacing = nextSafePointSpacing * Math.max(viewportZoomScale.value, 0.0001);
+      if (visiblePointSpacing <= 0) {
+        return;
+      }
+
+      const nextWindowStartFloat = clamp(
+        gestureStartWindowStart.value - translationX / visiblePointSpacing,
+        0,
+        maxWindowStartValue.value,
+      );
+      const nextWindowStart = clamp(Math.floor(nextWindowStartFloat), 0, maxWindowStartValue.value);
+
+      animatedWindowStart.value = nextWindowStartFloat;
+      viewportZoomAnchorIndex.value = nextWindowStartFloat;
+
+      if (nextWindowStart !== reportedWindowStart.value) {
+        reportedWindowStart.value = nextWindowStart;
+        runOnJS(syncWindowStart)(nextWindowStart);
+      }
+
+      if (
+        !loadRequested.value &&
+        shouldTriggerHeartLoadMore({
+          canLoadMore: canLoadMore && !isFocusedWindow,
+          isLoadingMore,
+          windowStart: nextWindowStartFloat,
+          translationX,
+        })
+      ) {
+        loadRequested.value = true;
+        runOnJS(handleLoadMore)();
+      }
+    },
+    [
+      animatedWindowStart,
+      canLoadMore,
+      chartPointSpacingValue,
+      gestureStartWindowStart,
+      handleLoadMore,
+      isFocusedWindow,
+      isLoadingMore,
+      loadRequested,
+      maxWindowStartValue,
+      reportedWindowStart,
+      syncWindowStart,
+      viewportZoomAnchorIndex,
+      viewportZoomScale,
+    ],
+  );
+
+  const finalizeViewportPan = useCallback(() => {
+    'worklet';
+
+    isAxisDragging.value = false;
+    const snappedWindowStart = clamp(Math.round(animatedWindowStart.value), 0, maxWindowStartValue.value);
+    reportedWindowStart.value = snappedWindowStart;
+    animatedWindowStart.value = withTiming(snappedWindowStart, { duration: SNAP_DURATION_MS });
+    runOnJS(syncWindowStart)(snappedWindowStart);
+    runOnJS(handleAxisPanEnd)();
+  }, [
+    animatedWindowStart,
+    handleAxisPanEnd,
+    isAxisDragging,
+    maxWindowStartValue,
+    reportedWindowStart,
+    syncWindowStart,
+  ]);
+
   const axisPanGesture = useMemo(
     () =>
       Gesture.Pan()
         .enabled(!isFocusedWindow)
         .activeOffsetX([-2, 2])
         .failOffsetY([-12, 12])
-        .onStart(() => {
-          cancelAnimation(animatedWindowStart);
-          cancelAnimation(viewportZoomScale);
-          cancelAnimation(viewportZoomAnchorScreenX);
-          isAxisDragging.value = true;
-          gestureStartWindowStart.value = animatedWindowStart.value;
-          viewportZoomAnchorIndex.value = animatedWindowStart.value;
-          viewportZoomAnchorScreenX.value = 0;
-          reportedWindowStart.value = clamp(Math.floor(animatedWindowStart.value), 0, maxWindowStartValue.value);
-          runOnJS(handleAxisPanStart)();
-        })
+        .onStart(beginViewportPan)
         .onUpdate((event) => {
-          const nextSafePointSpacing = chartPointSpacingValue.value;
-          const visiblePointSpacing = nextSafePointSpacing * Math.max(viewportZoomScale.value, 0.0001);
-          if (visiblePointSpacing <= 0) {
-            return;
-          }
-
-          const nextWindowStartFloat = clamp(
-            gestureStartWindowStart.value - event.translationX / visiblePointSpacing,
-            0,
-            maxWindowStartValue.value,
-          );
-          const nextWindowStart = clamp(Math.floor(nextWindowStartFloat), 0, maxWindowStartValue.value);
-
-          animatedWindowStart.value = nextWindowStartFloat;
-          viewportZoomAnchorIndex.value = nextWindowStartFloat;
-
-          if (nextWindowStart !== reportedWindowStart.value) {
-            reportedWindowStart.value = nextWindowStart;
-            runOnJS(syncWindowStart)(nextWindowStart);
-          }
-
-          if (
-            !loadRequested.value &&
-            shouldTriggerHeartLoadMore({
-              canLoadMore: canLoadMore && !isFocusedWindow,
-              isLoadingMore,
-              windowStart: nextWindowStartFloat,
-              translationX: event.translationX,
-            })
-          ) {
-            loadRequested.value = true;
-            runOnJS(handleLoadMore)();
-          }
+          updateViewportPan(event.translationX);
         })
-        .onFinalize(() => {
-          isAxisDragging.value = false;
-          const snappedWindowStart = clamp(Math.round(animatedWindowStart.value), 0, maxWindowStartValue.value);
-          reportedWindowStart.value = snappedWindowStart;
-          animatedWindowStart.value = withTiming(snappedWindowStart, { duration: SNAP_DURATION_MS });
-          runOnJS(syncWindowStart)(snappedWindowStart);
-          runOnJS(handleAxisPanEnd)();
-        }),
+        .onFinalize(finalizeViewportPan),
     [
-      animatedWindowStart,
-      canLoadMore,
-      cancelAnimation,
-      gestureStartWindowStart,
-      handleAxisPanEnd,
-      handleAxisPanStart,
-      handleLoadMore,
+      beginViewportPan,
+      finalizeViewportPan,
       isFocusedWindow,
-      isAxisDragging,
-      isLoadingMore,
-      loadRequested,
-      maxWindowStartValue,
-      chartPointSpacingValue,
-      reportedWindowStart,
-      syncWindowStart,
-      viewportZoomScale,
+      updateViewportPan,
     ],
   );
   const canPinchZoom = Boolean(onPinchZoomStepChange && pinchZoomSteps && pinchZoomSteps.length > 1 && activityDraft === null);
+  const graphPanGesture = useMemo(
+    () =>
+      Gesture.Pan()
+        .enabled(canPinchZoom && !isFocusedWindow)
+        .minPointers(2)
+        .maxPointers(2)
+        .activeOffsetX([-2, 2])
+        .failOffsetY([-12, 12])
+        .onStart(beginViewportPan)
+        .onUpdate((event) => {
+          updateViewportPan(event.translationX);
+        })
+        .onFinalize(finalizeViewportPan),
+    [beginViewportPan, canPinchZoom, finalizeViewportPan, isFocusedWindow, updateViewportPan],
+  );
   const pinchZoomGesture = useMemo(
     () =>
       Gesture.Pinch()
@@ -2757,6 +2869,11 @@ export function PannableHeartChart({
         })
         .onUpdate((event) => {
           if (!pinchZoomScaleBounds || viewportWidth <= 0) {
+            return;
+          }
+
+          const numberOfPointers = (event as { numberOfPointers?: number }).numberOfPointers ?? 2;
+          if (numberOfPointers < 2) {
             return;
           }
 
@@ -2843,6 +2960,10 @@ export function PannableHeartChart({
       viewportZoomAnchorScreenX,
       viewportZoomScale,
     ],
+  );
+  const chartViewportGesture = useMemo(
+    () => Gesture.Race(pinchZoomGesture, graphPanGesture),
+    [graphPanGesture, pinchZoomGesture],
   );
 
   const animatedViewportZoomStyle = useAnimatedStyle(
@@ -2969,13 +3090,35 @@ export function PannableHeartChart({
     return null;
   }
 
-  const hasFocusTarget = requestedFocusedMarker !== null || requestedFocusedMarkerId !== null || focusedMarkerId !== null;
-  const baseChartAccentColor = baseAccentColorRef.current;
-  const focusedChartAccentColor = hasFocusTarget ? accentColor : focusedAccentColorRef.current;
-  const [baseGradientStart, baseGradientEnd] = colorStops(baseChartAccentColor);
-  const [focusGradientStart, focusGradientEnd] = colorStops(focusedChartAccentColor);
-  const baseShadowColor = chartShadowColor(baseChartAccentColor);
-  const focusShadowColor = chartShadowColor(focusedChartAccentColor);
+  useEffect(() => {
+    if (
+      latestRenderedBaseChartAccentColorRef.current === baseChartAccentColor &&
+      latestRenderedFocusedChartAccentColorRef.current === focusedChartAccentColor
+    ) {
+      return;
+    }
+
+    setPreviousRenderedBaseChartAccentColor(latestRenderedBaseChartAccentColorRef.current);
+    setPreviousRenderedFocusedChartAccentColor(latestRenderedFocusedChartAccentColorRef.current);
+    latestRenderedBaseChartAccentColorRef.current = baseChartAccentColor;
+    latestRenderedFocusedChartAccentColorRef.current = focusedChartAccentColor;
+
+    if (accentTransitionDurationMs <= 0) {
+      chartAccentTransitionProgress.value = 1;
+      return;
+    }
+
+    chartAccentTransitionProgress.value = 0;
+    chartAccentTransitionProgress.value = withTiming(1, {
+      duration: accentTransitionDurationMs,
+      easing: Easing.out(Easing.cubic),
+    });
+  }, [
+    accentTransitionDurationMs,
+    baseChartAccentColor,
+    chartAccentTransitionProgress,
+    focusedChartAccentColor,
+  ]);
 
   return (
     <View>
@@ -2986,7 +3129,7 @@ export function PannableHeartChart({
         }}
         style={[styles.chartArea, { height }]}
         testID={chartTestID ? `${chartTestID}-viewport` : undefined}>
-        <GestureDetector gesture={pinchZoomGesture}>
+        <GestureDetector gesture={chartViewportGesture}>
           <View style={styles.chartViewport}>
           {markerVisuals.length > 0 ? (
             <View pointerEvents="none" style={styles.markerBandViewport}>
@@ -3023,11 +3166,9 @@ export function PannableHeartChart({
             </View>
           ) : null}
           <HeartChartSvgPlot
+            accentTransitionProgress={chartAccentTransitionProgress}
             activeSleepStageColor={activeSleepStageColor}
             areas={areas}
-            baseGradientEnd={baseGradientEnd}
-            baseGradientStart={baseGradientStart}
-            baseShadowColor={baseShadowColor}
             baseDomain={baseDomain}
             bridgePaths={bridgePaths}
             chartContentWidth={chartContentWidth}
@@ -3035,12 +3176,13 @@ export function PannableHeartChart({
             chartId={chartId}
             chartPointSpacingValue={chartPointSpacingValue}
             chartTestID={chartTestID}
-            focusGradientEnd={focusGradientEnd}
-            focusGradientStart={focusGradientStart}
-            focusShadowColor={focusShadowColor}
             focusTransitionProgress={focusTransitionProgress}
             guideLineY={guideLineY}
+            nextBaseAccentColor={baseChartAccentColor}
+            nextFocusedAccentColor={focusedChartAccentColor}
             paths={paths}
+            previousBaseAccentColor={previousRenderedBaseChartAccentColor}
+            previousFocusedAccentColor={previousRenderedFocusedChartAccentColor}
             sleepStageHighlightClipId={sleepStageHighlightClipId}
             sleepStageHighlightFillId={sleepStageHighlightFillId}
             sleepStageHighlights={sleepStageHighlights}

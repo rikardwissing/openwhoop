@@ -2324,6 +2324,7 @@ export function HeartCard({
 
       <PannableHeartChart
         accentColor={chartAccentColor}
+        accentTransitionDurationMs={cardAccentTransitionDurationMs}
         activityDraft={activityDraft}
         anchorDayKey={viewportKey}
         axisTestID={chartTestID ? `${chartTestID}-axis` : undefined}
