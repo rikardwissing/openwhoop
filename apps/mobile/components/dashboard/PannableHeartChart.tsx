@@ -9,7 +9,6 @@ import {
   Skia,
   interpolateColors,
   processTransform2d,
-  usePathValue,
   vec,
 } from '@shopify/react-native-skia';
 import {
@@ -308,26 +307,33 @@ function useHeartChartTransformedPath(
   chartCameraState: SharedValue<{ scaleX: number; translateX: number }>,
   chartYAxisState?: SharedValue<{ scaleY: number; translateY: number }>,
 ) {
-  return usePathValue(
-    (path) => {
-      'worklet';
+  return useDerivedValue(() => {
+    'worklet';
 
-      if (chartYAxisState) {
-        const { scaleY, translateY } = chartYAxisState.value;
+    const nextYAxisState = chartYAxisState?.value;
+    const nextCameraState = chartCameraState.value;
+    const hasYAxisTransform =
+      nextYAxisState !== undefined &&
+      (nextYAxisState.scaleY !== 1 || nextYAxisState.translateY !== 0);
+    const hasCameraTransform =
+      nextCameraState.scaleX !== 1 || nextCameraState.translateX !== 0;
 
-        if (scaleY !== 1 || translateY !== 0) {
-          path.transform(processTransform2d([{ translateY }, { scaleY }]));
-        }
-      }
+    if (!hasYAxisTransform && !hasCameraTransform) {
+      return initPath;
+    }
 
-      const { scaleX, translateX } = chartCameraState.value;
+    const path = initPath.copy();
 
-      if (scaleX !== 1 || translateX !== 0) {
-        path.transform(processTransform2d([{ translateX }, { scaleX }]));
-      }
-    },
-    initPath,
-  );
+    if (hasYAxisTransform && nextYAxisState) {
+      path.transform(processTransform2d([{ translateY: nextYAxisState.translateY }, { scaleY: nextYAxisState.scaleY }]));
+    }
+
+    if (hasCameraTransform) {
+      path.transform(processTransform2d([{ translateX: nextCameraState.translateX }, { scaleX: nextCameraState.scaleX }]));
+    }
+
+    return path;
+  }, [chartCameraState, chartYAxisState, initPath]);
 }
 
 const HeartChartPlotStrokeLayer = memo(function HeartChartPlotStrokeLayer({
