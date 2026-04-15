@@ -87,6 +87,7 @@ export function ScreenShell({
                 />
               ) : undefined
             }
+            removeClippedSubviews
             scrollEnabled={activeScrollLocks === 0}
             showsVerticalScrollIndicator={false}>
             {children}
