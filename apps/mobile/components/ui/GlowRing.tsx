@@ -1,5 +1,12 @@
+import {
+  Canvas,
+  Circle as SkiaCircle,
+  LinearGradient as SkiaLinearGradient,
+  Path as SkiaPath,
+  Skia,
+  vec,
+} from '@shopify/react-native-skia';
 import { StyleSheet, Text, View } from 'react-native';
-import Svg, { Circle, Defs, LinearGradient as SvgLinearGradient, Stop } from 'react-native-svg';
 
 import { colors, typography } from '@/constants/theme';
 import type { MetricTone } from '@/types/health';
@@ -92,6 +99,28 @@ const tonePalette: Record<
   },
 };
 
+function polarToCartesian(center: number, radius: number, angleDegrees: number) {
+  const angleRadians = (angleDegrees * Math.PI) / 180;
+  return {
+    x: center + radius * Math.cos(angleRadians),
+    y: center + radius * Math.sin(angleRadians),
+  };
+}
+
+function buildRingProgressPath(center: number, radius: number, progress: number) {
+  const startAngle = -90;
+  const endAngle = startAngle + 360 * progress;
+  const start = polarToCartesian(center, radius, startAngle);
+  const end = polarToCartesian(center, radius, endAngle);
+  const largeArcFlag = progress > 0.5 ? 1 : 0;
+
+  return `M ${start.x} ${start.y} A ${radius} ${radius} 0 ${largeArcFlag} 1 ${end.x} ${end.y}`;
+}
+
+function makeRingPath(path: string) {
+  return Skia.Path.MakeFromSVGString(path) ?? Skia.Path.Make();
+}
+
 export function GlowRing({
   score,
   label,
@@ -116,11 +145,11 @@ export function GlowRing({
   tone?: MetricTone;
 }) {
   const palette = tonePalette[tone];
-  const strokeWidth = size * 0.08;
-  const radius = size / 2 - strokeWidth / 1.8;
-  const circumference = 2 * Math.PI * radius;
+  const center = size / 2;
+  const outerRadius = size * 0.37;
+  const innerRadius = size * 0.32;
   const progress = score === null ? 0.08 : Math.max(0.06, Math.min(score / Math.max(progressMax, 1), 0.96));
-  const dashOffset = circumference * (1 - progress);
+  const progressPath = makeRingPath(buildRingProgressPath(center, outerRadius, progress));
   const displayScore =
     score === null
       ? '--'
@@ -129,68 +158,56 @@ export function GlowRing({
   return (
     <View style={[styles.wrap, { width: size, height: size }]}>
       <View style={[styles.ringGlow, { backgroundColor: palette.glow }]} />
-      <Svg height={size} viewBox="0 0 100 100" width={size}>
-        <Defs>
-          <SvgLinearGradient id="ringGradient" x1="0%" x2="100%" y1="100%" y2="0%">
-            <Stop offset="0%" stopColor={palette.gradientStart} />
-            <Stop offset="65%" stopColor={palette.gradientMid} />
-            <Stop offset="100%" stopColor={palette.gradientEnd} />
-          </SvgLinearGradient>
-        </Defs>
-        <Circle
-          cx="50"
-          cy="50"
-          fill="transparent"
-          r="37"
-          stroke={palette.outerStroke}
-          strokeWidth="6.6"
+      <Canvas style={styles.canvas}>
+        <SkiaCircle
+          color={palette.outerStroke}
+          cx={center}
+          cy={center}
+          r={outerRadius}
+          strokeWidth={size * 0.066}
+          style="stroke"
         />
-        <Circle
-          cx="50"
-          cy="50"
-          fill="transparent"
-          r="32"
-          stroke={palette.innerStroke}
-          strokeWidth="1.8"
+        <SkiaCircle
+          color={palette.innerStroke}
+          cx={center}
+          cy={center}
+          r={innerRadius}
+          strokeWidth={size * 0.018}
+          style="stroke"
         />
-        <Circle
-          cx="50"
-          cy="50"
-          fill="transparent"
-          r="37"
-          stroke={palette.track}
-          strokeLinecap="round"
-          strokeWidth="9"
-          transform="rotate(-90 50 50)"
+        <SkiaCircle
+          color={palette.track}
+          cx={center}
+          cy={center}
+          r={outerRadius}
+          strokeCap="round"
+          strokeWidth={size * 0.09}
+          style="stroke"
         />
-        <Circle
-          cx="50"
-          cy="50"
-          fill="transparent"
-          r="37"
-          stroke="url(#ringGradient)"
-          strokeDasharray={`${circumference} ${circumference}`}
-          strokeDashoffset={dashOffset}
-          strokeLinecap="round"
-          strokeWidth="7.2"
-          transform="rotate(-90 50 50)"
-        />
+        <SkiaPath path={progressPath} strokeCap="round" strokeWidth={size * 0.072} style="stroke">
+          <SkiaLinearGradient
+            colors={[palette.gradientStart, palette.gradientMid, palette.gradientEnd]}
+            end={vec(center + outerRadius, center - outerRadius)}
+            positions={[0, 0.65, 1]}
+            start={vec(center - outerRadius, center + outerRadius)}
+          />
+        </SkiaPath>
         {sparkles.map((sparkle, index) => (
-          <Circle
+          <SkiaCircle
+            color={index % 2 === 0 ? palette.sparkleA : palette.sparkleB}
+            cx={(sparkle.x / 100) * size}
+            cy={(sparkle.y / 100) * size}
             key={index}
-            cx={sparkle.x}
-            cy={sparkle.y}
-            fill={index % 2 === 0 ? palette.sparkleA : palette.sparkleB}
             opacity={sparkle.o}
-            r={sparkle.r}
+            r={(sparkle.r / 100) * size}
           />
         ))}
-      </Svg>
+      </Canvas>
       <View style={styles.inner}>
-        <Text style={[styles.caption, compact ? styles.captionCompact : null, { color: palette.caption }]}>
+        <Text style={[styles.caption, compact ? styles.captionCompact : null, { color: palette.caption }]}> 
           {caption}
         </Text>
-        <Text style={[styles.score, compact ? styles.scoreCompact : null, { color: palette.score }]}>
+        <Text style={[styles.score, compact ? styles.scoreCompact : null, { color: palette.score }]}> 
           {displayScore}
         </Text>
         <Text
@@ -209,8 +226,11 @@ export function GlowRing({
 const styles = StyleSheet.create({
   wrap: {
     alignItems: 'center',
-    justifyContent: 'center',
     alignSelf: 'center',
+    justifyContent: 'center',
+  },
+  canvas: {
+    ...StyleSheet.absoluteFillObject,
   },
   ringGlow: {
     backgroundColor: 'rgba(86, 246, 255, 0.16)',

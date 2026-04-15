@@ -1,14 +1,15 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
-import { PanResponder, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import Svg, {
-  Defs,
-  LinearGradient as SvgLinearGradient,
-  Line,
-  Path,
-  Rect,
-  Stop,
-} from 'react-native-svg';
+import {
+  Canvas,
+  DashPathEffect,
+  LinearGradient as SkiaLinearGradient,
+  Path as SkiaPath,
+  RoundedRect as SkiaRoundedRect,
+  Skia,
+  vec,
+} from '@shopify/react-native-skia';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { PanResponder, StyleSheet, Text, View } from 'react-native';
 
 import {
   TREND_VIEWBOX_BASELINE,
@@ -49,6 +50,111 @@ function colorStops(accent: string) {
 
 function buildLine(points: Array<{ x: number; y: number }>) {
   return points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x} ${point.y}`).join(' ');
+}
+
+function hexColorWithOpacity(color: string, opacity: number) {
+  if (!color.startsWith('#')) {
+    return color;
+  }
+
+  const hex = color.slice(1);
+  const normalizedHex =
+    hex.length === 3
+      ? hex
+          .split('')
+          .map((character) => `${character}${character}`)
+          .join('')
+      : hex.length === 6
+        ? hex
+        : null;
+
+  if (!normalizedHex) {
+    return color;
+  }
+
+  const alphaHex = Math.round(opacity * 255)
+    .toString(16)
+    .padStart(2, '0');
+  return `#${normalizedHex}${alphaHex}`;
+}
+
+function isTrendSvgPathCommand(token: string) {
+  return token.length === 1 && /[A-Z]/.test(token);
+}
+
+function scaleTrendSvgPath(path: string, scaleX: number, scaleY: number) {
+  if (!path || (Math.abs(scaleX - 1) < 0.0001 && Math.abs(scaleY - 1) < 0.0001)) {
+    return path;
+  }
+
+  const tokens = path.trim().split(/\s+/);
+  const scaledTokens: string[] = [];
+  let index = 0;
+
+  while (index < tokens.length) {
+    const token = tokens[index];
+
+    if (!token) {
+      index += 1;
+      continue;
+    }
+
+    scaledTokens.push(token);
+    index += 1;
+
+    if (token === 'M' || token === 'L') {
+      while (index + 1 < tokens.length) {
+        const xToken = tokens[index];
+        const yToken = tokens[index + 1];
+
+        if (!xToken || !yToken || isTrendSvgPathCommand(xToken) || isTrendSvgPathCommand(yToken)) {
+          break;
+        }
+
+        const xValue = Number(xToken);
+        const yValue = Number(yToken);
+        scaledTokens.push(Number.isFinite(xValue) ? String(xValue * scaleX) : xToken);
+        scaledTokens.push(Number.isFinite(yValue) ? String(yValue * scaleY) : yToken);
+        index += 2;
+      }
+
+      continue;
+    }
+
+    if (token === 'H') {
+      while (index < tokens.length) {
+        const xToken = tokens[index];
+        if (!xToken || isTrendSvgPathCommand(xToken)) {
+          break;
+        }
+
+        const xValue = Number(xToken);
+        scaledTokens.push(Number.isFinite(xValue) ? String(xValue * scaleX) : xToken);
+        index += 1;
+      }
+
+      continue;
+    }
+
+    if (token === 'V') {
+      while (index < tokens.length) {
+        const yToken = tokens[index];
+        if (!yToken || isTrendSvgPathCommand(yToken)) {
+          break;
+        }
+
+        const yValue = Number(yToken);
+        scaledTokens.push(Number.isFinite(yValue) ? String(yValue * scaleY) : yToken);
+        index += 1;
+      }
+    }
+  }
+
+  return scaledTokens.join(' ');
+}
+
+function makeTrendSkPath(path: string) {
+  return path ? Skia.Path.MakeFromSVGString(path) ?? Skia.Path.Make() : Skia.Path.Make();
 }
 
 interface TrendBarFrame {
@@ -152,7 +258,6 @@ export function TrendChart({
   const [selection, setSelection] = useState<TrendSelection | null>(null);
   const selectionRef = useRef<TrendSelection | null>(null);
   const releaseScrollLockRef = useRef<(() => void) | null>(null);
-  const chartId = useId().replace(/[:]/g, '');
   const acquireScreenScrollLock = useAcquireScreenScrollLock();
 
   const domain = useMemo(() => buildTrendDomain(points, { mode }), [mode, points]);
@@ -191,7 +296,7 @@ export function TrendChart({
       : 24;
   const markerVisuals = useMemo(
     () =>
-      markers.map((marker, index) => {
+      markers.map((marker) => {
         const startFraction = clampFraction(marker.startFraction);
         const endFraction = clampFraction(Math.max(marker.startFraction, marker.endFraction));
         const midpoint = clampFraction((startFraction + endFraction) / 2);
@@ -205,6 +310,29 @@ export function TrendChart({
         };
       }),
     [markers, testID],
+  );
+  const scaleX = chartWidth > 0 ? chartWidth / TREND_VIEWBOX_WIDTH : 0;
+  const scaleY = height / TREND_VIEWBOX_HEIGHT;
+  const scaledPathStrokeWidth = Math.max(lineStrokeWidth * scaleY, 0.8);
+  const scaledShadowStrokeWidth = Math.max(shadowStrokeWidth * scaleY, scaledPathStrokeWidth);
+  const scaledMarkerBandHeight = 31 * scaleY;
+  const scaledMarkerBandY = 3 * scaleY;
+  const scaledMarkerBandRadius = Math.max(3 * Math.min(scaleX || 1, scaleY), 0.5);
+  const guideLinePath = useMemo(
+    () => makeTrendSkPath(`M 0 ${guideLineY * scaleY} L ${chartWidth} ${guideLineY * scaleY}`),
+    [chartWidth, guideLineY, scaleY],
+  );
+  const scaledAreas = useMemo(
+    () => areas.map((path) => makeTrendSkPath(scaleTrendSvgPath(path, scaleX, scaleY))),
+    [areas, scaleX, scaleY],
+  );
+  const scaledPaths = useMemo(
+    () => paths.map((path) => makeTrendSkPath(scaleTrendSvgPath(path, scaleX, scaleY))),
+    [paths, scaleX, scaleY],
+  );
+  const scaledBridgePaths = useMemo(
+    () => bridgePaths.map((path) => makeTrendSkPath(scaleTrendSvgPath(path, scaleX, scaleY))),
+    [bridgePaths, scaleX, scaleY],
   );
 
   const commitSelection = useCallback(
@@ -280,9 +408,6 @@ export function TrendChart({
           commitSelection(null);
           releaseScrollLock();
         },
-        // Keep the scrub gesture attached to the chart until the user lifts
-        // their finger so the parent ScrollView cannot steal the interaction
-        // when the touch path drifts vertically.
         onPanResponderTerminationRequest: () => false,
       }),
     [commitSelection, ensureScrollLock, releaseScrollLock, shouldCaptureScrub, updateSelection],
@@ -332,107 +457,121 @@ export function TrendChart({
         }}
         testID={testID ? `${testID}-viewport` : undefined}
         style={[styles.chartArea, { height }]}>
-        <Svg height="100%" preserveAspectRatio="none" viewBox="0 0 100 40" width="100%">
-          <Defs>
-            <SvgLinearGradient id={`${chartId}-stroke`} x1="0%" x2="100%" y1="100%" y2="0%">
-              <Stop offset="0%" stopColor={start} />
-              <Stop offset="100%" stopColor={end} />
-            </SvgLinearGradient>
-            <SvgLinearGradient id={`${chartId}-fill`} x1="0%" x2="0%" y1="0%" y2="100%">
-              <Stop offset="0%" stopColor={end} stopOpacity="0.32" />
-              <Stop offset="100%" stopColor={start} stopOpacity="0.02" />
-            </SvgLinearGradient>
-            <SvgLinearGradient id={`${chartId}-bar`} x1="0%" x2="0%" y1="0%" y2="100%">
-              <Stop offset="0%" stopColor={end} stopOpacity="0.94" />
-              <Stop offset="100%" stopColor={start} stopOpacity="0.34" />
-            </SvgLinearGradient>
-          </Defs>
+        <Canvas style={styles.canvas}>
           {markerVisuals.map((marker) => (
-            <Rect
+            <SkiaRoundedRect
+              color={marker.backgroundColor}
+              height={scaledMarkerBandHeight}
               key={`marker-band-${marker.id}`}
-              fill={marker.backgroundColor}
-              height="31"
-              rx="3"
-              ry="3"
-              width={marker.bandWidth}
-              x={marker.startX}
-              y="3"
+              r={scaledMarkerBandRadius}
+              width={marker.bandWidth * scaleX}
+              x={marker.startX * scaleX}
+              y={scaledMarkerBandY}
             />
           ))}
-          <Line
-            stroke="rgba(149, 162, 188, 0.22)"
-            strokeDasharray="3 3"
-            strokeWidth="0.7"
-            x1="0"
-            x2="100"
-            y1={guideLineY}
-            y2={guideLineY}
-          />
+          <SkiaPath color="rgba(149, 162, 188, 0.22)" path={guideLinePath} strokeWidth={Math.max(0.7 * scaleY, 0.7)} style="stroke">
+            <DashPathEffect intervals={[Math.max(3 * scaleX, 1), Math.max(3 * scaleX, 1)]} />
+          </SkiaPath>
           {mode === 'line'
-            ? areas.map((area, index) => <Path key={`area-${index}`} d={area} fill={`url(#${chartId}-fill)`} />)
-            : barFrames.map((bar) =>
-                bar ? (
-                  <Rect
-                    key={`bar-${bar.index}`}
-                    fill={barColorForPoint?.(points[bar.index] ?? { label: '', value: null }, bar.index) ?? `url(#${chartId}-bar)`}
-                    fillOpacity={selection?.index === bar.index ? 1 : 0.88}
-                    height={bar.height}
-                    opacity={selection?.index === bar.index ? 1 : 0.92}
-                    rx={Math.min(bar.width / 2, 1.6)}
-                    ry={Math.min(bar.width / 2, 1.6)}
-                    stroke={
-                      selection?.index === bar.index
-                        ? barColorForPoint?.(points[bar.index] ?? { label: '', value: null }, bar.index) ?? accentColor
-                        : 'transparent'
-                    }
-                    strokeOpacity={selection?.index === bar.index ? 0.44 : 0}
-                    strokeWidth={selection?.index === bar.index ? 0.5 : 0}
-                    testID={testID ? `${testID}-bar-${bar.index}` : undefined}
-                    width={bar.width}
-                    x={bar.x}
-                    y={bar.y}
+            ? scaledAreas.map((area, index) => (
+                <SkiaPath key={`area-${index}`} path={area} style="fill">
+                  <SkiaLinearGradient
+                    colors={[hexColorWithOpacity(end, 0.32), hexColorWithOpacity(start, 0.02)]}
+                    end={vec(0, height)}
+                    start={vec(0, 0)}
                   />
-                ) : null,
-              )}
+                </SkiaPath>
+              ))
+            : barFrames.map((bar) => {
+                if (!bar) {
+                  return null;
+                }
+
+                const point = points[bar.index] ?? { label: '', value: null };
+                const customColor = barColorForPoint?.(point, bar.index);
+                const isSelected = selection?.index === bar.index;
+                const barWidth = bar.width * scaleX;
+                const barHeight = bar.height * scaleY;
+                const barX = bar.x * scaleX;
+                const barY = bar.y * scaleY;
+                const radius = Math.min(barWidth / 2, 1.6 * Math.min(scaleX || 1, scaleY));
+
+                return (
+                  <Fragment key={`bar-wrap-${bar.index}`}>
+                    <SkiaRoundedRect
+                      color={customColor}
+                      height={barHeight}
+                      opacity={isSelected ? 1 : 0.82}
+                      r={radius}
+                      width={barWidth}
+                      x={barX}
+                      y={barY}>
+                      {customColor ? null : (
+                        <SkiaLinearGradient
+                          colors={[hexColorWithOpacity(end, 0.94), hexColorWithOpacity(start, 0.34)]}
+                          end={vec(0, barY + barHeight)}
+                          start={vec(0, barY)}
+                        />
+                      )}
+                    </SkiaRoundedRect>
+                    {isSelected ? (
+                      <SkiaRoundedRect
+                        color={customColor ?? accentColor}
+                        height={barHeight}
+                        opacity={0.44}
+                        r={radius}
+                        strokeWidth={Math.max(0.5 * Math.min(scaleX || 1, scaleY), 0.5)}
+                        style="stroke"
+                        width={barWidth}
+                        x={barX}
+                        y={barY}
+                      />
+                    ) : null}
+                  </Fragment>
+                );
+              })}
           {mode === 'line'
-            ? bridgePaths.map((path, index) => (
-                <Path
+            ? scaledBridgePaths.map((path, index) => (
+                <SkiaPath
+                  color={colors.subtle}
                   key={`bridge-${index}`}
-                  d={path}
-                  fill="none"
-                  stroke={colors.subtle}
-                  strokeDasharray="2.2 2.2"
-                  strokeLinecap="round"
-                  strokeOpacity="0.72"
-                  strokeWidth={Math.max(lineStrokeWidth * 0.85, 0.7)}
-                  testID={testID ? `${testID}-bridge-${index}` : undefined}
-                />
+                  opacity={0.72}
+                  path={path}
+                  strokeCap="round"
+                  strokeWidth={Math.max(lineStrokeWidth * 0.85 * scaleY, 0.7)}
+                  style="stroke">
+                  <DashPathEffect intervals={[Math.max(2.2 * scaleX, 1), Math.max(2.2 * scaleX, 1)]} />
+                </SkiaPath>
               ))
             : null}
           {mode === 'line'
-            ? paths.map((path, index) => (
-                <Path
+            ? scaledPaths.map((path, index) => (
+                <SkiaPath
+                  color="rgba(86, 246, 255, 0.12)"
                   key={`shadow-${index}`}
-                  d={path}
-                  fill="none"
-                  stroke="rgba(86, 246, 255, 0.12)"
-                  strokeWidth={shadowStrokeWidth}
+                  path={path}
+                  strokeWidth={scaledShadowStrokeWidth}
+                  style="stroke"
                 />
               ))
             : null}
           {mode === 'line'
-            ? paths.map((path, index) => (
-                <Path
+            ? scaledPaths.map((path, index) => (
+                <SkiaPath
                   key={`line-${index}`}
-                  d={path}
-                  fill="none"
-                  stroke={`url(#${chartId}-stroke)`}
-                  strokeLinecap="round"
-                  strokeWidth={lineStrokeWidth}
-                />
+                  path={path}
+                  strokeCap="round"
+                  strokeWidth={scaledPathStrokeWidth}
+                  style="stroke">
+                  <SkiaLinearGradient
+                    colors={[start, end]}
+                    end={vec(chartWidth, 0)}
+                    start={vec(0, height)}
+                  />
+                </SkiaPath>
               ))
             : null}
-        </Svg>
+        </Canvas>
         {markerVisuals.length > 0 ? (
           <View pointerEvents="none" style={styles.markerLayer}>
             {markerVisuals.map((marker) => (
@@ -515,6 +654,9 @@ const styles = StyleSheet.create({
   chartArea: {
     position: 'relative',
     width: '100%',
+  },
+  canvas: {
+    ...StyleSheet.absoluteFillObject,
   },
   overlay: {
     ...StyleSheet.absoluteFillObject,

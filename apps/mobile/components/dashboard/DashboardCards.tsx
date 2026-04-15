@@ -34,6 +34,7 @@ import { PulsingHeartIcon } from '@/components/ui/PulsingHeartIcon';
 import { StatChip } from '@/components/ui/StatChip';
 import { colors, sleepStageColors, typography } from '@/constants/theme';
 import type { ManualActivityKind } from '@/data/HealthRepository';
+import { SleepStageBreakdownChip } from '../ui/SleepStageBreakdownChip';
 import type {
   ActivitySummary,
   DashboardInsight,
@@ -41,6 +42,7 @@ import type {
   HeartCardData,
   HeartIntradayMarker,
   SleepStage,
+  SleepStageSelection,
   SleepCardData,
   StrainCardData,
 } from '@/types/health';
@@ -98,6 +100,11 @@ const DEFAULT_NEW_ACTIVITY_DURATION_MINUTES = 60;
 const REVIEW_ACTIVITY_OPTIONS: ManualActivityKind[] = ['Activity', 'Walk', 'Workout', 'Nap'];
 const REVIEW_DRAFT_OPTIONS: HeartMarkerDraftKind[] = [...REVIEW_ACTIVITY_OPTIONS, 'Sleep'];
 const REVEAL_EASING = Easing.out(Easing.cubic);
+const SLEEP_STAGE_BREAKDOWN_ORDER: SleepStage[] = ['deep', 'light', 'rem', 'awake'];
+
+function formatSleepStageBreakdownLabel(stage: SleepStage) {
+  return stage === 'rem' ? 'REM' : `${stage[0].toUpperCase()}${stage.slice(1)}`;
+}
 
 interface HeartActivityReviewActions {
   createManualActivity?: (activity: ManualActivityKind, start: Date, end: Date) => Promise<string>;
@@ -2771,6 +2778,46 @@ export function SleepCard({
   cardData: SleepCardData;
   trailingLabel: string;
 }) {
+  const [inspectedStage, setInspectedStage] = useState<SleepStage | null>(null);
+  const [pinnedStage, setPinnedStage] = useState<SleepStage | null>(null);
+  const stageBreakdown = useMemo(() => {
+    const totals = cardData.stages.reduce<Record<SleepStage, number>>(
+      (accumulator, segment) => {
+        accumulator[segment.stage] += segment.minutes;
+        return accumulator;
+      },
+      {
+        awake: 0,
+        deep: 0,
+        light: 0,
+        rem: 0,
+      },
+    );
+
+    return SLEEP_STAGE_BREAKDOWN_ORDER
+      .filter((stage) => totals[stage] > 0)
+      .map((stage) => ({
+        accentColor: sleepStageColors[stage],
+        label: formatSleepStageBreakdownLabel(stage),
+        stage,
+        value: formatCompactDuration(totals[stage]),
+      }));
+  }, [cardData.stages]);
+  const activeStage = inspectedStage ?? pinnedStage;
+
+  useEffect(() => {
+    setInspectedStage(null);
+    setPinnedStage(null);
+  }, [cardData.endLabel, cardData.startLabel, cardData.stages]);
+
+  const handleSleepStageSelectionChange = useCallback((selection: SleepStageSelection | null) => {
+    setInspectedStage(selection?.segment.stage ?? null);
+  }, []);
+
+  const handleSleepStageChipPress = useCallback((stage: SleepStage) => {
+    setPinnedStage((currentStage) => (currentStage === stage ? null : stage));
+  }, []);
+
   return (
     <GlassCard accentColor={colors.violet}>
       <View style={styles.cardHeader}>
@@ -2798,11 +2845,30 @@ export function SleepCard({
       <SleepStageChart
         accentColor={colors.violet}
         endLabel={cardData.endLabel}
+        highlightedStage={pinnedStage}
         middleLabel={cardData.middleLabel}
+        onSelectionChange={handleSleepStageSelectionChange}
         segments={cardData.stages}
         startLabel={cardData.startLabel}
         testID={chartTestID}
       />
+
+      {stageBreakdown.length > 0 ? (
+        <View style={styles.sleepStageBreakdownRow}>
+          {stageBreakdown.map((stage) => (
+            <SleepStageBreakdownChip
+              accentColor={stage.accentColor}
+              key={stage.stage}
+              label={stage.label}
+              onPress={() => {
+                handleSleepStageChipPress(stage.stage);
+              }}
+              selected={activeStage === stage.stage}
+              value={stage.value}
+            />
+          ))}
+        </View>
+      ) : null}
     </GlassCard>
   );
 }
@@ -3232,6 +3298,12 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginTop: 4,
     textAlign: 'right',
+  },
+  sleepStageBreakdownRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+    marginTop: 12,
   },
   activityLabel: {
     color: colors.muted,

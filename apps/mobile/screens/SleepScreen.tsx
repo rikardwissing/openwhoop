@@ -11,6 +11,7 @@ import { GlassCard } from '@/components/ui/GlassCard';
 import { GlowRing } from '@/components/ui/GlowRing';
 import { MetricCard } from '@/components/ui/MetricCard';
 import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
+import { SleepStageBreakdownChip } from '@/components/ui/SleepStageBreakdownChip';
 import { colors, sleepStageColors, typography } from '@/constants/theme';
 import { useDerivedRefreshState, useSleepHistory } from '@/hooks/useHealthData';
 import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
@@ -44,6 +45,7 @@ export function SleepScreen() {
   const state = useSleepHistory('14d');
   const derivedRefresh = useDerivedRefreshState();
   const [stageSelection, setStageSelection] = useState<SleepStageSelection | null>(null);
+  const [pinnedStage, setPinnedStage] = useState<SleepStage | null>(null);
   const [targetWakeMinutes, setTargetWakeMinutes] = useState<number | null>(null);
   const [alarmEnabled, setAlarmEnabled] = useState<boolean | null>(null);
   const [wakeTargetError, setWakeTargetError] = useState<string | null>(null);
@@ -95,6 +97,7 @@ export function SleepScreen() {
 
   useEffect(() => {
     setStageSelection(null);
+    setPinnedStage(null);
   }, [selectedSessionId]);
 
   useEffect(() => () => {
@@ -177,6 +180,7 @@ export function SleepScreen() {
           minutes: selectedStageTotals[stage],
         }))
     : [];
+  const activeStage = stageSelection?.segment.stage ?? pinnedStage;
   const resolvedTargetWakeMinutes = targetWakeMinutes ?? data.sleepPlan.targetWakeMinutes;
   const resolvedAlarmEnabled = alarmEnabled ?? data.sleepPlan.alarmEnabled;
   const displayedOptimalBedtimeMinutes = calculateOptimalBedtimeMinutes(
@@ -632,10 +636,10 @@ export function SleepScreen() {
             <SleepStageChart
               accentColor={colors.indigo}
               endLabel={selectedSession.wakeTime}
+              highlightedStage={pinnedStage}
               middleLabel={selectedSessionMiddleLabel}
               onSelectionChange={setStageSelection}
               segments={selectedSession.stages}
-              size="expanded"
               startLabel={selectedSession.bedtime}
               testID="sleep-last-night-stage-chart"
             />
@@ -643,19 +647,16 @@ export function SleepScreen() {
             {selectedStageBreakdown.length > 0 ? (
               <View style={styles.stageBreakdownGrid}>
                 {selectedStageBreakdown.map(({ stage, label, minutes }) => (
-                  <View
+                  <SleepStageBreakdownChip
+                    accentColor={sleepStageColors[stage]}
                     key={stage}
-                    style={[
-                      styles.stageBreakdownChip,
-                      stageSelection?.segment.stage === stage ? styles.stageBreakdownChipSelected : null,
-                      { borderColor: sleepStageColors[stage] },
-                    ]}>
-                    <View style={styles.stageBreakdownChipLeft}>
-                      <View style={[styles.stageBreakdownDot, { backgroundColor: sleepStageColors[stage] }]} />
-                      <Text style={styles.stageBreakdownLabel}>{label}</Text>
-                    </View>
-                    <Text style={styles.stageBreakdownValue}>{formatCompactDuration(minutes)}</Text>
-                  </View>
+                    onPress={() => {
+                      setPinnedStage((currentStage) => (currentStage === stage ? null : stage));
+                    }}
+                    selected={activeStage === stage}
+                    label={label}
+                    value={formatCompactDuration(minutes)}
+                  />
                 ))}
               </View>
             ) : null}
@@ -970,41 +971,6 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: 10,
     marginTop: 12,
-  },
-  stageBreakdownChip: {
-    alignItems: 'center',
-    backgroundColor: colors.surfaceMuted,
-    borderRadius: 16,
-    borderWidth: 1,
-    flexBasis: '48%',
-    flexDirection: 'row',
-    flexGrow: 1,
-    justifyContent: 'space-between',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-  },
-  stageBreakdownChipSelected: {
-    backgroundColor: colors.surfaceStrong,
-  },
-  stageBreakdownChipLeft: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: 8,
-  },
-  stageBreakdownDot: {
-    borderRadius: 999,
-    height: 8,
-    width: 8,
-  },
-  stageBreakdownLabel: {
-    color: colors.muted,
-    fontFamily: typography.bodySemiBold,
-    fontSize: 12,
-  },
-  stageBreakdownValue: {
-    color: colors.text,
-    fontFamily: typography.bodySemiBold,
-    fontSize: 13,
   },
   sessionRow: {
     alignItems: 'center',

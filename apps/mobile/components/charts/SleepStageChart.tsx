@@ -1,6 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Canvas,
+  Group as SkiaGroup,
+  Rect as SkiaRect,
+  RoundedRect as SkiaRoundedRect,
+  Skia,
+} from '@shopify/react-native-skia';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { PanResponder, StyleSheet, Text, View } from 'react-native';
-import Svg, { ClipPath, Defs, G, Rect } from 'react-native-svg';
 
 import {
   buildSleepStageFrames,
@@ -16,22 +22,7 @@ import {
   formatSleepStageLabel,
 } from '@/utils/formatters';
 
-const stageOrder: SleepStage[] = ['deep', 'light', 'rem', 'awake'];
-
-const compactMetrics = {
-  axisPaddingHorizontal: 0,
-  axisMarginTop: 8,
-  barHeight: 22,
-  barRadius: 4,
-  barY: 9,
-  chartHeight: 40,
-  shellPaddingBottom: 12,
-  shellPaddingHorizontal: 12,
-  shellPaddingTop: 10,
-  viewboxHeight: 40,
-};
-
-const expandedMetrics = {
+const chartMetrics = {
   axisPaddingHorizontal: 12,
   axisMarginTop: 10,
   barHeight: 46,
@@ -39,16 +30,12 @@ const expandedMetrics = {
   barY: 3,
   chartHeight: 52,
   shellPaddingBottom: 10,
-  shellPaddingHorizontal: 0,
+  shellPaddingHorizontal: 12,
   shellPaddingTop: 6,
   viewboxHeight: 52,
 };
 
-const selectionOutlineInset = 1;
-
-function formatStageName(stage: SleepStage) {
-  return stage === 'rem' ? 'REM' : `${stage[0].toUpperCase()}${stage.slice(1)}`;
-}
+const sleepStageViewBoxWidth = 100;
 
 export function SleepStageChart({
   segments,
@@ -56,8 +43,8 @@ export function SleepStageChart({
   middleLabel,
   endLabel,
   accentColor = colors.cyan,
+  highlightedStage = null,
   onSelectionChange,
-  size = 'compact',
   testID,
 }: {
   segments: SleepStageSegment[];
@@ -65,8 +52,8 @@ export function SleepStageChart({
   middleLabel: string;
   endLabel: string;
   accentColor?: string;
+  highlightedStage?: SleepStage | null;
   onSelectionChange?: (selection: SleepStageSelection | null) => void;
-  size?: 'compact' | 'expanded';
   testID?: string;
 }) {
   const [chartWidth, setChartWidth] = useState(0);
@@ -76,8 +63,17 @@ export function SleepStageChart({
   const frames = useMemo(() => buildSleepStageFrames(segments), [segments]);
   const selectedFrame = selection ? frames.find((frame) => frame.index === selection.index) ?? null : null;
   const acquireScreenScrollLock = useAcquireScreenScrollLock();
-  const metrics = size === 'expanded' ? expandedMetrics : compactMetrics;
-  const clipPathIdRef = useRef(`sleep-stage-bar-${Math.random().toString(36).slice(2, 10)}`);
+  const scaleX = chartWidth > 0 ? chartWidth / sleepStageViewBoxWidth : 0;
+  const trackClip = useMemo(
+    () =>
+      Skia.RRectXY(
+        Skia.XYWHRect(0, chartMetrics.barY, chartWidth, chartMetrics.barHeight),
+        chartMetrics.barRadius,
+        chartMetrics.barRadius,
+      ),
+    [chartWidth],
+  );
+  const activeHighlightedStage = selection?.segment.stage ?? highlightedStage;
 
   const commitSelection = useCallback(
     (nextSelection: SleepStageSelection | null) => {
@@ -152,9 +148,6 @@ export function SleepStageChart({
           commitSelection(null);
           releaseScrollLock();
         },
-        // Keep the scrub gesture attached to the chart until the user lifts
-        // their finger so the parent ScrollView cannot steal the interaction
-        // when the touch path drifts vertically.
         onPanResponderTerminationRequest: () => false,
       }),
     [commitSelection, ensureScrollLock, releaseScrollLock, shouldCaptureScrub, updateSelection],
@@ -162,22 +155,13 @@ export function SleepStageChart({
 
   return (
     <View style={styles.root}>
-      <View style={styles.legend}>
-        {stageOrder.map((stage) => (
-          <View key={stage} style={styles.legendChip}>
-            <View style={[styles.legendDot, { backgroundColor: sleepStageColors[stage] }]} />
-            <Text style={styles.legendLabel}>{formatStageName(stage)}</Text>
-          </View>
-        ))}
-      </View>
       <View
         style={[
           styles.chartShell,
-          size === 'expanded' ? styles.chartShellExpanded : null,
           {
-            paddingBottom: metrics.shellPaddingBottom,
-            paddingHorizontal: metrics.shellPaddingHorizontal,
-            paddingTop: metrics.shellPaddingTop,
+            paddingBottom: chartMetrics.shellPaddingBottom,
+            paddingHorizontal: chartMetrics.shellPaddingHorizontal,
+            paddingTop: chartMetrics.shellPaddingTop,
           },
         ]}>
         <View
@@ -185,69 +169,59 @@ export function SleepStageChart({
             setChartWidth(event.nativeEvent.layout.width);
           }}
           testID={testID ? `${testID}-viewport` : undefined}
-          style={[styles.chartArea, { height: metrics.chartHeight }]}>
-          <Svg
-            height="100%"
-            preserveAspectRatio="none"
-            viewBox={`0 0 100 ${metrics.viewboxHeight}`}
-            width="100%">
-            <Defs>
-              <ClipPath id={clipPathIdRef.current}>
-                <Rect
-                  height={metrics.barHeight}
-                  rx={metrics.barRadius}
-                  ry={metrics.barRadius}
-                  width={100}
-                  x={0}
-                  y={metrics.barY}
-                />
-              </ClipPath>
-            </Defs>
-            <Rect
-              fill={colors.surfaceMuted}
-              height={metrics.barHeight}
-              rx={metrics.barRadius}
-              ry={metrics.barRadius}
-              width={100}
+          style={[styles.chartArea, { height: chartMetrics.chartHeight }]}>
+          <Canvas style={styles.canvas}>
+            <SkiaRoundedRect
+              color={colors.surfaceMuted}
+              height={chartMetrics.barHeight}
+              r={chartMetrics.barRadius}
+              width={chartWidth}
               x={0}
-              y={metrics.barY}
+              y={chartMetrics.barY}
             />
-            <G clipPath={`url(#${clipPathIdRef.current})`}>
+            <SkiaGroup clip={trackClip}>
               {frames.map((frame) => {
                 const isSelected = selection?.index === frame.index;
+                const width = Math.max(frame.width * scaleX, 0.8 * Math.max(scaleX, 1));
+                const x = frame.startX * scaleX;
+                const opacity = selection
+                  ? isSelected
+                    ? 1
+                    : 0.38
+                  : activeHighlightedStage
+                    ? frame.segment.stage === activeHighlightedStage
+                      ? frame.segment.stage === 'awake' ? 0.94 : 1
+                      : 0.38
+                    : frame.segment.stage === 'awake'
+                      ? 0.94
+                      : 1;
 
                 return (
-                  <Rect
-                    fill={sleepStageColors[frame.segment.stage]}
-                    height={metrics.barHeight}
-                    key={`${frame.segment.stage}-${frame.index}`}
-                    opacity={selection ? (isSelected ? 1 : 0.38) : frame.segment.stage === 'awake' ? 0.94 : 1}
-                    rx={0}
-                    ry={0}
-                    stroke={selection && isSelected ? 'transparent' : 'rgba(255,255,255,0.10)'}
-                    strokeWidth={selection && isSelected ? 0 : 0.35}
-                    testID={testID ? `${testID}-segment-${frame.index}` : undefined}
-                    width={Math.max(frame.width, 0.8)}
-                    x={frame.startX}
-                    y={metrics.barY}
-                  />
+                  <Fragment key={`${frame.segment.stage}-${frame.index}`}>
+                    <SkiaRect
+                      color={sleepStageColors[frame.segment.stage]}
+                      height={chartMetrics.barHeight}
+                      opacity={opacity}
+                      width={width}
+                      x={x}
+                      y={chartMetrics.barY}
+                    />
+                    {!selection || !isSelected ? (
+                      <SkiaRect
+                        color="rgba(255,255,255,0.10)"
+                        height={chartMetrics.barHeight}
+                        strokeWidth={0.35}
+                        style="stroke"
+                        width={width}
+                        x={x}
+                        y={chartMetrics.barY}
+                      />
+                    ) : null}
+                  </Fragment>
                 );
               })}
-            </G>
-            {selectedFrame ? (
-              <Rect
-                fill="transparent"
-                height={metrics.barHeight + selectionOutlineInset * 2}
-                rx={metrics.barRadius + selectionOutlineInset}
-                ry={metrics.barRadius + selectionOutlineInset}
-                stroke={accentColor}
-                strokeWidth={1}
-                width={Math.max(selectedFrame.width, 1.1)}
-                x={selectedFrame.startX}
-                y={metrics.barY - selectionOutlineInset}
-              />
-            ) : null}
-          </Svg>
+            </SkiaGroup>
+          </Canvas>
           <View
             collapsable={false}
             style={styles.overlay}
@@ -262,15 +236,10 @@ export function SleepStageChart({
                 selectedFrame && selectedFrame.startX + selectedFrame.width / 2 > 50
                   ? styles.selectionBubbleWrapLeft
                   : styles.selectionBubbleWrapRight,
-                size === 'expanded' ? styles.selectionBubbleExpanded : null,
               ]}>
               <ChartSelectionBubble
                 accentColor={accentColor}
-                detail={
-                  size === 'expanded'
-                    ? formatClockRangeFromStartLabel(startLabel, selection.startMinute, selection.endMinute)
-                    : undefined
-                }
+                detail={formatClockRangeFromStartLabel(startLabel, selection.startMinute, selection.endMinute)}
                 label={formatSleepStageLabel(selection.segment.stage)}
                 size="compact"
                 testID={testID ? `${testID}-selection-bubble` : undefined}
@@ -283,8 +252,8 @@ export function SleepStageChart({
           style={[
             styles.axis,
             {
-              marginTop: metrics.axisMarginTop,
-              paddingHorizontal: metrics.axisPaddingHorizontal,
+              marginTop: chartMetrics.axisMarginTop,
+              paddingHorizontal: chartMetrics.axisPaddingHorizontal,
             },
           ]}>
           <Text style={styles.axisLabel}>{startLabel}</Text>
@@ -300,47 +269,20 @@ const styles = StyleSheet.create({
   root: {
     width: '100%',
   },
-  legend: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-    marginBottom: 12,
-  },
-  legendChip: {
-    alignItems: 'center',
-    backgroundColor: colors.surfaceMuted,
-    borderColor: colors.border,
-    borderRadius: 999,
-    borderWidth: 1,
-    flexDirection: 'row',
-    gap: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-  },
-  legendDot: {
-    borderRadius: 999,
-    height: 8,
-    width: 8,
-  },
-  legendLabel: {
-    color: colors.muted,
-    fontFamily: typography.body,
-    fontSize: 11,
-  },
   chartShell: {
     alignSelf: 'stretch',
     backgroundColor: 'rgba(3, 10, 16, 0.72)',
     borderColor: colors.border,
-    borderRadius: 18,
+    borderRadius: 20,
     borderWidth: 1,
     width: '100%',
-  },
-  chartShellExpanded: {
-    borderRadius: 20,
   },
   chartArea: {
     position: 'relative',
     width: '100%',
+  },
+  canvas: {
+    ...StyleSheet.absoluteFillObject,
   },
   overlay: {
     ...StyleSheet.absoluteFillObject,
@@ -357,10 +299,6 @@ const styles = StyleSheet.create({
   },
   selectionBubbleWrapRight: {
     alignItems: 'flex-end',
-  },
-  selectionBubbleExpanded: {
-    left: 12,
-    top: 6,
   },
   axis: {
     flexDirection: 'row',
