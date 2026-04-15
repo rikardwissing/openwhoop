@@ -35,7 +35,6 @@ import Animated, {
   withTiming,
   type SharedValue,
 } from 'react-native-reanimated';
-import Svg, { Defs, LinearGradient as SvgLinearGradient, Stop } from 'react-native-svg';
 
 import {
   buildTrendDomain,
@@ -60,7 +59,6 @@ const FOCUS_ZOOM_DURATION_MS = 220;
 const FOCUS_ZOOM_MAX_DURATION_MS = 420;
 const FOCUS_ZOOM_DURATION_PER_OCTAVE_MS = 42;
 const Y_AXIS_LAG_DURATION_MS = 180;
-const DEFAULT_HEART_ACCENT_TRANSITION_DURATION_MS = 240;
 const ACTIVITY_DRAFT_FADE_DURATION_MS = 180;
 const PINCH_ACTIVATION_PAN_THRESHOLD_PX = 4;
 const PINCH_ACTIVATION_SCALE_THRESHOLD = 0.015;
@@ -80,7 +78,7 @@ const ACTIVITY_DRAFT_HANDLE_WIDTH = 18;
 const ACTIVITY_DRAFT_BODY_MIN_WIDTH = 72;
 const MIN_ACTIVITY_DRAFT_MINUTE_SPAN = 1;
 const HEART_FILL_BASELINE = ACTIVITY_DRAFT_BAND_TOP + ACTIVITY_DRAFT_BAND_HEIGHT;
-const SHOULD_RENDER_SVG_TEST_MIRROR = process.env.JEST_WORKER_ID !== undefined;
+const DEFAULT_HEART_GRAPH_ACCENT_COLOR = colors.primary;
 
 export type HeartMarkerDraftKind = ManualActivityKind | 'Sleep';
 
@@ -216,18 +214,13 @@ function combineSvgPaths(paths: readonly string[]) {
   return paths.join(' ');
 }
 
-interface HeartPlotGradientColors {
-  fillBody: string;
-  fillTop: string;
-  strokeEnd: string;
-  strokeStart: string;
-}
+const HEART_STROKE_GRADIENT_POSITIONS = [0, 0.22, 0.78, 1];
 
 function buildHeartFillGradientColors(startColor: string, endColor: string) {
   return {
-    body: hexColorWithOpacity(startColor, 0.2),
+    body: hexColorWithOpacity(startColor, 0.34),
     tail: hexColorWithOpacity(startColor, 0),
-    top: hexColorWithOpacity(endColor, 0.6),
+    top: hexColorWithOpacity(endColor, 0.92),
   };
 }
 
@@ -337,26 +330,145 @@ function useHeartChartTransformedPath(
   );
 }
 
+const HeartChartPlotStrokeLayer = memo(function HeartChartPlotStrokeLayer({
+  activeSleepStageColor,
+  chartCameraState,
+  chartEndX,
+  chartYAxisState,
+  combinedBridgePath,
+  guideLinePath,
+  hasSleepStageHighlightOverlay,
+  plotHeightScale,
+  plotShadowColor,
+  scaledBridgePaths,
+  scaledCombinedPlotPath,
+  scaledSleepStageHighlightClipPath,
+  strokeGradientColors,
+}: {
+  activeSleepStageColor: string | null;
+  chartCameraState: SharedValue<{ scaleX: number; translateX: number }>;
+  chartEndX: number;
+  chartYAxisState: SharedValue<{ scaleY: number; translateY: number }>;
+  combinedBridgePath: string;
+  guideLinePath: string;
+  hasSleepStageHighlightOverlay: boolean;
+  plotHeightScale: number;
+  plotShadowColor: any;
+  scaledBridgePaths: string[];
+  scaledCombinedPlotPath: string;
+  scaledSleepStageHighlightClipPath: string;
+  strokeGradientColors: any;
+}) {
+  const guideLineBasePath = useMemo(() => makeHeartSkPath(guideLinePath), [guideLinePath]);
+  const plotStrokeBasePath = useMemo(() => makeHeartSkPath(scaledCombinedPlotPath), [scaledCombinedPlotPath]);
+  const bridgeBasePath = useMemo(() => makeHeartSkPath(combinedBridgePath), [combinedBridgePath]);
+  const sleepStageHighlightStrokeClipBasePath = useMemo(
+    () => makeHeartSkPath(scaledSleepStageHighlightClipPath),
+    [scaledSleepStageHighlightClipPath],
+  );
+  const transformedGuideLinePath = useHeartChartTransformedPath(
+    guideLineBasePath,
+    chartCameraState,
+    chartYAxisState,
+  );
+  const transformedPlotStrokePath = useHeartChartTransformedPath(
+    plotStrokeBasePath,
+    chartCameraState,
+    chartYAxisState,
+  );
+  const transformedBridgePath = useHeartChartTransformedPath(
+    bridgeBasePath,
+    chartCameraState,
+    chartYAxisState,
+  );
+  const transformedSleepStageHighlightStrokeClipPath = useHeartChartTransformedPath(
+    sleepStageHighlightStrokeClipBasePath,
+    chartCameraState,
+  );
+
+  return (
+    <>
+      <SkiaPath
+        color="rgba(149, 162, 188, 0.22)"
+        end={1}
+        path={transformedGuideLinePath}
+        start={0}
+        strokeWidth={0.7}
+        style="stroke">
+        <DashPathEffect intervals={[0.36, 0.36]} />
+      </SkiaPath>
+      {combinedBridgePath ? (
+        <SkiaPath
+          color={colors.subtle}
+          end={1}
+          opacity={0.72}
+          path={transformedBridgePath}
+          start={0}
+          strokeCap="round"
+          strokeWidth={0.68}
+          style="stroke">
+          <DashPathEffect intervals={[1.8, 1.8]} />
+        </SkiaPath>
+      ) : null}
+      {scaledCombinedPlotPath ? (
+        <>
+          <SkiaPath
+            color={plotShadowColor}
+            end={1}
+            path={transformedPlotStrokePath}
+            start={0}
+            strokeWidth={1.6}
+            style="stroke"
+          />
+          <SkiaPath
+            end={1}
+            path={transformedPlotStrokePath}
+            start={0}
+            strokeCap="round"
+            strokeWidth={0.8}
+            style="stroke">
+            <SkiaLinearGradient
+              colors={strokeGradientColors}
+              end={vec(chartEndX, HEART_VIEWBOX_TOP * plotHeightScale)}
+              positions={HEART_STROKE_GRADIENT_POSITIONS}
+              start={vec(0, HEART_VIEWBOX_BASELINE * plotHeightScale)}
+            />
+          </SkiaPath>
+        </>
+      ) : null}
+      {hasSleepStageHighlightOverlay && scaledCombinedPlotPath ? (
+        <SkiaGroup clip={transformedSleepStageHighlightStrokeClipPath}>
+          <SkiaPath
+            color={activeSleepStageColor!}
+            end={1}
+            opacity={0.22}
+            path={transformedPlotStrokePath}
+            start={0}
+            strokeWidth={2.4}
+            style="stroke"
+          />
+          <SkiaPath
+            color={activeSleepStageColor!}
+            end={1}
+            opacity={0.96}
+            path={transformedPlotStrokePath}
+            start={0}
+            strokeCap="round"
+            strokeWidth={1.3}
+            style="stroke"
+          />
+        </SkiaGroup>
+      ) : null}
+    </>
+  );
+});
+
 function interpolateHeartAccentSkiaColor(
-  accentTransitionProgress: number,
   focusTransitionProgress: number,
-  previousBaseColor: string,
-  nextBaseColor: string,
-  previousFocusedColor: string,
-  nextFocusedColor: string,
+  baseColor: string,
+  focusedColor: string,
 ) {
   'worklet';
-
-  const baseColor = interpolateColors(
-    accentTransitionProgress,
-    [0, 1],
-    [previousBaseColor, nextBaseColor],
-  );
-  const focusedColor = interpolateColors(
-    accentTransitionProgress,
-    [0, 1],
-    [previousFocusedColor, nextFocusedColor],
-  );
 
   return interpolateColors(
     focusTransitionProgress,
@@ -365,50 +477,12 @@ function interpolateHeartAccentSkiaColor(
   );
 }
 
-function HeartChartSvgGradientTestMirror({
-  chartTestID,
-  nextBaseGradientEnd,
-  nextBaseGradientStart,
-  nextFocusGradientEnd,
-  nextFocusGradientStart,
-}: {
-  chartTestID?: string;
-  nextBaseGradientEnd: string;
-  nextBaseGradientStart: string;
-  nextFocusGradientEnd: string;
-  nextFocusGradientStart: string;
-}) {
-  const gradientColors = useMemo<HeartPlotGradientColors>(
-    () => {
-      const useFocusedColors =
-        nextFocusGradientStart !== nextBaseGradientStart ||
-        nextFocusGradientEnd !== nextBaseGradientEnd;
+function resolveHeartGraphAccentColor(marker: HeartMarkerVisual | HeartIntradayMarker | null) {
+  if (!marker) {
+    return DEFAULT_HEART_GRAPH_ACCENT_COLOR;
+  }
 
-      return {
-        fillBody: useFocusedColors ? nextFocusGradientStart : nextBaseGradientStart,
-        fillTop: useFocusedColors ? nextFocusGradientEnd : nextBaseGradientEnd,
-        strokeEnd: useFocusedColors ? nextFocusGradientEnd : nextBaseGradientEnd,
-        strokeStart: useFocusedColors ? nextFocusGradientStart : nextBaseGradientStart,
-      };
-    },
-    [nextBaseGradientEnd, nextBaseGradientStart, nextFocusGradientEnd, nextFocusGradientStart],
-  );
-
-  return (
-    <Svg height="0" style={styles.chartCompatibilitySvg} testID={chartTestID ? `${chartTestID}-content` : undefined} width="0">
-      <Defs>
-        <SvgLinearGradient id="heart-chart-test-stroke" x1="0%" x2="100%" y1="100%" y2="0%">
-          <Stop offset="0%" stopColor={gradientColors.strokeStart} />
-          <Stop offset="100%" stopColor={gradientColors.strokeEnd} />
-        </SvgLinearGradient>
-        <SvgLinearGradient id="heart-chart-test-fill" x1="0%" x2="0%" y1="0%" y2="100%">
-          <Stop offset="0%" stopColor={gradientColors.fillTop} />
-          <Stop offset="58%" stopColor={gradientColors.fillBody} />
-          <Stop offset="100%" stopColor={gradientColors.fillBody} />
-        </SvgLinearGradient>
-      </Defs>
-    </Svg>
-  );
+  return 'accentColor' in marker ? marker.accentColor : getHeartIntradayMarkerPresentation(marker).accentColor;
 }
 
 function buildHeartHighlightClipPath(highlights: readonly HeartSleepStageHighlight[]) {
@@ -1174,23 +1248,20 @@ function HeartMarkerBand({
 }
 
 const HeartChartPlotCanvas = memo(function HeartChartPlotCanvas({
-  accentTransitionProgress,
   activeSleepStageColor,
   areas,
   baseDomain,
+  baseAccentColor,
   bridgePaths,
   chartContentWidth,
   chartEndX,
   chartPointSpacingValue,
   chartTestID,
   focusTransitionProgress,
+  focusedAccentColor,
   guideLineY,
-  nextBaseAccentColor,
-  nextFocusedAccentColor,
   paths,
   plotHeight,
-  previousBaseAccentColor,
-  previousFocusedAccentColor,
   sleepStageHighlights,
   viewportZoomAnchorIndex,
   viewportZoomAnchorScreenX,
@@ -1198,23 +1269,20 @@ const HeartChartPlotCanvas = memo(function HeartChartPlotCanvas({
   yAxisDomainMax,
   yAxisDomainMin,
 }: {
-  accentTransitionProgress: SharedValue<number>;
   activeSleepStageColor: string | null;
   areas: string[];
   baseDomain: ReturnType<typeof buildTrendDomain>;
+  baseAccentColor: string;
   bridgePaths: string[];
   chartContentWidth: number;
   chartEndX: number;
   chartPointSpacingValue: SharedValue<number>;
   chartTestID?: string;
   focusTransitionProgress: SharedValue<number>;
+  focusedAccentColor: string;
   guideLineY: number;
-  nextBaseAccentColor: string;
-  nextFocusedAccentColor: string;
   paths: string[];
   plotHeight: number;
-  previousBaseAccentColor: string;
-  previousFocusedAccentColor: string;
   sleepStageHighlights: HeartSleepStageHighlight[];
   viewportZoomAnchorIndex: SharedValue<number>;
   viewportZoomAnchorScreenX: SharedValue<number>;
@@ -1222,30 +1290,18 @@ const HeartChartPlotCanvas = memo(function HeartChartPlotCanvas({
   yAxisDomainMax: SharedValue<number>;
   yAxisDomainMin: SharedValue<number>;
 }) {
-  const [previousBaseGradientStart, previousBaseGradientEnd] = colorStops(previousBaseAccentColor);
-  const [nextBaseGradientStart, nextBaseGradientEnd] = colorStops(nextBaseAccentColor);
-  const [previousFocusGradientStart, previousFocusGradientEnd] = colorStops(previousFocusedAccentColor);
-  const [nextFocusGradientStart, nextFocusGradientEnd] = colorStops(nextFocusedAccentColor);
-  const previousBaseFillGradient = useMemo(
-    () => buildHeartFillGradientColors(previousBaseGradientStart, previousBaseGradientEnd),
-    [previousBaseGradientEnd, previousBaseGradientStart],
+  const [baseGradientStart, baseGradientEnd] = colorStops(baseAccentColor);
+  const [focusGradientStart, focusGradientEnd] = colorStops(focusedAccentColor);
+  const baseFillGradient = useMemo(
+    () => buildHeartFillGradientColors(baseGradientStart, baseGradientEnd),
+    [baseGradientEnd, baseGradientStart],
   );
-  const nextBaseFillGradient = useMemo(
-    () => buildHeartFillGradientColors(nextBaseGradientStart, nextBaseGradientEnd),
-    [nextBaseGradientEnd, nextBaseGradientStart],
+  const focusFillGradient = useMemo(
+    () => buildHeartFillGradientColors(focusGradientStart, focusGradientEnd),
+    [focusGradientEnd, focusGradientStart],
   );
-  const previousFocusFillGradient = useMemo(
-    () => buildHeartFillGradientColors(previousFocusGradientStart, previousFocusGradientEnd),
-    [previousFocusGradientEnd, previousFocusGradientStart],
-  );
-  const nextFocusFillGradient = useMemo(
-    () => buildHeartFillGradientColors(nextFocusGradientStart, nextFocusGradientEnd),
-    [nextFocusGradientEnd, nextFocusGradientStart],
-  );
-  const previousBaseShadowColor = chartShadowColor(previousBaseAccentColor);
-  const nextBaseShadowColor = chartShadowColor(nextBaseAccentColor);
-  const previousFocusShadowColor = chartShadowColor(previousFocusedAccentColor);
-  const nextFocusShadowColor = chartShadowColor(nextFocusedAccentColor);
+  const baseShadowColor = chartShadowColor(baseAccentColor);
+  const focusShadowColor = chartShadowColor(focusedAccentColor);
   const combinedAreaPath = useMemo(() => combineSvgPaths(areas), [areas]);
   const combinedPlotPath = useMemo(() => combineSvgPaths(paths), [paths]);
   const hasSleepStageHighlightOverlay =
@@ -1293,8 +1349,8 @@ const HeartChartPlotCanvas = memo(function HeartChartPlotCanvas({
     () =>
       activeSleepStageColor
         ? [
-            hexColorWithOpacity(activeSleepStageColor, 0.72),
-            hexColorWithOpacity(activeSleepStageColor, 0.26),
+            hexColorWithOpacity(activeSleepStageColor, 0.84),
+            hexColorWithOpacity(activeSleepStageColor, 0.38),
             hexColorWithOpacity(activeSleepStageColor, 0),
           ]
         : null,
@@ -1355,139 +1411,86 @@ const HeartChartPlotCanvas = memo(function HeartChartPlotCanvas({
     },
     [chartYAxisState],
   );
-  const guideLineBasePath = useMemo(() => makeHeartSkPath(guideLinePath), [guideLinePath]);
-  const plotStrokeBasePath = useMemo(() => makeHeartSkPath(scaledCombinedPlotPath), [scaledCombinedPlotPath]);
-  const bridgeBasePath = useMemo(() => makeHeartSkPath(combinedBridgePath), [combinedBridgePath]);
-  const sleepStageHighlightStrokeClipBasePath = useMemo(
-    () => makeHeartSkPath(scaledSleepStageHighlightClipPath),
-    [scaledSleepStageHighlightClipPath],
-  );
-  const transformedGuideLinePath = useHeartChartTransformedPath(
-    guideLineBasePath,
-    chartCameraState,
-    chartYAxisState,
-  );
-  const transformedPlotStrokePath = useHeartChartTransformedPath(
-    plotStrokeBasePath,
-    chartCameraState,
-    chartYAxisState,
-  );
-  const transformedBridgePath = useHeartChartTransformedPath(
-    bridgeBasePath,
-    chartCameraState,
-    chartYAxisState,
-  );
-  const transformedSleepStageHighlightStrokeClipPath = useHeartChartTransformedPath(
-    sleepStageHighlightStrokeClipBasePath,
-    chartCameraState,
-  );
   const strokeGradientColors = useDerivedValue(
     () => [
       interpolateHeartAccentSkiaColor(
-        accentTransitionProgress.value,
         focusTransitionProgress.value,
-        previousBaseGradientStart,
-        nextBaseGradientStart,
-        previousFocusGradientStart,
-        nextFocusGradientStart,
+        baseGradientStart,
+        focusGradientStart,
       ),
       interpolateHeartAccentSkiaColor(
-        accentTransitionProgress.value,
         focusTransitionProgress.value,
-        previousBaseGradientEnd,
-        nextBaseGradientEnd,
-        previousFocusGradientEnd,
-        nextFocusGradientEnd,
+        baseGradientStart,
+        focusGradientStart,
+      ),
+      interpolateHeartAccentSkiaColor(
+        focusTransitionProgress.value,
+        baseGradientEnd,
+        focusGradientEnd,
+      ),
+      interpolateHeartAccentSkiaColor(
+        focusTransitionProgress.value,
+        baseGradientEnd,
+        focusGradientEnd,
       ),
     ],
     [
-      accentTransitionProgress,
+      baseGradientEnd,
+      baseGradientStart,
+      focusGradientEnd,
       focusTransitionProgress,
-      nextBaseGradientEnd,
-      nextBaseGradientStart,
-      nextFocusGradientEnd,
-      nextFocusGradientStart,
-      previousBaseGradientEnd,
-      previousBaseGradientStart,
-      previousFocusGradientEnd,
-      previousFocusGradientStart,
+      focusGradientStart,
     ],
   );
   const fillGradientColors = useDerivedValue(
     () => [
       interpolateHeartAccentSkiaColor(
-        accentTransitionProgress.value,
         focusTransitionProgress.value,
-        previousBaseFillGradient.top,
-        nextBaseFillGradient.top,
-        previousFocusFillGradient.top,
-        nextFocusFillGradient.top,
+        baseFillGradient.top,
+        focusFillGradient.top,
       ),
       interpolateHeartAccentSkiaColor(
-        accentTransitionProgress.value,
         focusTransitionProgress.value,
-        previousBaseFillGradient.body,
-        nextBaseFillGradient.body,
-        previousFocusFillGradient.body,
-        nextFocusFillGradient.body,
+        baseFillGradient.body,
+        focusFillGradient.body,
       ),
       interpolateHeartAccentSkiaColor(
-        accentTransitionProgress.value,
         focusTransitionProgress.value,
-        previousBaseFillGradient.tail,
-        nextBaseFillGradient.tail,
-        previousFocusFillGradient.tail,
-        nextFocusFillGradient.tail,
+        baseFillGradient.body,
+        focusFillGradient.body,
+      ),
+      interpolateHeartAccentSkiaColor(
+        focusTransitionProgress.value,
+        baseFillGradient.tail,
+        focusFillGradient.tail,
       ),
     ],
     [
-      accentTransitionProgress,
+      baseFillGradient.body,
+      baseFillGradient.tail,
+      baseFillGradient.top,
+      focusFillGradient.body,
+      focusFillGradient.tail,
       focusTransitionProgress,
-      nextBaseFillGradient.body,
-      nextBaseFillGradient.tail,
-      nextBaseFillGradient.top,
-      nextFocusFillGradient.body,
-      nextFocusFillGradient.tail,
-      nextFocusFillGradient.top,
-      previousBaseFillGradient.body,
-      previousBaseFillGradient.tail,
-      previousBaseFillGradient.top,
-      previousFocusFillGradient.body,
-      previousFocusFillGradient.tail,
-      previousFocusFillGradient.top,
+      focusFillGradient.top,
     ],
   );
   const plotShadowColor = useDerivedValue(
     () =>
       interpolateHeartAccentSkiaColor(
-        accentTransitionProgress.value,
         focusTransitionProgress.value,
-        previousBaseShadowColor,
-        nextBaseShadowColor,
-        previousFocusShadowColor,
-        nextFocusShadowColor,
+        baseShadowColor,
+        focusShadowColor,
       ),
     [
-      accentTransitionProgress,
+      baseShadowColor,
+      focusShadowColor,
       focusTransitionProgress,
-      nextBaseShadowColor,
-      nextFocusShadowColor,
-      previousBaseShadowColor,
-      previousFocusShadowColor,
     ],
   );
 
   return (
     <Animated.View pointerEvents="none" style={styles.chartCanvas}>
-      {SHOULD_RENDER_SVG_TEST_MIRROR ? (
-        <HeartChartSvgGradientTestMirror
-          chartTestID={chartTestID}
-          nextBaseGradientEnd={nextBaseGradientEnd}
-          nextBaseGradientStart={nextBaseGradientStart}
-          nextFocusGradientEnd={nextFocusGradientEnd}
-          nextFocusGradientStart={nextFocusGradientStart}
-        />
-      ) : null}
       <Canvas style={styles.chartCanvas}>
         <SkiaGroup clip={plotClipPath}>
           <SkiaGroup transform={chartCameraTransform}>
@@ -1508,7 +1511,7 @@ const HeartChartPlotCanvas = memo(function HeartChartPlotCanvas({
                     <SkiaLinearGradient
                       colors={fillGradientColors}
                       end={vec(0, HEART_VIEWBOX_BASELINE * plotHeightScale)}
-                      positions={[0, 0.58, 1]}
+                      positions={[0, 0.44, 0.72, 1]}
                       start={vec(0, HEART_VIEWBOX_TOP * plotHeightScale)}
                     />
                   </SkiaPath>
@@ -1521,7 +1524,7 @@ const HeartChartPlotCanvas = memo(function HeartChartPlotCanvas({
                       <SkiaLinearGradient
                         colors={sleepStageFillGradientColors}
                         end={vec(0, HEART_VIEWBOX_BASELINE * plotHeightScale)}
-                        positions={[0, 0.55, 1]}
+                        positions={[0, 0.42, 0.7]}
                         start={vec(0, HEART_VIEWBOX_TOP * plotHeightScale)}
                       />
                     </SkiaPath>
@@ -1530,77 +1533,21 @@ const HeartChartPlotCanvas = memo(function HeartChartPlotCanvas({
               ) : null}
             </SkiaMask>
           </SkiaGroup>
-          <SkiaPath
-            color="rgba(149, 162, 188, 0.22)"
-            end={1}
-            path={transformedGuideLinePath}
-            start={0}
-            strokeWidth={0.7}
-            style="stroke">
-            <DashPathEffect intervals={[0.36, 0.36]} />
-          </SkiaPath>
-          {combinedBridgePath ? (
-            <SkiaPath
-              color={colors.subtle}
-              end={1}
-              opacity={0.72}
-              path={transformedBridgePath}
-              start={0}
-              strokeCap="round"
-              strokeWidth={0.68}
-              style="stroke">
-              <DashPathEffect intervals={[1.8, 1.8]} />
-            </SkiaPath>
-          ) : null}
-          {scaledCombinedPlotPath ? (
-            <>
-              <SkiaPath
-                color={plotShadowColor}
-                end={1}
-                path={transformedPlotStrokePath}
-                start={0}
-                strokeWidth={1.6}
-                style="stroke"
-              />
-              <SkiaPath
-                end={1}
-                path={transformedPlotStrokePath}
-                start={0}
-                strokeCap="round"
-                strokeWidth={0.8}
-                style="stroke">
-                <SkiaLinearGradient
-                  colors={strokeGradientColors}
-                  end={vec(chartEndX, HEART_VIEWBOX_TOP * plotHeightScale)}
-                  positions={[0, 1]}
-                  start={vec(0, HEART_VIEWBOX_BASELINE * plotHeightScale)}
-                />
-              </SkiaPath>
-            </>
-          ) : null}
-          {hasSleepStageHighlightOverlay && scaledCombinedPlotPath ? (
-            <SkiaGroup clip={transformedSleepStageHighlightStrokeClipPath}>
-              <SkiaPath
-                color={activeSleepStageColor!}
-                end={1}
-                opacity={0.22}
-                path={transformedPlotStrokePath}
-                start={0}
-                strokeWidth={2.4}
-                style="stroke"
-              />
-              <SkiaPath
-                color={activeSleepStageColor!}
-                end={1}
-                opacity={0.96}
-                path={transformedPlotStrokePath}
-                start={0}
-                strokeCap="round"
-                strokeWidth={1.3}
-                style="stroke"
-              />
-            </SkiaGroup>
-          ) : null}
+          <HeartChartPlotStrokeLayer
+            activeSleepStageColor={activeSleepStageColor}
+            chartCameraState={chartCameraState}
+            chartEndX={chartEndX}
+            chartYAxisState={chartYAxisState}
+            combinedBridgePath={combinedBridgePath}
+            guideLinePath={guideLinePath}
+            hasSleepStageHighlightOverlay={hasSleepStageHighlightOverlay}
+            plotHeightScale={plotHeightScale}
+            plotShadowColor={plotShadowColor}
+            scaledBridgePaths={scaledBridgePaths}
+            scaledCombinedPlotPath={scaledCombinedPlotPath}
+            scaledSleepStageHighlightClipPath={scaledSleepStageHighlightClipPath}
+            strokeGradientColors={strokeGradientColors}
+          />
         </SkiaGroup>
       </Canvas>
       {hasTestProbes ? (
@@ -1632,8 +1579,7 @@ const HeartChartPlotCanvas = memo(function HeartChartPlotCanvas({
 });
 
 export function PannableHeartChart({
-  accentColor = colors.primary,
-  accentTransitionDurationMs = DEFAULT_HEART_ACCENT_TRANSITION_DURATION_MS,
+  overlayAccentColor = colors.primary,
   activityDraft = null,
   anchorDayKey,
   axisTestID,
@@ -1659,8 +1605,7 @@ export function PannableHeartChart({
   resetKey,
   windowPointCount,
 }: {
-  accentColor?: string;
-  accentTransitionDurationMs?: number;
+  overlayAccentColor?: string;
   activityDraft?: HeartActivityDraft | null;
   anchorDayKey?: string;
   axisTestID?: string;
@@ -1725,16 +1670,8 @@ export function PannableHeartChart({
   const pendingLoadMoreRef = useRef(false);
   const previousJumpToLatestSignalRef = useRef<number | undefined>(jumpToLatestSignal);
   const skipLatestWindowChangeRef = useRef(true);
-  const baseAccentColorRef = useRef(accentColor);
-  const focusedAccentColorRef = useRef(accentColor);
-  const hasFocusTarget = requestedFocusedMarker !== null || requestedFocusedMarkerId !== null || focusedMarkerId !== null;
-  const baseChartAccentColor = baseAccentColorRef.current;
-  const focusedChartAccentColor = hasFocusTarget ? accentColor : focusedAccentColorRef.current;
-  const chartAccentTransitionProgress = useSharedValue(1);
-  const [previousRenderedBaseChartAccentColor, setPreviousRenderedBaseChartAccentColor] = useState(baseChartAccentColor);
-  const [previousRenderedFocusedChartAccentColor, setPreviousRenderedFocusedChartAccentColor] = useState(focusedChartAccentColor);
-  const latestRenderedBaseChartAccentColorRef = useRef(baseChartAccentColor);
-  const latestRenderedFocusedChartAccentColorRef = useRef(focusedChartAccentColor);
+  const baseAccentColorRef = useRef(DEFAULT_HEART_GRAPH_ACCENT_COLOR);
+  const focusedAccentColorRef = useRef(DEFAULT_HEART_GRAPH_ACCENT_COLOR);
   const focusTransitionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const focusTransitionDurationRef = useRef(FOCUS_ZOOM_DURATION_MS);
   const yAxisTransitionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1898,6 +1835,8 @@ export function PannableHeartChart({
     () => markers.find((marker) => marker.id === focusedMarkerId) ?? (focusedMarkerId !== null ? requestedFocusedMarker : null),
     [focusedMarkerId, markers, requestedFocusedMarker],
   );
+  const baseChartAccentColor = baseAccentColorRef.current;
+  const focusedChartAccentColor = focusedAccentColorRef.current;
   const reportFocusTransitionStateChange = useCallback(
     (isTransitioning: boolean, transitionDurationMs?: number) => {
       onFocusTransitionStateChange?.(isTransitioning, transitionDurationMs);
@@ -2226,6 +2165,7 @@ export function PannableHeartChart({
       currentAnchorScreenX,
       clampedWindowStart,
       nextAnchorIndex,
+      nextFocusedAccentColor,
       nextAnchorScreenX,
       nextFocusedMarkerId,
       nextZoomScale,
@@ -2237,6 +2177,7 @@ export function PannableHeartChart({
       currentAnchorScreenX: number;
       clampedWindowStart: number;
       nextAnchorIndex: number;
+      nextFocusedAccentColor?: string;
       nextAnchorScreenX: number;
       nextFocusedMarkerId: string | null;
       nextZoomScale: number;
@@ -2251,6 +2192,13 @@ export function PannableHeartChart({
       reportedWindowStart.value = clampedWindowStart;
       viewportZoomAnchorIndex.value = nextAnchorIndex;
       focusTransitionDurationRef.current = transitionDurationMs;
+
+      if (nextFocusedMarkerId !== null) {
+        baseAccentColorRef.current = DEFAULT_HEART_GRAPH_ACCENT_COLOR;
+        focusedAccentColorRef.current = nextFocusedAccentColor ?? focusedAccentColorRef.current;
+      } else {
+        baseAccentColorRef.current = DEFAULT_HEART_GRAPH_ACCENT_COLOR;
+      }
 
       startTransition(() => {
         setActiveWindowPointCount(resolvedWindowPointCount);
@@ -2296,6 +2244,7 @@ export function PannableHeartChart({
       nextWindowStart: number,
       nextFocusedMarkerId: string | null,
       nextViewportZoomAnchorIndex?: number,
+      nextFocusedAccentColor?: string,
     ) => {
       const resolvedWindowPointCount = Math.min(Math.max(nextWindowPointCount, 2), Math.max(points.length, 1));
       const nextMaxWindowStart = Math.max(0, points.length - resolvedWindowPointCount);
@@ -2376,6 +2325,7 @@ export function PannableHeartChart({
         currentAnchorScreenX,
         clampedWindowStart,
         nextAnchorIndex,
+        nextFocusedAccentColor,
         nextAnchorScreenX,
         nextFocusedMarkerId,
         nextZoomScale,
@@ -2443,6 +2393,7 @@ export function PannableHeartChart({
       nextWindowStart: number,
       nextFocusedMarkerId: string | null,
       nextViewportZoomAnchorIndex?: number,
+      nextFocusedAccentColor?: string,
     ) => {
       const resolvedWindowPointCount = Math.min(Math.max(nextWindowPointCount, 2), Math.max(points.length, 1));
       const nextMaxWindowStart = Math.max(0, points.length - resolvedWindowPointCount);
@@ -2465,6 +2416,13 @@ export function PannableHeartChart({
       isAxisDragging.value = false;
       isFocusDomainSourceFrozen.value = 0;
       unlockYAxisDomain();
+
+      if (nextFocusedMarkerId !== null) {
+        baseAccentColorRef.current = DEFAULT_HEART_GRAPH_ACCENT_COLOR;
+        focusedAccentColorRef.current = nextFocusedAccentColor ?? focusedAccentColorRef.current;
+      } else {
+        baseAccentColorRef.current = DEFAULT_HEART_GRAPH_ACCENT_COLOR;
+      }
 
       activeWindowPointCountRef.current = resolvedWindowPointCount;
       windowStartRef.current = clampedWindowStart;
@@ -2524,7 +2482,13 @@ export function PannableHeartChart({
       const markerCenterIndex =
         ((marker.startFraction + marker.endFraction) / 2) * Math.max(points.length - 1, 0);
 
-      applyWindowZoom(focusedWindow.windowPointCount, focusedWindow.windowStart, marker.id, markerCenterIndex);
+      applyWindowZoom(
+        focusedWindow.windowPointCount,
+        focusedWindow.windowStart,
+        marker.id,
+        markerCenterIndex,
+        marker.accentColor,
+      );
     },
     [applyWindowZoom, baseWindowPointCount, points.length],
   );
@@ -2578,6 +2542,7 @@ export function PannableHeartChart({
         focusedWindow.windowStart,
         requestedFocusedMarker.id,
         markerCenterIndex,
+        resolveHeartGraphAccentColor(requestedFocusedMarker),
       );
       return;
     }
@@ -2587,6 +2552,7 @@ export function PannableHeartChart({
       focusedWindow.windowStart,
       requestedFocusedMarker.id,
       markerCenterIndex,
+      resolveHeartGraphAccentColor(requestedFocusedMarker),
     );
   }, [
     applyWindowZoom,
@@ -2761,6 +2727,8 @@ export function PannableHeartChart({
     const nextWindowStart = maxWindowStart;
 
     pendingPinchZoomSyncRef.current = null;
+    baseAccentColorRef.current = DEFAULT_HEART_GRAPH_ACCENT_COLOR;
+    focusedAccentColorRef.current = DEFAULT_HEART_GRAPH_ACCENT_COLOR;
     activeWindowPointCountRef.current = baseWindowPointCount;
     setActiveWindowPointCount(baseWindowPointCount);
     setFocusedMarkerId(null);
@@ -3008,17 +2976,6 @@ export function PannableHeartChart({
       setRenderedActivityDraft(null);
     }, ACTIVITY_DRAFT_FADE_DURATION_MS);
   }, [activityDraft, activityDraftOpacity, clearActivityDraftDismissTimeout]);
-
-  useEffect(() => {
-    const hasFocusTarget = requestedFocusedMarker !== null || requestedFocusedMarkerId !== null || focusedMarkerId !== null;
-
-    if (hasFocusTarget) {
-      focusedAccentColorRef.current = accentColor;
-      return;
-    }
-
-    baseAccentColorRef.current = accentColor;
-  }, [accentColor, focusedMarkerId, requestedFocusedMarker, requestedFocusedMarkerId]);
 
   useEffect(() => {
     if (skipLatestWindowChangeRef.current) {
@@ -3705,36 +3662,6 @@ export function PannableHeartChart({
     return null;
   }
 
-  useEffect(() => {
-    if (
-      latestRenderedBaseChartAccentColorRef.current === baseChartAccentColor &&
-      latestRenderedFocusedChartAccentColorRef.current === focusedChartAccentColor
-    ) {
-      return;
-    }
-
-    setPreviousRenderedBaseChartAccentColor(latestRenderedBaseChartAccentColorRef.current);
-    setPreviousRenderedFocusedChartAccentColor(latestRenderedFocusedChartAccentColorRef.current);
-    latestRenderedBaseChartAccentColorRef.current = baseChartAccentColor;
-    latestRenderedFocusedChartAccentColorRef.current = focusedChartAccentColor;
-
-    if (accentTransitionDurationMs <= 0) {
-      chartAccentTransitionProgress.value = 1;
-      return;
-    }
-
-    chartAccentTransitionProgress.value = 0;
-    chartAccentTransitionProgress.value = withTiming(1, {
-      duration: accentTransitionDurationMs,
-      easing: Easing.out(Easing.cubic),
-    });
-  }, [
-    accentTransitionDurationMs,
-    baseChartAccentColor,
-    chartAccentTransitionProgress,
-    focusedChartAccentColor,
-  ]);
-
   return (
     <View>
       <View
@@ -3777,23 +3704,20 @@ export function PannableHeartChart({
                 </View>
               ) : null}
               <HeartChartPlotCanvas
-                accentTransitionProgress={chartAccentTransitionProgress}
                 activeSleepStageColor={activeSleepStageColor}
                 areas={areas}
                 baseDomain={baseDomain}
+                baseAccentColor={baseChartAccentColor}
                 bridgePaths={bridgePaths}
                 chartContentWidth={chartContentWidth}
                 chartEndX={chartEndX}
                 chartPointSpacingValue={chartPointSpacingValue}
                 chartTestID={chartTestID}
                 focusTransitionProgress={focusTransitionProgress}
+                focusedAccentColor={focusedChartAccentColor}
                 guideLineY={guideLineY}
-                nextBaseAccentColor={baseChartAccentColor}
-                nextFocusedAccentColor={focusedChartAccentColor}
                 paths={paths}
                 plotHeight={plotViewportHeight}
-                previousBaseAccentColor={previousRenderedBaseChartAccentColor}
-                previousFocusedAccentColor={previousRenderedFocusedChartAccentColor}
                 sleepStageHighlights={sleepStageHighlights}
                 viewportZoomAnchorIndex={viewportZoomAnchorIndex}
                 viewportZoomAnchorScreenX={viewportZoomAnchorScreenX}
@@ -3818,7 +3742,7 @@ export function PannableHeartChart({
                       lineOverflowTop={CHART_OVERLAY_OVERHANG_PX}
                       lineTop={0}
                       lineX={selectionX}
-                      strokeColor={accentColor}
+                      strokeColor={overlayAccentColor}
                       viewBoxHeight={HEART_CHART_VIEWBOX_HEIGHT}
                       viewBoxWidth={100}
                     />
@@ -3902,6 +3826,7 @@ export function PannableHeartChart({
                       pointerEvents="none"
                       style={[
                         styles.activityDraftInlineBadgeWrap,
+                        animatedActivityDraftViewportStyle,
                         animatedActivityDraftBadgeStyle,
                         {
                           top: activityDraftVisual?.inlineBadgeTop ?? 0,
@@ -3946,7 +3871,7 @@ export function PannableHeartChart({
                 { top: hasTopMarkers ? 36 : 6 },
               ]}>
               <ChartSelectionBubble
-                accentColor={accentColor}
+                accentColor={overlayAccentColor}
                 label={selectionPoint.label}
                 size="compact"
                 testID={chartTestID ? `${chartTestID}-selection-bubble` : undefined}
@@ -4039,14 +3964,6 @@ const styles = StyleSheet.create({
   },
   chartCanvas: {
     ...StyleSheet.absoluteFillObject,
-  },
-  chartCompatibilitySvg: {
-    height: 0,
-    left: 0,
-    opacity: 0,
-    position: 'absolute',
-    top: 0,
-    width: 0,
   },
   chartTestProbe: {
     height: 0,

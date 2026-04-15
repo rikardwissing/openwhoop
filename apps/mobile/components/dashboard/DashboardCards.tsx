@@ -66,7 +66,6 @@ interface HeartMetricChip {
 
 interface FocusedHeartCardContent {
   accentColor: string;
-  chartAccentColor: string;
   iconName: ReturnType<typeof getHeartIntradayMarkerPresentation>['iconName'];
   subtitle: string;
   title: string;
@@ -763,7 +762,6 @@ function buildFocusedHeartCardContent(
 
     return {
       accentColor: presentation.accentColor,
-      chartAccentColor: presentation.accentColor,
       iconName: presentation.iconName,
       subtitle: marker.timeLabel,
       title: marker.label,
@@ -794,7 +792,6 @@ function buildFocusedHeartCardContent(
 
   return {
     accentColor: presentation.accentColor,
-    chartAccentColor: presentation.accentColor,
     iconName: presentation.iconName,
     subtitle: marker.timeLabel,
     title: marker.label,
@@ -1034,9 +1031,9 @@ export function HeartCard({
     return null;
   }, [baseResolvedMarkers, displayedFocusedMarker, editingBaseMarker, isDraftEditing]);
   const cardAccentColor = displayedFocusedCardContent?.accentColor ?? colors.success;
-  const chartAccentColor = isDraftEditing
+  const chartOverlayAccentColor = isDraftEditing
     ? colors.primary
-    : displayedFocusedCardContent?.chartAccentColor ?? colors.primary;
+    : displayedFocusedCardContent?.accentColor ?? colors.primary;
   const isSleepFocused = displayedFocusedMarker?.kind === 'sleep';
   const isActivityFocused = displayedFocusedMarker?.kind === 'activity' || displayedFocusedMarker?.kind === 'nap';
   const cardAccentTransitionProgress = useSharedValue(1);
@@ -2375,8 +2372,7 @@ export function HeartCard({
       </Animated.View>
 
       <PannableHeartChart
-        accentColor={chartAccentColor}
-        accentTransitionDurationMs={cardAccentTransitionDurationMs}
+        overlayAccentColor={chartOverlayAccentColor}
         activityDraft={activityDraft}
         anchorDayKey={viewportKey}
         axisTestID={chartTestID ? `${chartTestID}-axis` : undefined}
