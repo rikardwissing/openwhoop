@@ -1581,6 +1581,8 @@ const HeartChartPlotCanvas = memo(function HeartChartPlotCanvas({
 export function PannableHeartChart({
   overlayAccentColor = colors.primary,
   activityDraft = null,
+  draftPreview = null,
+  hiddenMarkerId = null,
   anchorDayKey,
   axisTestID,
   canLoadMore = false,
@@ -1607,6 +1609,8 @@ export function PannableHeartChart({
 }: {
   overlayAccentColor?: string;
   activityDraft?: HeartActivityDraft | null;
+  draftPreview?: HeartActivityDraft | null;
+  hiddenMarkerId?: string | null;
   anchorDayKey?: string;
   axisTestID?: string;
   canLoadMore?: boolean;
@@ -1650,12 +1654,13 @@ export function PannableHeartChart({
   const releaseScrollLockRef = useRef<(() => void) | null>(null);
   const previousPointCountRef = useRef(points.length);
   const previousWindowBeforeFocusRef = useRef<{ windowPointCount: number; windowStart: number } | null>(null);
+  const incomingActivityDraft = activityDraft ?? draftPreview;
   const draftGestureOriginRef = useRef<HeartActivityDraft | null>(activityDraft ?? null);
   const latestActivityDraftRef = useRef<HeartActivityDraft | null>(activityDraft);
-  const previousActivityDraftRef = useRef<HeartActivityDraft | null>(activityDraft);
-  const renderedActivityDraftRef = useRef<HeartActivityDraft | null>(activityDraft);
+  const previousActivityDraftRef = useRef<HeartActivityDraft | null>(incomingActivityDraft);
+  const renderedActivityDraftRef = useRef<HeartActivityDraft | null>(incomingActivityDraft);
   const activityDraftDismissTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [renderedActivityDraft, setRenderedActivityDraft] = useState<HeartActivityDraft | null>(activityDraft);
+  const [renderedActivityDraft, setRenderedActivityDraft] = useState<HeartActivityDraft | null>(incomingActivityDraft);
   const previousRequestedFocusedMarkerRef = useRef<HeartIntradayMarker | null>(null);
   const lastReportedFocusedMarkerSignatureRef = useRef<string | null | undefined>(undefined);
   const previousPrecisionContextRef = useRef({
@@ -1696,7 +1701,7 @@ export function PannableHeartChart({
   const pinchActivationStartDistance = useSharedValue(0);
   const pinchActivationStartCenterX = useSharedValue(0);
   const pinchActivationStartCenterY = useSharedValue(0);
-  const activityDraftOpacity = useSharedValue(activityDraft ? 1 : 0);
+  const activityDraftOpacity = useSharedValue(incomingActivityDraft ? 1 : 0);
 
   const pointSpacing = getHeartViewportPointSpacing(viewportWidth, safeWindowPointCount);
   const basePointSpacing = getHeartViewportPointSpacing(viewportWidth, plotBaseWindowPointCount);
@@ -1704,7 +1709,7 @@ export function PannableHeartChart({
   const viewBoxWidth = getHeartViewBoxWidth(safeWindowPointCount);
   const effectiveWindowPointCount = pinchPreviewWindow?.windowPointCount ?? safeWindowPointCount;
   const effectiveWindowStart = pinchPreviewWindow?.windowStart ?? windowStart;
-  const visibleActivityDraft = activityDraft ?? renderedActivityDraft;
+  const visibleActivityDraft = incomingActivityDraft ?? renderedActivityDraft;
   const baseDomain = useMemo(() => buildTrendDomain(points, { mode: 'line' }), [points]);
   const [isYAxisDomainLocked, setIsYAxisDomainLocked] = useState(false);
   const focusTransitionProgress = useSharedValue(focusedMarkerId !== null ? 1 : 0);
@@ -1803,6 +1808,10 @@ export function PannableHeartChart({
         } satisfies HeartMarkerVisual;
       }),
     [anchorDayKey, chartTestID, fullSeriesSpan, markers, pointIntervalMinutes, points],
+  );
+  const visibleMarkerVisuals = useMemo(
+    () => (hiddenMarkerId ? markerVisuals.filter((marker) => marker.id !== hiddenMarkerId) : markerVisuals),
+    [hiddenMarkerId, markerVisuals],
   );
 
   const axisLabels = useMemo(
@@ -2052,7 +2061,7 @@ export function PannableHeartChart({
   const markerBandHeight = plotViewportHeight;
   const markerBandRadius = plotViewportHeight * (3 / HEART_CHART_VIEWBOX_HEIGHT);
   const isFocusedWindow = focusedMarkerId !== null || safeWindowPointCount !== baseWindowPointCount;
-  const hasTopMarkers = markerVisuals.length > 0 || activityDraftBadgeMarker !== null;
+  const hasTopMarkers = visibleMarkerVisuals.length > 0 || activityDraftBadgeMarker !== null;
   const isViewingLatestWindow = windowStart >= maxWindowStart && safeWindowPointCount === baseWindowPointCount;
 
   const ensureScrollLock = useCallback(() => {
@@ -2942,13 +2951,13 @@ export function PannableHeartChart({
     cancelAnimation(activityDraftOpacity);
 
     const previousActivityDraft = previousActivityDraftRef.current;
-    previousActivityDraftRef.current = activityDraft;
+    previousActivityDraftRef.current = incomingActivityDraft;
 
-    if (activityDraft) {
+    if (incomingActivityDraft) {
       const isAppearing = previousActivityDraft === null;
 
-      renderedActivityDraftRef.current = activityDraft;
-      setRenderedActivityDraft(activityDraft);
+      renderedActivityDraftRef.current = incomingActivityDraft;
+      setRenderedActivityDraft(incomingActivityDraft);
 
       if (isAppearing) {
         activityDraftOpacity.value = 0;
@@ -2975,7 +2984,7 @@ export function PannableHeartChart({
       activityDraftDismissTimeoutRef.current = null;
       setRenderedActivityDraft(null);
     }, ACTIVITY_DRAFT_FADE_DURATION_MS);
-  }, [activityDraft, activityDraftOpacity, clearActivityDraftDismissTimeout]);
+  }, [incomingActivityDraft, activityDraftOpacity, clearActivityDraftDismissTimeout]);
 
   useEffect(() => {
     if (skipLatestWindowChangeRef.current) {
@@ -3682,11 +3691,11 @@ export function PannableHeartChart({
                   top: HEART_PLOT_MARGIN_TOP,
                 },
               ]}>
-              {markerVisuals.length > 0 ? (
+              {visibleMarkerVisuals.length > 0 ? (
                 <View pointerEvents="none" style={styles.markerBandClipViewport}>
                   <View pointerEvents="none" style={styles.markerBandViewport}>
                     <Animated.View pointerEvents="none" style={[styles.markerBandLayer, animatedMarkerLayerStyle]}>
-                      {markerVisuals.map((marker) => (
+                      {visibleMarkerVisuals.map((marker) => (
                         <HeartMarkerBand
                           key={`marker-band-${marker.id}`}
                           chartPointSpacingValue={chartPointSpacingValue}
@@ -3842,10 +3851,10 @@ export function PannableHeartChart({
                       </View>
                     </Animated.View>
                   ) : null}
-                  <View pointerEvents={isFocusedWindow || activityDraft ? 'none' : 'box-none'} style={styles.markerViewport}>
-                    {markerVisuals.length > 0 ? (
+                  <View pointerEvents={isFocusedWindow || visibleActivityDraft ? 'none' : 'box-none'} style={styles.markerViewport}>
+                    {visibleMarkerVisuals.length > 0 ? (
                       <Animated.View pointerEvents="box-none" style={[styles.markerLayer, animatedMarkerLayerStyle]}>
-                        {markerVisuals.map((marker) => (
+                        {visibleMarkerVisuals.map((marker) => (
                           <HeartMarkerBadge
                             key={`marker-badge-${marker.id}`}
                             chartPointSpacingValue={chartPointSpacingValue}

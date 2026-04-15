@@ -2202,6 +2202,11 @@ export function HeartCard({
   );
 
   const requestedChartFocusMarker = chartFocusRequest?.marker ?? null;
+  const pendingDraftPreview = pendingNavigation?.screen.kind === 'draft' ? pendingNavigation.screen.draft : null;
+  const pendingDraftPreviewMarkerId = pendingNavigation?.screen.kind === 'draft'
+    ? pendingNavigation.screen.editingMarkerId
+    : null;
+  const chartHiddenMarkerId = hiddenEditingMarkerId ?? pendingDraftPreviewMarkerId;
   const chartResetKey = viewportKey ?? 'heart';
   const handleReturnFromFocus = useCallback(() => {
     logHeartCardDebug('action.return-from-focus', {
@@ -2374,6 +2379,8 @@ export function HeartCard({
       <PannableHeartChart
         overlayAccentColor={chartOverlayAccentColor}
         activityDraft={activityDraft}
+        draftPreview={pendingDraftPreview}
+        hiddenMarkerId={chartHiddenMarkerId}
         anchorDayKey={viewportKey}
         axisTestID={chartTestID ? `${chartTestID}-axis` : undefined}
         canLoadMore={canLoadMore}
