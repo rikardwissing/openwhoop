@@ -132,12 +132,18 @@ export function SleepScreen() {
   const hasOlderSession =
     resolvedSelectedSessionIndex >= 0 && resolvedSelectedSessionIndex < sessions.length - 1;
   const hasNewerSession = resolvedSelectedSessionIndex > 0;
-  const displayedSleepScore = selectedSession?.score ?? data.headlineScore;
-  const displayedSleepLabel = selectedSession
-    ? describeSleepScore(selectedSession.score)
-    : data.headlineLabel;
+  const displayedIsInProgress = selectedSession?.isInProgress ?? data.isInProgress;
+  const displayedSleepScore = selectedSession ? selectedSession.score : data.headlineScore;
+  const displayedSleepLabel = displayedIsInProgress
+    ? 'In progress'
+    : selectedSession
+      ? describeSleepScore(selectedSession.score)
+      : data.headlineLabel;
   const displayedBedtime = selectedSession?.bedtime ?? data.bedtime;
   const displayedWakeTime = selectedSession?.wakeTime ?? data.wakeTime;
+  const displayedSleepWindowLabel = displayedIsInProgress
+    ? `${displayedBedtime} - synced through ${displayedWakeTime}`
+    : `${displayedBedtime} to ${displayedWakeTime}`;
   const displayedDurationMinutes = selectedSession?.durationMinutes ?? data.durationMinutes;
   const displayedTimeInBedMinutes = selectedSession?.timeInBedMinutes ?? data.timeInBedMinutes;
   const displayedAwakeMinutes =
@@ -383,7 +389,7 @@ export function SleepScreen() {
         <MetricCard
           accentColor={colors.violet}
           style={styles.metricCard}
-          subtitle={`${displayedBedtime} to ${displayedWakeTime}`}
+          subtitle={displayedSleepWindowLabel}
           title="Time Asleep"
           value={formatCompactDuration(displayedDurationMinutes)}
         />
@@ -533,7 +539,7 @@ export function SleepScreen() {
         <ChartReadout
           accentColor={colors.violet}
           detail={`Latest night ${data.sessions[0]?.dateLabel ?? '--'}`}
-          label="Latest sleep score"
+          label={data.isInProgress ? 'In progress' : 'Latest sleep score'}
           style={styles.readout}
           value={formatMetricValue(data.headlineScore, 0)}
         />
@@ -553,7 +559,9 @@ export function SleepScreen() {
         <SectionHeader title="Duration Trend" trailing="Hours slept" />
         <ChartReadout
           accentColor={colors.aqua}
-          detail={`Bedtime ${displayedBedtime} · Wake ${displayedWakeTime}`}
+          detail={displayedIsInProgress
+            ? `Bedtime ${displayedBedtime} · Synced through ${displayedWakeTime}`
+            : `Bedtime ${displayedBedtime} · Wake ${displayedWakeTime}`}
           label={`${selectedSession?.dateLabel ?? 'Latest'} duration`}
           style={styles.readout}
           value={formatDuration(displayedDurationMinutes)}
@@ -599,7 +607,9 @@ export function SleepScreen() {
                   {selectedSession.dateLabel}
                 </Text>
                 <Text style={styles.sessionNavigatorMeta}>
-                  {selectedSession.bedtime} to {selectedSession.wakeTime}
+                  {selectedSession.isInProgress
+                    ? `${selectedSession.bedtime} - synced through ${selectedSession.wakeTime}`
+                    : `${selectedSession.bedtime} to ${selectedSession.wakeTime}`}
                 </Text>
               </View>
 
@@ -633,7 +643,7 @@ export function SleepScreen() {
 
             <SleepStageChart
               accentColor={colors.indigo}
-              endLabel={selectedSession.wakeTime}
+              endLabel={selectedSession.isInProgress ? `Synced ${selectedSession.wakeTime}` : selectedSession.wakeTime}
               highlightedStage={pinnedStage}
               middleLabel={selectedSessionMiddleLabel}
               onSelectionChange={setStageSelection}
@@ -682,7 +692,9 @@ export function SleepScreen() {
             <View>
               <Text style={styles.sessionDate}>{session.dateLabel}</Text>
               <Text style={styles.sessionTime}>
-                {session.bedtime} to {session.wakeTime}
+                {session.isInProgress
+                  ? `${session.bedtime} - synced through ${session.wakeTime}`
+                  : `${session.bedtime} to ${session.wakeTime}`}
               </Text>
             </View>
             <View style={styles.sessionMeta}>

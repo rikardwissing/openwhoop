@@ -2,6 +2,7 @@ export type HistoryRange = '24h' | '7d' | '14d' | '30d';
 export type AccentTone = 'green' | 'cyan' | 'alert' | 'heart' | 'violet';
 export type MetricTone = 'good' | 'caution' | 'alert' | 'neutral';
 export type SleepStage = 'awake' | 'rem' | 'deep' | 'light';
+export type SleepCompletionStatus = 'complete' | 'in_progress';
 export type ActivitySource = 'detected' | 'manual';
 export type ActivityReviewState = 'none' | 'confirmed' | 'relabelled' | 'dismissed';
 export type PartialDataReason = string;
@@ -95,6 +96,8 @@ export interface SleepCardData extends EstimatedValueMeta {
   startLabel: string;
   middleLabel: string;
   endLabel: string;
+  completionStatus: SleepCompletionStatus;
+  isInProgress: boolean;
 }
 
 export interface StrainCardData extends EstimatedValueMeta {
@@ -157,6 +160,8 @@ export interface SleepSession extends EstimatedValueMeta {
   score: number | null;
   bedtime: string;
   wakeTime: string;
+  completionStatus: SleepCompletionStatus;
+  isInProgress: boolean;
   durationMinutes: number;
   timeInBedMinutes: number;
   efficiency: number | null;
@@ -185,6 +190,8 @@ export interface SleepHistoryData extends EstimatedValueMeta {
   headlineLabel: string;
   bedtime: string;
   wakeTime: string;
+  completionStatus: SleepCompletionStatus;
+  isInProgress: boolean;
   durationMinutes: number | null;
   timeInBedMinutes: number | null;
   bedtimeConsistency: number | null;
@@ -238,6 +245,8 @@ export interface HeartIntradayMarkerDetails {
   confidence?: number | null;
   source?: ActivitySource;
   reviewState?: ActivityReviewState;
+  completionStatus?: SleepCompletionStatus;
+  isInProgress?: boolean;
   score?: number | null;
   asleepMinutes?: number | null;
   timeInBedMinutes?: number | null;

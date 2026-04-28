@@ -159,7 +159,8 @@ export async function initializeDatabase(db: SQLiteDatabase) {
       score REAL,
       synced INTEGER NOT NULL DEFAULT 0,
       source TEXT NOT NULL DEFAULT 'detected',
-      review_state TEXT NOT NULL DEFAULT 'none'
+      review_state TEXT NOT NULL DEFAULT 'none',
+      completion_status TEXT NOT NULL DEFAULT 'complete'
     );
 
     CREATE INDEX IF NOT EXISTS idx_sleep_cycles_start ON sleep_cycles(start);
@@ -438,6 +439,11 @@ export async function initializeDatabase(db: SQLiteDatabase) {
   if (!sleepCycleColumnNames.has('review_state')) {
     await db.execAsync("ALTER TABLE sleep_cycles ADD COLUMN review_state TEXT NOT NULL DEFAULT 'none';");
     sleepCycleColumnNames.add('review_state');
+  }
+
+  if (!sleepCycleColumnNames.has('completion_status')) {
+    await db.execAsync("ALTER TABLE sleep_cycles ADD COLUMN completion_status TEXT NOT NULL DEFAULT 'complete';");
+    sleepCycleColumnNames.add('completion_status');
   }
 
   await db.execAsync('CREATE INDEX IF NOT EXISTS idx_sleep_cycles_source_review ON sleep_cycles(source, review_state);');

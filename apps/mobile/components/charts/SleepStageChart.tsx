@@ -256,9 +256,9 @@ export function SleepStageChart({
               paddingHorizontal: chartMetrics.axisPaddingHorizontal,
             },
           ]}>
-          <Text style={styles.axisLabel}>{startLabel}</Text>
-          <Text style={styles.axisLabel}>{middleLabel}</Text>
-          <Text style={styles.axisLabel}>{endLabel}</Text>
+          <Text numberOfLines={1} style={[styles.axisLabel, styles.axisLabelStart]}>{startLabel}</Text>
+          <Text numberOfLines={1} style={[styles.axisLabel, styles.axisLabelMiddle]}>{middleLabel}</Text>
+          <Text numberOfLines={1} style={[styles.axisLabel, styles.axisLabelEnd]}>{endLabel}</Text>
         </View>
       </View>
     </View>
@@ -306,7 +306,17 @@ const styles = StyleSheet.create({
   },
   axisLabel: {
     color: colors.subtle,
+    flex: 1,
     fontFamily: typography.body,
     fontSize: 11,
+  },
+  axisLabelStart: {
+    textAlign: 'left',
+  },
+  axisLabelMiddle: {
+    textAlign: 'center',
+  },
+  axisLabelEnd: {
+    textAlign: 'right',
   },
 });

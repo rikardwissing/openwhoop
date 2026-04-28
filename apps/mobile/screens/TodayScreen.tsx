@@ -275,7 +275,7 @@ export function TodayScreen() {
         />
         <DashboardHeroMetricCard
           caption="Sleep"
-          label={data.sleepCard.score === null ? 'Waiting' : 'Last night'}
+          label={data.sleepCard.isInProgress ? 'In progress' : data.sleepCard.score === null ? 'Waiting' : 'Last night'}
           onPress={openSleep}
           score={data.sleepCard.score}
           testID="today-open-sleep-hero"
@@ -343,7 +343,7 @@ export function TodayScreen() {
         onOpen={openSleep}
         openTestID="today-open-sleep-button"
         cardData={data.sleepCard}
-        trailingLabel="Last night"
+        trailingLabel={data.sleepCard.isInProgress ? 'In progress' : 'Last night'}
       />
 
       <ActivityCard

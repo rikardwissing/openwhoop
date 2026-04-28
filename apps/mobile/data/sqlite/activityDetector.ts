@@ -55,6 +55,7 @@ export interface ActivityDetectorPeriod {
   durationMinutes: number;
   confidence: number;
   kind: ActivityDetectorKind;
+  endsAtDataEnd?: boolean;
 }
 
 export interface ActivityDetectionArtifacts {
@@ -118,6 +119,7 @@ interface BinaryPeriod {
   start: Date;
   end: Date;
   durationMinutes: number;
+  endsAtDataEnd: boolean;
 }
 
 interface StillnessRow {
@@ -257,6 +259,7 @@ function filterAndMergeBinaryPeriods(periods: BinaryPeriod[]): BinaryPeriod[] {
           start: previous.start,
           end: periods[index + 1].end,
           durationMinutes: minutesBetween(previous.start, periods[index + 1].end),
+          endsAtDataEnd: periods[index + 1].endsAtDataEnd,
         });
         index += 2;
         continue;
@@ -268,6 +271,7 @@ function filterAndMergeBinaryPeriods(periods: BinaryPeriod[]): BinaryPeriod[] {
           start: current.start,
           end: periods[index + 1].end,
           durationMinutes: minutesBetween(current.start, periods[index + 1].end),
+          endsAtDataEnd: periods[index + 1].endsAtDataEnd,
         };
         index += 1;
         continue;
@@ -280,6 +284,7 @@ function filterAndMergeBinaryPeriods(periods: BinaryPeriod[]): BinaryPeriod[] {
           start: previous.start,
           end: current.end,
           durationMinutes: minutesBetween(previous.start, current.end),
+          endsAtDataEnd: current.endsAtDataEnd,
         });
       }
     } else {
@@ -359,6 +364,7 @@ function detectStillnessPeriods(history: readonly ActivityDetectorInputRow[]) {
         start: stillnessRows[runStart].date,
         end: stillnessRows[index - 1].date,
         durationMinutes: minutesBetween(stillnessRows[runStart].date, stillnessRows[index - 1].date),
+        endsAtDataEnd: endOfData,
       });
 
       if (!endOfData) {
@@ -787,6 +793,7 @@ export function detectActivityArtifacts(
       durationMinutes: period.durationMinutes,
       confidence: 1,
       kind: 'sleep' as const,
+      endsAtDataEnd: period.endsAtDataEnd,
     }));
   const { epochs } = buildActivityEpochs(rows, sleepCandidates);
 

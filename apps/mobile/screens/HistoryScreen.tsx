@@ -206,7 +206,7 @@ export function HistoryScreen() {
           />
           <DashboardHeroMetricCard
             caption="Sleep"
-            label={data.sleepCard.score === null ? 'Waiting' : 'Recorded'}
+            label={data.sleepCard.isInProgress ? 'In progress' : data.sleepCard.score === null ? 'Waiting' : 'Recorded'}
             onPress={openSleep}
             score={data.sleepCard.score}
             testID="history-open-sleep-hero"
@@ -242,7 +242,7 @@ export function HistoryScreen() {
           onOpen={openSleep}
           openTestID="history-open-sleep-button"
           cardData={data.sleepCard}
-          trailingLabel={data.day.shortLabel}
+          trailingLabel={data.sleepCard.isInProgress ? 'In progress' : data.day.shortLabel}
         />
 
         <ActivityCard

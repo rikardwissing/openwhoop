@@ -773,11 +773,16 @@ function buildFocusedHeartCardContent(
       subtitle: marker.timeLabel,
       title: marker.label,
       metrics: [
-        {
-          label: 'Score',
-          value: formatMetricValue(sleepDetails?.score ?? null, 0),
-          unit: '%',
-        },
+        sleepDetails?.isInProgress
+          ? {
+              label: 'Status',
+              value: 'Active',
+            }
+          : {
+              label: 'Score',
+              value: formatMetricValue(sleepDetails?.score ?? null, 0),
+              unit: '%',
+            },
         {
           label: 'Asleep',
           value: formatCompactDuration(asleepMinutes),
@@ -2837,14 +2842,16 @@ export function SleepCard({
           <Text style={styles.metricLabel}>In bed</Text>
           <Text style={styles.sleepMetaValue}>{formatCompactDuration(cardData.timeInBedMinutes)}</Text>
           <Text style={styles.sleepMetaCaption}>
-            {cardData.startLabel} to {cardData.endLabel}
+            {cardData.isInProgress
+              ? `${cardData.startLabel} - synced through ${cardData.endLabel}`
+              : `${cardData.startLabel} to ${cardData.endLabel}`}
           </Text>
         </View>
       </View>
 
       <SleepStageChart
         accentColor={colors.violet}
-        endLabel={cardData.endLabel}
+        endLabel={cardData.isInProgress ? `Synced ${cardData.endLabel}` : cardData.endLabel}
         highlightedStage={pinnedStage}
         middleLabel={cardData.middleLabel}
         onSelectionChange={handleSleepStageSelectionChange}
