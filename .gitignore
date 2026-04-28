@@ -3,3 +3,6 @@
 db.sqlite
 db.sqlite-journal
 /firmware
+apps/.DS_Store
+.DS_Store
+apps/.DS_Store

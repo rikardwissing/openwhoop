@@ -52,7 +52,8 @@
       ],
       "expo-sharing",
       "./plugins/with-local-notifications-only",
-      "./plugins/with-force-close-reminder"
+      "./plugins/with-force-close-reminder",
+      "expo-background-task"
     ],
     "experiments": {
       "typedRoutes": true

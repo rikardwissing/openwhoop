@@ -849,8 +849,6 @@ export class MockHealthRepository implements HealthRepository {
     entry.reviewState = entry.source === 'manual' ? 'confirmed' : 'relabelled';
   }
 
-  invalidateCaches(): void {}
-
   private async wait() {
     await delay(this.options.delayMs ?? 180);
   }

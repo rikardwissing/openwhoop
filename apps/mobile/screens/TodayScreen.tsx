@@ -15,7 +15,6 @@ import { ScreenShell } from '@/components/layout/ScreenShell';
 import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
 import { colors, typography } from '@/constants/theme';
 import { useDerivedRefreshState, useTodayOverview } from '@/hooks/useHealthData';
-import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
 import { useHealthDataVersion, useHealthRepository, useRefreshHealthData } from '@/providers/HealthDataProvider';
 import { useWearableSyncState } from '@/providers/WearableSyncProvider';
 import type { ManualActivityKind } from '@/data/HealthRepository';
@@ -43,7 +42,6 @@ export function TodayScreen() {
   const refreshHealthData = useRefreshHealthData();
   const heartVersion = useHealthDataVersion('heart');
   const { deviceState } = useWearableSyncState();
-  const { onRefresh, refreshing } = useWearableRefreshControl();
   const data = state.data;
   const [selectedHeartZoom, setSelectedHeartZoom] = useState<HeartTimelineZoomLevel>(DEFAULT_HEART_TIMELINE_ZOOM);
   const [heartTimelineWindow, setHeartTimelineWindow] = useState<HeartTimelineWindow | null>(null);
@@ -221,7 +219,7 @@ export function TodayScreen() {
 
   if (!data && state.status === 'loading') {
     return (
-      <ScreenShell headerIcon="today" headerTitle="Today" onRefresh={onRefresh} refreshing={refreshing}>
+      <ScreenShell headerIcon="today" headerTitle="Today">
         <LoadingState label="Loading today's overview..." variant="inline" />
       </ScreenShell>
     );
@@ -229,7 +227,7 @@ export function TodayScreen() {
 
   if (!data && state.status === 'error') {
     return (
-      <ScreenShell headerIcon="today" headerTitle="Today" onRefresh={onRefresh} refreshing={refreshing}>
+      <ScreenShell headerIcon="today" headerTitle="Today">
         <ErrorState message="Unable to load today right now." variant="inline" />
       </ScreenShell>
     );
@@ -253,9 +251,7 @@ export function TodayScreen() {
   return (
     <ScreenShell
       headerIcon="today"
-      headerTitle="Today"
-      onRefresh={onRefresh}
-      refreshing={refreshing}>
+      headerTitle="Today">
       {state.status === 'error' ? (
         <ErrorState message="Showing the last Today overview while refresh catches up." variant="inline" />
       ) : null}

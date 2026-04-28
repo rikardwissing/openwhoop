@@ -11,7 +11,6 @@ import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
 import { colors, typography } from '@/constants/theme';
 import { useDerivedRefreshState, useWellnessData } from '@/hooks/useHealthData';
 import { useHealthRepository, useRefreshHealthData } from '@/providers/HealthDataProvider';
-import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
 import type { ActivitySummary, MetricSeries } from '@/types/health';
 import { formatClock, formatSqliteDateTime } from '@/utils/dateTime';
 import { formatMetricNumber, formatMetricValue, formatNullablePercent, formatSignedValue } from '@/utils/formatters';
@@ -207,7 +206,6 @@ export function WellnessScreen() {
   const refreshHealthData = useRefreshHealthData();
   const state = useWellnessData('14d');
   const derivedRefresh = useDerivedRefreshState();
-  const { onRefresh, refreshing } = useWearableRefreshControl();
   const [pendingActionKey, setPendingActionKey] = useState<string | null>(null);
   const [activityError, setActivityError] = useState<string | null>(null);
   const [manualVisible, setManualVisible] = useState(false);
@@ -348,7 +346,7 @@ export function WellnessScreen() {
 
   if (!data && state.status === 'loading') {
     return (
-      <ScreenShell headerIcon="wellness" headerTitle="Wellness" onRefresh={onRefresh} refreshing={refreshing}>
+      <ScreenShell headerIcon="wellness" headerTitle="Wellness">
         <LoadingState label="Loading wellness metrics..." variant="inline" />
       </ScreenShell>
     );
@@ -356,7 +354,7 @@ export function WellnessScreen() {
 
   if (!data && state.status === 'error') {
     return (
-      <ScreenShell headerIcon="wellness" headerTitle="Wellness" onRefresh={onRefresh} refreshing={refreshing}>
+      <ScreenShell headerIcon="wellness" headerTitle="Wellness">
         <ErrorState message="Unable to load the wellness board right now." variant="inline" />
       </ScreenShell>
     );
@@ -374,7 +372,7 @@ export function WellnessScreen() {
       : null;
 
   return (
-    <ScreenShell headerIcon="wellness" headerTitle="Wellness" onRefresh={onRefresh} refreshing={refreshing}>
+    <ScreenShell headerIcon="wellness" headerTitle="Wellness">
       {state.status === 'error' ? (
         <ErrorState message="Showing the last wellness snapshot while refresh catches up." variant="inline" />
       ) : null}

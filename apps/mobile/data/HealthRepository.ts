@@ -13,8 +13,8 @@ import type {
   WellnessData,
 } from '@/types/health';
 
-export type HealthCacheScope = 'all' | 'sleep' | 'heart' | 'dashboard' | 'wellness' | 'trends' | 'derived';
-export type HealthRefreshScope = Exclude<HealthCacheScope, 'all'> | 'all';
+export type HealthDataScope = 'all' | 'sleep' | 'heart' | 'dashboard' | 'wellness' | 'trends' | 'derived';
+export type HealthRefreshScope = Exclude<HealthDataScope, 'all'> | 'all';
 export type ManualActivityKind = 'Activity' | 'Walk' | 'Workout' | 'Nap';
 
 export interface ActivityRescanResult {
@@ -41,7 +41,6 @@ export interface HealthRepository {
   confirmActivity(activityId: string): Promise<void>;
   dismissActivity(activityId: string): Promise<void>;
   relabelActivity(activityId: string, activity: ManualActivityKind): Promise<void>;
-  invalidateCaches(scope?: HealthCacheScope | readonly HealthCacheScope[]): void;
   setTargetWakeMinutes(minutes: number): Promise<void>;
   enableAlarm(targetWakeMinutes: number): Promise<void>;
   disableAlarm(targetWakeMinutes: number): Promise<void>;

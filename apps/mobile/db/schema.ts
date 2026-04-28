@@ -1,7 +1,7 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 
 export const APP_DATABASE_NAME = 'btwearable.db';
-export const DERIVED_DATA_SCHEMA_VERSION = 7;
+export const DERIVED_DATA_SCHEMA_VERSION = 8;
 
 const HEART_RATE_TABLE_COLUMNS_SQL = `
   id INTEGER PRIMARY KEY NOT NULL,
@@ -284,6 +284,41 @@ export async function initializeDatabase(db: SQLiteDatabase) {
       PRIMARY KEY (bucket_seconds, bucket_start)
     );
 
+    CREATE TABLE IF NOT EXISTS sleep_feature_buckets (
+      bucket_seconds INTEGER NOT NULL,
+      bucket_start TEXT NOT NULL,
+      sample_count INTEGER NOT NULL,
+      min_bpm INTEGER,
+      avg_bpm REAL,
+      max_bpm INTEGER,
+      rr_intervals TEXT NOT NULL DEFAULT '',
+      ppg_green_median REAL,
+      ppg_green_max REAL,
+      awake_ppg_count INTEGER NOT NULL DEFAULT 0,
+      saturated_ppg_count INTEGER NOT NULL DEFAULT 0,
+      motion_score REAL,
+      gravity_x REAL,
+      gravity_y REAL,
+      gravity_z REAL,
+      skin_contact_count INTEGER NOT NULL DEFAULT 0,
+      skin_contact_present_count INTEGER NOT NULL DEFAULT 0,
+      signal_quality_count INTEGER NOT NULL DEFAULT 0,
+      signal_quality_present_count INTEGER NOT NULL DEFAULT 0,
+      avg_skin_temp REAL,
+      avg_spo2 REAL,
+      PRIMARY KEY (bucket_seconds, bucket_start)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_sleep_feature_buckets_lookup
+      ON sleep_feature_buckets(bucket_seconds, bucket_start);
+
+    CREATE TABLE IF NOT EXISTS sleep_feature_bucket_state (
+      bucket_seconds INTEGER PRIMARY KEY NOT NULL,
+      source_row_count INTEGER NOT NULL,
+      source_last_sample_time TEXT,
+      refreshed_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS wellness_day_stats (
       day TEXT PRIMARY KEY NOT NULL,
       stress_count INTEGER NOT NULL,
@@ -485,6 +520,41 @@ export async function initializeDatabase(db: SQLiteDatabase) {
   }
 
   await db.execAsync(`
+    CREATE TABLE IF NOT EXISTS sleep_feature_buckets (
+      bucket_seconds INTEGER NOT NULL,
+      bucket_start TEXT NOT NULL,
+      sample_count INTEGER NOT NULL,
+      min_bpm INTEGER,
+      avg_bpm REAL,
+      max_bpm INTEGER,
+      rr_intervals TEXT NOT NULL DEFAULT '',
+      ppg_green_median REAL,
+      ppg_green_max REAL,
+      awake_ppg_count INTEGER NOT NULL DEFAULT 0,
+      saturated_ppg_count INTEGER NOT NULL DEFAULT 0,
+      motion_score REAL,
+      gravity_x REAL,
+      gravity_y REAL,
+      gravity_z REAL,
+      skin_contact_count INTEGER NOT NULL DEFAULT 0,
+      skin_contact_present_count INTEGER NOT NULL DEFAULT 0,
+      signal_quality_count INTEGER NOT NULL DEFAULT 0,
+      signal_quality_present_count INTEGER NOT NULL DEFAULT 0,
+      avg_skin_temp REAL,
+      avg_spo2 REAL,
+      PRIMARY KEY (bucket_seconds, bucket_start)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_sleep_feature_buckets_lookup
+      ON sleep_feature_buckets(bucket_seconds, bucket_start);
+
+    CREATE TABLE IF NOT EXISTS sleep_feature_bucket_state (
+      bucket_seconds INTEGER PRIMARY KEY NOT NULL,
+      source_row_count INTEGER NOT NULL,
+      source_last_sample_time TEXT,
+      refreshed_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS wellness_day_stats (
       day TEXT PRIMARY KEY NOT NULL,
       stress_count INTEGER NOT NULL,

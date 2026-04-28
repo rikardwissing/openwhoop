@@ -14,7 +14,6 @@ import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
 import { SleepStageBreakdownChip } from '@/components/ui/SleepStageBreakdownChip';
 import { colors, sleepStageColors, typography } from '@/constants/theme';
 import { useDerivedRefreshState, useSleepHistory } from '@/hooks/useHealthData';
-import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
 import { useHealthRepository } from '@/providers/HealthDataProvider';
 import { useWearableSyncActions, useWearableSyncState } from '@/providers/WearableSyncProvider';
 import { syncSleepPreparationReminder } from '@/services/notifications/sleepPreparationReminder';
@@ -41,7 +40,6 @@ export function SleepScreen() {
   const repository = useHealthRepository();
   const { deviceState } = useWearableSyncState();
   const { setAlarm, disableAlarm } = useWearableSyncActions();
-  const { onRefresh, refreshing } = useWearableRefreshControl();
   const state = useSleepHistory('14d');
   const derivedRefresh = useDerivedRefreshState();
   const [stageSelection, setStageSelection] = useState<SleepStageSelection | null>(null);
@@ -108,7 +106,7 @@ export function SleepScreen() {
 
   if (!data && state.status === 'loading') {
     return (
-      <ScreenShell headerIcon="sleep" headerTitle="Sleep" onRefresh={onRefresh} refreshing={refreshing}>
+      <ScreenShell headerIcon="sleep" headerTitle="Sleep">
         <LoadingState label="Loading sleep score and stage history..." variant="inline" />
       </ScreenShell>
     );
@@ -116,7 +114,7 @@ export function SleepScreen() {
 
   if (!data && state.status === 'error') {
     return (
-      <ScreenShell headerIcon="sleep" headerTitle="Sleep" onRefresh={onRefresh} refreshing={refreshing}>
+      <ScreenShell headerIcon="sleep" headerTitle="Sleep">
         <ErrorState message="Unable to load sleep history right now." variant="inline" />
       </ScreenShell>
     );
@@ -359,7 +357,7 @@ export function SleepScreen() {
   };
 
   return (
-    <ScreenShell headerIcon="sleep" headerTitle="Sleep" onRefresh={onRefresh} refreshing={refreshing}>
+    <ScreenShell headerIcon="sleep" headerTitle="Sleep">
       {state.status === 'error' ? (
         <ErrorState message="Showing the last sleep snapshot while refresh catches up." variant="inline" />
       ) : null}

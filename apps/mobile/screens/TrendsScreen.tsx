@@ -8,7 +8,6 @@ import { ScreenShell } from '@/components/layout/ScreenShell';
 import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
 import { colors, typography } from '@/constants/theme';
 import { useTrendData } from '@/hooks/useHealthData';
-import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
 import type { HistoryRange, TrendMetric } from '@/types/health';
 
 const trendRanges: Array<{ label: string; value: HistoryRange }> = [
@@ -35,7 +34,6 @@ export function TrendsScreen() {
   const router = useRouter();
   const [range, setRange] = useState<HistoryRange>('14d');
   const state = useTrendData(range);
-  const { onRefresh, refreshing } = useWearableRefreshControl();
   const data = state.data;
 
   if (!data && state.status === 'loading') {
@@ -45,9 +43,7 @@ export function TrendsScreen() {
           <RangeSegmentedControl onChange={setRange} options={trendRanges} selectedValue={range} />
         }
         headerIcon="trends"
-        headerTitle="Trends"
-        onRefresh={onRefresh}
-        refreshing={refreshing}>
+        headerTitle="Trends">
         <LoadingState label="Loading your latest trends..." variant="inline" />
       </ScreenShell>
     );
@@ -60,9 +56,7 @@ export function TrendsScreen() {
           <RangeSegmentedControl onChange={setRange} options={trendRanges} selectedValue={range} />
         }
         headerIcon="trends"
-        headerTitle="Trends"
-        onRefresh={onRefresh}
-        refreshing={refreshing}>
+        headerTitle="Trends">
         <ErrorState message="Unable to load trend history right now." variant="inline" />
       </ScreenShell>
     );
@@ -76,9 +70,7 @@ export function TrendsScreen() {
     <ScreenShell
       headerAccessory={<RangeSegmentedControl onChange={setRange} options={trendRanges} selectedValue={range} />}
       headerIcon="trends"
-      headerTitle="Trends"
-      onRefresh={onRefresh}
-      refreshing={refreshing}>
+      headerTitle="Trends">
       {state.status === 'error' ? (
         <ErrorState message="Showing the last trend snapshot while refresh catches up." variant="inline" />
       ) : null}

@@ -71,10 +71,9 @@ function HealthRepositoryProvider({
   const refresh = useCallback(
     (scope: HealthRefreshScope | readonly HealthRefreshScope[] = 'all') => {
       const scopes = normalizeScopes(scope);
-      repository.invalidateCaches(scopes);
       setVersions((current) => bumpVersions(current, scopes));
     },
-    [repository],
+    [],
   );
 
   return (

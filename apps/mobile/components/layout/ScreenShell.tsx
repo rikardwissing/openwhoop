@@ -1,6 +1,6 @@
 import { LinearGradient } from 'expo-linear-gradient';
 import { useCallback, useContext, useMemo, useState, type ReactNode } from 'react';
-import { RefreshControl, ScrollView, StyleSheet, View, type StyleProp, type ViewStyle } from 'react-native';
+import { ScrollView, StyleSheet, View, type StyleProp, type ViewStyle } from 'react-native';
 import { SafeAreaInsetsContext, SafeAreaView } from 'react-native-safe-area-context';
 
 import { AppHeader, type AppHeaderIcon } from '@/components/layout/AppHeader';
@@ -15,8 +15,6 @@ export function ScreenShell({
   headerSettingsActive = false,
   headerSettingsDisabled = false,
   headerTitle,
-  onRefresh,
-  refreshing = false,
 }: {
   children: ReactNode;
   contentStyle?: StyleProp<ViewStyle>;
@@ -25,13 +23,10 @@ export function ScreenShell({
   headerSettingsActive?: boolean;
   headerSettingsDisabled?: boolean;
   headerTitle?: string;
-  onRefresh?: () => void;
-  refreshing?: boolean;
 }) {
   const insets = useContext(SafeAreaInsetsContext);
   const topInset = insets?.top ?? 0;
   const bottomInset = insets?.bottom ?? 0;
-  const refreshEnabled = typeof onRefresh === 'function';
   const [activeScrollLocks, setActiveScrollLocks] = useState(0);
   const headerConfig = headerTitle && headerIcon ? { icon: headerIcon, title: headerTitle } : null;
   const hasHeader = headerConfig !== null;
@@ -74,19 +69,7 @@ export function ScreenShell({
       <ScreenScrollContext.Provider value={screenScrollContextValue}>
         <SafeAreaView edges={['left', 'right']} style={styles.safeArea}>
           <ScrollView
-            alwaysBounceVertical={refreshEnabled && activeScrollLocks === 0}
-            bounces={refreshEnabled && activeScrollLocks === 0}
             contentContainerStyle={[styles.content, { paddingTop: contentTopPadding, paddingBottom: contentBottomPadding }, contentStyle]}
-            refreshControl={
-              refreshEnabled ? (
-                <RefreshControl
-                  onRefresh={onRefresh}
-                  progressBackgroundColor="rgba(18, 28, 42, 0.92)"
-                  refreshing={refreshing}
-                  tintColor={colors.primary}
-                />
-              ) : undefined
-            }
             removeClippedSubviews
             scrollEnabled={activeScrollLocks === 0}
             showsVerticalScrollIndicator={false}>

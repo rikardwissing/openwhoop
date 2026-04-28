@@ -11,50 +11,21 @@ import type {
   WellnessData,
 } from '@/types/health';
 import { useHealthDataVersion, useHealthRepository } from '@/providers/HealthDataProvider';
-import type { HealthRepository } from '@/data/HealthRepository';
 
 type AsyncState<T> =
   | { status: 'loading'; data: T | null; error: null }
   | { status: 'ready'; data: T; error: null }
   | { status: 'error'; data: T | null; error: Error };
 
-const repositoryCache = new WeakMap<HealthRepository, Map<string, unknown>>();
-
-function readCachedValue<T>(repository: HealthRepository, cacheKey: string) {
-  return (repositoryCache.get(repository)?.get(cacheKey) as T | undefined) ?? null;
-}
-
-function writeCachedValue<T>(repository: HealthRepository, cacheKey: string, value: T) {
-  const existing = repositoryCache.get(repository);
-
-  if (existing) {
-    existing.set(cacheKey, value);
-    return;
-  }
-
-  repositoryCache.set(repository, new Map([[cacheKey, value]]));
-}
-
 function useAsyncValue<T>(
-  repository: HealthRepository,
-  cacheKey: string,
   factory: () => Promise<T>,
   deps: Array<unknown>,
 ) {
-  const [state, setState] = useState<AsyncState<T>>(() => {
-    const cached = readCachedValue<T>(repository, cacheKey);
-    return cached === null
-      ? { status: 'loading', data: null, error: null }
-      : { status: 'ready', data: cached, error: null };
-  });
+  const [state, setState] = useState<AsyncState<T>>({ status: 'loading', data: null, error: null });
 
   useEffect(() => {
     let cancelled = false;
-    setState((current) => ({
-      status: 'loading',
-      data: current.data ?? readCachedValue<T>(repository, cacheKey),
-      error: null,
-    }));
+    setState({ status: 'loading', data: null, error: null });
 
     factory()
       .then((data) => {
@@ -62,7 +33,6 @@ function useAsyncValue<T>(
           return;
         }
 
-        writeCachedValue(repository, cacheKey, data);
         startTransition(() => {
           setState({ status: 'ready', data, error: null });
         });
@@ -87,8 +57,6 @@ export function useHistoryOverview(dayKey: string) {
   const repository = useHealthRepository();
   const version = useHealthDataVersion('dashboard');
   return useAsyncValue<HistoryOverview>(
-    repository,
-    `history:overview:${dayKey}`,
     () => repository.getHistoryOverview(dayKey),
     [repository, dayKey, version],
   );
@@ -98,8 +66,6 @@ export function useTodayOverview() {
   const repository = useHealthRepository();
   const version = useHealthDataVersion('dashboard');
   return useAsyncValue<TodayOverview>(
-    repository,
-    'today:overview',
     () => repository.getTodayOverview(),
     [repository, version],
   );
@@ -109,8 +75,6 @@ export function useSleepHistory(range: HistoryRange) {
   const repository = useHealthRepository();
   const version = useHealthDataVersion('sleep');
   return useAsyncValue<SleepHistoryData>(
-    repository,
-    `sleep:${range}`,
     () => repository.getSleepHistory(range),
     [repository, range, version],
   );
@@ -120,8 +84,6 @@ export function useHeartHistory(range: HistoryRange) {
   const repository = useHealthRepository();
   const version = useHealthDataVersion('heart');
   return useAsyncValue<HeartHistoryData>(
-    repository,
-    `heart:${range}`,
     () => repository.getHeartHistory(range),
     [repository, range, version],
   );
@@ -131,8 +93,6 @@ export function useWellnessData(range: HistoryRange) {
   const repository = useHealthRepository();
   const version = useHealthDataVersion('wellness');
   return useAsyncValue<WellnessData>(
-    repository,
-    `wellness:${range}`,
     () => repository.getWellnessData(range),
     [repository, range, version],
   );
@@ -142,8 +102,6 @@ export function useDerivedRefreshState() {
   const repository = useHealthRepository();
   const version = useHealthDataVersion('derived');
   return useAsyncValue<DerivedRefreshState>(
-    repository,
-    'derived:state',
     () => repository.getDerivedRefreshState(),
     [repository, version],
   );
@@ -153,8 +111,6 @@ export function useTrendData(range: HistoryRange) {
   const repository = useHealthRepository();
   const version = useHealthDataVersion('trends');
   return useAsyncValue<TrendData>(
-    repository,
-    `trends:${range}`,
     () => repository.getTrendData(range),
     [repository, range, version],
   );

@@ -1,6 +1,6 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 
-import type { HealthCacheScope, HealthRepository } from '@/data/HealthRepository';
+import type { HealthRepository } from '@/data/HealthRepository';
 import { rebuildAggregateTablesForDebug, refreshDerivedData } from '@/data/sqlite/SQLiteHealthRepository';
 import type {
   DerivedRefreshState,
@@ -370,10 +370,8 @@ async function primeWarmRead<T>(read: () => Promise<T>) {
   await read();
 }
 
-async function runWarmAndColdReadPair<T>(params: {
+async function runRepeatedReadPair<T>(params: {
   steps: PerformanceDiagnosticStep[];
-  repository: HealthRepository;
-  scope: HealthCacheScope;
   warmKey: string;
   warmLabel: string;
   coldKey: string;
@@ -383,7 +381,6 @@ async function runWarmAndColdReadPair<T>(params: {
 }) {
   await primeWarmRead(params.read);
   await measureReadStep(params.steps, params.warmKey, params.warmLabel, params.read, params.summarize);
-  params.repository.invalidateCaches(params.scope);
   await measureReadStep(params.steps, params.coldKey, params.coldLabel, params.read, params.summarize);
 }
 
@@ -410,19 +407,16 @@ export async function runFullPerformanceSweep({
         }
 
         await refreshDerivedData(db);
-        repository.invalidateCaches(['dashboard', 'sleep', 'heart', 'wellness', 'trends', 'derived']);
         return true;
       },
     );
 
-    await runWarmAndColdReadPair({
+    await runRepeatedReadPair({
       steps,
-      repository,
-      scope: 'dashboard',
       warmKey: 'today.read.warm',
-      warmLabel: 'Today overview warm read',
+      warmLabel: 'Today overview first repeat read',
       coldKey: 'today.read.cold',
-      coldLabel: 'Today overview cache-cold read',
+      coldLabel: 'Today overview second repeat read',
       read: async () => {
         const overview = await repository.getTodayOverview();
         latestDayKey = overview.day.dayKey;
@@ -433,50 +427,42 @@ export async function runFullPerformanceSweep({
 
     const historyDayKey = latestDayKey ?? (await repository.getTodayOverview()).day.dayKey;
 
-    await runWarmAndColdReadPair({
+    await runRepeatedReadPair({
       steps,
-      repository,
-      scope: 'dashboard',
       warmKey: 'history.read.warm',
-      warmLabel: 'History overview warm read',
+      warmLabel: 'History overview first repeat read',
       coldKey: 'history.read.cold',
-      coldLabel: 'History overview cache-cold read',
+      coldLabel: 'History overview second repeat read',
       read: () => repository.getHistoryOverview(historyDayKey),
       summarize: summarizeHistoryOverview,
     });
 
-    await runWarmAndColdReadPair({
+    await runRepeatedReadPair({
       steps,
-      repository,
-      scope: 'sleep',
       warmKey: 'sleep.read.warm',
-      warmLabel: 'Sleep warm read',
+      warmLabel: 'Sleep first repeat read',
       coldKey: 'sleep.read.cold',
-      coldLabel: 'Sleep cache-cold read',
+      coldLabel: 'Sleep second repeat read',
       read: () => repository.getSleepHistory(historyRange),
       summarize: summarizeSleepHistory,
     });
 
-    await runWarmAndColdReadPair({
+    await runRepeatedReadPair({
       steps,
-      repository,
-      scope: 'heart',
       warmKey: 'heart.read.warm',
-      warmLabel: 'Heart warm read',
+      warmLabel: 'Heart first repeat read',
       coldKey: 'heart.read.cold',
-      coldLabel: 'Heart cache-cold read',
+      coldLabel: 'Heart second repeat read',
       read: () => repository.getHeartHistory(historyRange),
       summarize: summarizeHeartHistory,
     });
 
-    await runWarmAndColdReadPair({
+    await runRepeatedReadPair({
       steps,
-      repository,
-      scope: 'wellness',
       warmKey: 'wellness.read.warm',
-      warmLabel: 'Wellness warm read',
+      warmLabel: 'Wellness first repeat read',
       coldKey: 'wellness.read.cold',
-      coldLabel: 'Wellness cache-cold read',
+      coldLabel: 'Wellness second repeat read',
       read: () => repository.getWellnessData(historyRange),
       summarize: summarizeWellnessData,
     });
@@ -488,7 +474,6 @@ export async function runFullPerformanceSweep({
       () => rebuildAggregateTablesForDebug(db),
     );
 
-    repository.invalidateCaches(['dashboard', 'heart', 'wellness', 'trends']);
     await measureReadStep(
       steps,
       'today.read.after_aggregate',

@@ -16,7 +16,6 @@ import { brandMark } from '@/constants/assets';
 import { brand } from '@/constants/brand';
 import { colors, typography } from '@/constants/theme';
 import { inspectDatabaseMaintenance, runDatabaseMaintenance } from '@/db/maintenance';
-import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
 import { useOptionalAppDatabase, useOptionalAppDatabaseControls } from '@/providers/AppDatabaseProvider';
 import { useHealthRepository, useRefreshHealthData } from '@/providers/HealthDataProvider';
 import {
@@ -26,6 +25,7 @@ import {
   useWearableSyncState,
 } from '@/providers/WearableSyncProvider';
 import { exportAndShareDatabaseSnapshot } from '@/services/databaseExport';
+import { runSimpleLogBackgroundTaskAsync } from '@/services/background/simpleLogBackgroundTask';
 import {
   describeBatteryStatus,
   describeChargingState,
@@ -267,7 +267,6 @@ export function SettingsScreen() {
   const { liveEvents } = useWearableLiveEvents();
   const { progress } = useWearableSyncProgress();
   const { forgetDevice, syncSelected, restartDevice } = useWearableSyncActions();
-  const { onRefresh, refreshing } = useWearableRefreshControl();
   const [exportState, setExportState] = useState<{
     status: 'idle' | 'running' | 'success' | 'error';
     message: string;
@@ -280,7 +279,7 @@ export function SettingsScreen() {
     message: string;
   }>({
     status: 'idle',
-    message: 'Run one local sweep that records warm and cache-cold screen reads, aggregate rebuilds, and snapshot rebuilds.',
+    message: 'Run one local sweep that records repeated screen reads, aggregate rebuilds, and snapshot rebuilds.',
   });
   const [performanceRuns, setPerformanceRuns] = useState<PerformanceDiagnosticRun[]>([]);
   const [performanceHistoryState, setPerformanceHistoryState] = useState<{
@@ -311,9 +310,17 @@ export function SettingsScreen() {
     status: 'idle',
     message: 'Delete pending detected activities and rerun local activity detection across the history already on this phone.',
   });
+  const [backgroundTaskState, setBackgroundTaskState] = useState<{
+    status: 'idle' | 'running' | 'success' | 'error';
+    message: string;
+  }>({
+    status: 'idle',
+    message: 'Run the Expo background task worker and print a timestamped log entry.',
+  });
   const deviceBusy = isBlockingSyncStatus(progress.status);
   const maintenanceBusy = maintenanceState.status === 'running';
   const activityRescanBusy = activityRescanState.status === 'running';
+  const backgroundTaskBusy = backgroundTaskState.status === 'running';
   const batteryChipAccent = batteryAccent(deviceState.batteryPercent);
   const chargingChipAccent = chargingAccent(deviceState.chargingStatus);
   const wearChipAccent = wearAccent(deviceState.bodyStatus);
@@ -558,6 +565,32 @@ export function SettingsScreen() {
     }
   }
 
+  async function handleRunBackgroundLogTask() {
+    setBackgroundTaskState({
+      status: 'running',
+      message: 'Registering the Expo background task...',
+    });
+
+    try {
+      const result = await runSimpleLogBackgroundTaskAsync();
+      const notificationMessage = result.notificationPermissionGranted
+        ? 'A local notification is scheduled from the task run.'
+        : 'Notification permission is not granted, so only the log entry was produced.';
+      setBackgroundTaskState({
+        status: 'success',
+        message:
+          result.mode === 'expo-worker'
+            ? `Expo background task worker triggered${result.triggered ? '' : ' without a run confirmation'}. Check the Metro or native logs for the timestamped entry. ${notificationMessage}`
+            : `Simple background task log printed at ${result.loggedAt ?? 'the current time'}. ${notificationMessage}`,
+      });
+    } catch (error) {
+      setBackgroundTaskState({
+        status: 'error',
+        message: error instanceof Error ? error.message : 'Unable to run the simple background task.',
+      });
+    }
+  }
+
   async function confirmClearAllData() {
     if (!databaseControls) {
       setClearDataState({
@@ -610,9 +643,7 @@ export function SettingsScreen() {
     <ScreenShell
       headerIcon="settings"
       headerSettingsActive
-      headerTitle="Settings"
-      onRefresh={onRefresh}
-      refreshing={refreshing}>
+      headerTitle="Settings">
       <View>
         <Text style={styles.subtitle}>Open wearable insights with local-only sync and the offline data store that powers every tab.</Text>
       </View>
@@ -738,6 +769,35 @@ export function SettingsScreen() {
         <Text style={styles.roadmapText}>{progress.message}</Text>
       </GlassCard>
 
+      <GlassCard accentColor={colors.violet}>
+        <SectionHeader title="Background Task" trailing={backgroundTaskState.status === 'running' ? 'Running' : 'Expo'} />
+        <View style={styles.settingColumn}>
+          <View>
+            <Text style={styles.settingTitle}>Simple log task</Text>
+            <Text style={styles.settingSubtitle}>Runs the Expo background worker and prints a timestamped log entry.</Text>
+          </View>
+
+          <View style={styles.buttonRow}>
+            <ActionButton
+              label={backgroundTaskBusy ? 'Running Log Task...' : 'Run Log Task'}
+              onPress={() => {
+                void handleRunBackgroundLogTask();
+              }}
+              disabled={backgroundTaskBusy}
+              tone="secondary"
+            />
+          </View>
+
+          <Text
+            style={[
+              styles.roadmapText,
+              backgroundTaskState.status === 'error' ? styles.errorText : null,
+            ]}>
+            {backgroundTaskState.message}
+          </Text>
+        </View>
+      </GlassCard>
+
       <GlassCard accentColor={colors.success}>
         <SectionHeader
           title="Performance Diagnostics"
@@ -747,7 +807,7 @@ export function SettingsScreen() {
           <View>
             <Text style={styles.settingTitle}>Run full performance sweep</Text>
             <Text style={styles.settingSubtitle}>
-              Measure a full derived rebuild, warm and cache-cold today/history reads, and aggregate rebuilds in one pass.
+              Measure a full derived rebuild, repeated today/history reads, and aggregate rebuilds in one pass.
             </Text>
           </View>
 

@@ -14,7 +14,6 @@ import { ScreenShell } from '@/components/layout/ScreenShell';
 import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
 import { colors, typography } from '@/constants/theme';
 import { useHistoryOverview } from '@/hooks/useHealthData';
-import { useWearableRefreshControl } from '@/hooks/useWearableRefreshControl';
 import { useHealthRepository, useRefreshHealthData } from '@/providers/HealthDataProvider';
 import { logMobilePerf, logMobilePerfError } from '@/utils/mobilePerf';
 import { getRecoveryMetricTone, getSleepMetricTone, getStrainMetricTone } from '@/utils/metricTone';
@@ -86,7 +85,6 @@ export function HistoryScreen() {
   const [selectedDayKey, setSelectedDayKey] = useState(() => dateKey(new Date()));
   const [pickerVisible, setPickerVisible] = useState(false);
   const state = useHistoryOverview(selectedDayKey);
-  const { onRefresh, refreshing } = useWearableRefreshControl();
   const repository = useHealthRepository();
   const refreshHealthData = useRefreshHealthData();
   const data = state.data;
@@ -150,7 +148,7 @@ export function HistoryScreen() {
 
   if (!data && state.status === 'loading') {
     return (
-      <ScreenShell headerIcon="history" headerTitle="History" onRefresh={onRefresh} refreshing={refreshing}>
+      <ScreenShell headerIcon="history" headerTitle="History">
         <LoadingState label="Loading your day history..." variant="inline" />
       </ScreenShell>
     );
@@ -158,7 +156,7 @@ export function HistoryScreen() {
 
   if (!data && state.status === 'error') {
     return (
-      <ScreenShell headerIcon="history" headerTitle="History" onRefresh={onRefresh} refreshing={refreshing}>
+      <ScreenShell headerIcon="history" headerTitle="History">
         <ErrorState message="Unable to load historical data right now." variant="inline" />
       </ScreenShell>
     );
@@ -185,9 +183,7 @@ export function HistoryScreen() {
           />
         }
         headerIcon="history"
-        headerTitle="History"
-        onRefresh={onRefresh}
-        refreshing={refreshing}>
+        headerTitle="History">
         {state.status === 'error' ? (
           <ErrorState message="Showing the last historical overview while refresh catches up." variant="inline" />
         ) : null}
