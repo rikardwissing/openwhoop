@@ -70,6 +70,8 @@ function alarmWakeModeLabel(mode: AlarmWakeMode) {
   switch (mode) {
     case 'score_or_time':
       return '100% or time';
+    case 'score_and_time':
+      return '100% or time, whichever comes last';
     case 'score_only':
       return 'Wait until 100%';
     case 'exact_time':
@@ -736,6 +738,16 @@ export function SleepScreen() {
                 label="100% or time, whichever comes first"
                 onPress={() => {
                   setAlarmWakeMode('score_or_time');
+                  setAlarmError(null);
+                }}
+              />
+              <AlarmOptionButton
+                active={resolvedAlarmWakeMode === 'score_and_time'}
+                caption="Wait for both target wake time and a projected 100% sleep score"
+                disabled={savingAlarm}
+                label="100% or time, whichever comes last"
+                onPress={() => {
+                  setAlarmWakeMode('score_and_time');
                   setAlarmError(null);
                 }}
               />

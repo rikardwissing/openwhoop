@@ -79,7 +79,9 @@ export function normalizeAlarmScheduleKind(value: string | null | undefined): Al
 }
 
 export function normalizeAlarmWakeMode(value: string | null | undefined): AlarmWakeMode {
-  return value === 'score_or_time' || value === 'score_only' ? value : 'exact_time';
+  return value === 'score_or_time' || value === 'score_and_time' || value === 'score_only'
+    ? value
+    : 'exact_time';
 }
 
 export function nextRecurringClockDate(clockMinutes: number, weekdayMask: number, from = new Date()) {
@@ -135,6 +137,20 @@ export function resolveNextWearableAlarmDate(settings: AlarmResolutionInput, now
 
   if (settings.alarmWakeMode === 'score_only') {
     return safeProjectedScoreDate;
+  }
+
+  if (settings.alarmWakeMode === 'score_and_time') {
+    if (!targetDate || targetDate.getTime() <= now.getTime()) {
+      return safeProjectedScoreDate;
+    }
+
+    if (!safeProjectedScoreDate) {
+      return null;
+    }
+
+    return safeProjectedScoreDate.getTime() > targetDate.getTime()
+      ? safeProjectedScoreDate
+      : targetDate;
   }
 
   if (!targetDate || targetDate.getTime() <= now.getTime()) {

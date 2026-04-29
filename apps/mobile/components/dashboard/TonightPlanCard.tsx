@@ -42,6 +42,8 @@ function alarmWakeModeSummary(plan: SleepPlan) {
   switch (plan.alarmWakeMode) {
     case 'score_or_time':
       return '100% or time';
+    case 'score_and_time':
+      return '100% or time, whichever comes last';
     case 'score_only':
       return 'Wait until 100%';
     case 'exact_time':

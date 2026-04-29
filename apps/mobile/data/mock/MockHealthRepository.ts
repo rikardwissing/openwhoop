@@ -559,7 +559,10 @@ function buildSleepPlan(
     alarmWeekdayMask: alarmSettings.alarmWeekdayMask,
     alarmWakeMode: alarmSettings.alarmWakeMode,
     alarmOneOffAt: alarmSettings.alarmOneOffAt,
-    nextAlarmAt: alarmSettings.alarmEnabled && alarmSettings.alarmWakeMode !== 'score_only'
+    nextAlarmAt:
+      alarmSettings.alarmEnabled &&
+      alarmSettings.alarmWakeMode !== 'score_only' &&
+      alarmSettings.alarmWakeMode !== 'score_and_time'
       ? (alarmSettings.alarmOneOffAt ?? nextAlarmTargetDate(alarmSettings)?.toISOString() ?? null)
       : null,
   };
