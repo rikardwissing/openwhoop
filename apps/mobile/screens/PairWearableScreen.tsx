@@ -82,7 +82,7 @@ export function PairWearableScreen() {
     <ScreenShell headerIcon="pair" headerSettingsDisabled={!deviceState.id} headerTitle="Pair Wearable">
       <View>
         <Text style={styles.subtitle}>
-          Pair the strap you want this phone to own. After pairing, run a manual sync whenever you want to import fresh data and keep your wearable insights local on iPhone.
+          Pair the strap you want this phone to own. After pairing, background sync keeps your local wearable insights up to date on this phone.
         </Text>
       </View>
 

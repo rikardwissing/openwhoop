@@ -30,7 +30,6 @@ import {
   BACKGROUND_DEVICE_SYNC_TIME_BUDGET_MS,
   isBackgroundDeviceSyncTaskRegisteredAsync,
   registerBackgroundDeviceSyncTaskAsync,
-  runBackgroundDeviceSyncNowAsync,
 } from '@/services/background/backgroundDeviceSyncTask';
 import {
   describeBatteryStatus,
@@ -272,7 +271,7 @@ export function SettingsScreen() {
   const { backgroundSyncState, deviceState } = useWearableSyncState();
   const { liveEvents } = useWearableLiveEvents();
   const { progress } = useWearableSyncProgress();
-  const { forgetDevice, syncSelected, restartDevice } = useWearableSyncActions();
+  const { forgetDevice, runBackgroundSync, restartDevice } = useWearableSyncActions();
   const [exportState, setExportState] = useState<{
     status: 'idle' | 'running' | 'success' | 'error';
     message: string;
@@ -413,7 +412,7 @@ export function SettingsScreen() {
     });
 
     try {
-      const result = await runBackgroundDeviceSyncNowAsync();
+      const result = await runBackgroundSync({ showOverlay: false });
       const notificationMessage = result.notificationPermissionGranted
         ? 'Local notifications are enabled for this run.'
         : 'Notification permission is not granted, so no local sync or detection notification was sent.';
@@ -783,8 +782,8 @@ export function SettingsScreen() {
 
           {deviceState.syncError ? <Text style={styles.errorText}>{deviceState.syncError}</Text> : null}
 
-          <View style={styles.buttonRow}>
-            {!deviceState.id ? (
+          {!deviceState.id ? (
+            <View style={styles.buttonRow}>
               <ActionButton
                 label="Open pairing"
                 onPress={() => {
@@ -792,15 +791,8 @@ export function SettingsScreen() {
                 }}
                 tone="secondary"
               />
-            ) : null}
-            <ActionButton
-              label={deviceBusy ? 'Syncing...' : 'Sync now'}
-              onPress={() => {
-                void syncSelected();
-              }}
-              disabled={!deviceState.id || progress.status === 'scanning' || deviceBusy}
-            />
-          </View>
+            </View>
+          ) : null}
 
           <View style={styles.buttonRow}>
             <ActionButton
@@ -996,7 +988,7 @@ export function SettingsScreen() {
           <View>
             <Text style={styles.settingTitle}>Latest Import Profile</Text>
             <Text style={styles.settingSubtitle}>
-              Stores the last timing snapshot recorded on this phone from the most recent manual sync.
+              Stores the last timing snapshot recorded on this phone from the most recent wearable import.
             </Text>
           </View>
 

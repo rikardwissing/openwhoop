@@ -1,6 +1,13 @@
 import { LinearGradient } from 'expo-linear-gradient';
 import { useCallback, useContext, useMemo, useState, type ReactNode } from 'react';
-import { ScrollView, StyleSheet, View, type StyleProp, type ViewStyle } from 'react-native';
+import {
+  RefreshControl,
+  ScrollView,
+  StyleSheet,
+  View,
+  type StyleProp,
+  type ViewStyle,
+} from 'react-native';
 import { SafeAreaInsetsContext, SafeAreaView } from 'react-native-safe-area-context';
 
 import { AppHeader, type AppHeaderIcon } from '@/components/layout/AppHeader';
@@ -15,6 +22,9 @@ export function ScreenShell({
   headerSettingsActive = false,
   headerSettingsDisabled = false,
   headerTitle,
+  onRefresh,
+  refreshTitle,
+  refreshing = false,
 }: {
   children: ReactNode;
   contentStyle?: StyleProp<ViewStyle>;
@@ -23,6 +33,9 @@ export function ScreenShell({
   headerSettingsActive?: boolean;
   headerSettingsDisabled?: boolean;
   headerTitle?: string;
+  onRefresh?: () => void;
+  refreshTitle?: string;
+  refreshing?: boolean;
 }) {
   const insets = useContext(SafeAreaInsetsContext);
   const topInset = insets?.top ?? 0;
@@ -70,6 +83,20 @@ export function ScreenShell({
         <SafeAreaView edges={['left', 'right']} style={styles.safeArea}>
           <ScrollView
             contentContainerStyle={[styles.content, { paddingTop: contentTopPadding, paddingBottom: contentBottomPadding }, contentStyle]}
+            refreshControl={
+              onRefresh ? (
+                <RefreshControl
+                  colors={[colors.primary]}
+                  onRefresh={onRefresh}
+                  progressBackgroundColor="rgba(7, 11, 19, 0.92)"
+                  progressViewOffset={resolvedHeaderHeight}
+                  refreshing={refreshing}
+                  tintColor={colors.primary}
+                  title={refreshTitle}
+                  titleColor={colors.muted}
+                />
+              ) : undefined
+            }
             removeClippedSubviews
             scrollEnabled={activeScrollLocks === 0}
             showsVerticalScrollIndicator={false}>

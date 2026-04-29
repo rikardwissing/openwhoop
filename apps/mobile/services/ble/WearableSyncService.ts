@@ -29,7 +29,6 @@ import type {
   DeviceState,
   SyncImportPerformanceSummary,
   SyncProgress,
-  SyncResult,
   SyncSource,
   WearState,
   WearableLiveEvent,
@@ -952,17 +951,6 @@ export class WearableSyncService {
       status: 'complete',
       message: 'Restart command sent. The wearable may disappear briefly while it boots back up.',
     });
-  }
-
-  async syncSelected(
-    onProgress?: (progress: SyncProgress) => void,
-    onLiveEvent?: LiveEventRecorder,
-  ): Promise<SyncResult> {
-    const outcome = await this.runSync('foreground', onProgress, onLiveEvent);
-    return {
-      importedReadings: outcome.importedReadings,
-      completedAt: outcome.completedAt,
-    };
   }
 
   async syncInBackground(options?: SyncRunOptions): Promise<SyncExecutionOutcome> {
