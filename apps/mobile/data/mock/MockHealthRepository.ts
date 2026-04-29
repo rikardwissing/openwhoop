@@ -29,7 +29,16 @@ import type {
   TrendData,
   WellnessData,
 } from '@/types/health';
-import { formatAxisTime, formatClockMinutes } from '@/utils/dateTime';
+import {
+  addMinutes,
+  formatAxisTime,
+  formatClock,
+  formatClockMinutes,
+  formatLongDate,
+  formatShortDate,
+  formatSqliteDateTime,
+  timeOfDayMinuteOffset,
+} from '@/utils/dateTime';
 import { describeRecovery } from '@/utils/formatters';
 import { sustainedPeakBpm } from '@/utils/heartRate';
 import { buildHeartCardDataFromWindow } from '@/utils/heartTimeline';
@@ -98,6 +107,7 @@ function buildIntradayHeartSeries(
 
     return {
       label: formatAxisTime(time, { includeSeconds: stepMinutes < 1 }),
+      minuteOffset: timeOfDayMinuteOffset(time),
       value: heartRateForTime(time),
     };
   });
@@ -173,7 +183,12 @@ const intradayMaxHr = sustainedPeakBpm(intradayValues) ?? Math.max(...intradayVa
 const todayDashboardAverageHr = Math.round(mean(todayDashboardHeartValues));
 const todayDashboardMaxHr = sustainedPeakBpm(todayDashboardHeartValues) ?? Math.max(...todayDashboardHeartValues);
 const strainValues = [4.4, 4.8, 5.2, 6.1, 6.8, 7.2, 7.6, 8.1, 9.4, 10.8, 9.9, 10.1, 10.9, 11];
-const scoreLabels = ['Apr 10', 'Apr 11', 'Apr 12', 'Apr 13', 'Apr 14', 'Apr 15', 'Apr 16', 'Apr 17', 'Apr 18', 'Apr 19', 'Apr 20', 'Apr 21', 'Apr 22', 'Apr 23'];
+const dashboardDayKeys = Array.from({ length: 14 }, (_, index) => `2026-04-${`${10 + index}`.padStart(2, '0')}`);
+const dashboardDayDates = dashboardDayKeys.map((dayKey) => {
+  const [year, month, day] = dayKey.split('-').map(Number);
+  return new Date(year, month - 1, day, 12, 0, 0, 0);
+});
+const scoreLabels = dashboardDayDates.map((date) => formatShortDate(date));
 const sleepScores = [71, 76, 74, 79, 82, 77, 81, 84, 80, 83, 78, 82, 86, 82];
 const sleepDurations = [404, 421, 438, 455, 463, 444, 458, 470, 452, 476, 447, 465, 479, 465];
 const sleepDurationHours = sleepDurations.map((value) => Number((value / 60).toFixed(1)));
@@ -185,19 +200,17 @@ const spo2Trend = [95, 96, 96, 97, 96, 97, 97, 96, 96, 97, 97, 96, 97, 97];
 const skinTemperatureTrend = [33.2, 33.1, 33.3, 33.4, 33.5, 33.6, 33.6, 33.4, 33.5, 33.6, 33.7, 33.7, 33.8, 33.8];
 const skinTemperatureDeviationTrend = [-0.2, -0.3, -0.2, -0.1, 0, 0.1, 0.1, -0.1, 0, 0.1, 0.2, 0.2, 0.3, 0.2];
 const recoveryTrendValues = [75, 77, 73, 71, 74, 72, 69, 70, 72, 68, 66, 65, 64, 64];
-const dayMetricLabels = ['12A', '3A', '6A', '9A', '12P', '3P', '6P', '9P'];
-const overnightMetricLabels = ['11P', '12A', '1A', '2A', '3A', '4A', '5A', '6A', '7A'];
+const dayMetricLabels = [0, 3 * 60, 6 * 60, 9 * 60, 12 * 60, 15 * 60, 18 * 60, 21 * 60].map((minutes) =>
+  formatClockMinutes(minutes),
+);
+const overnightMetricLabels = [23 * 60, 0, 60, 2 * 60, 3 * 60, 4 * 60, 5 * 60, 6 * 60, 7 * 60].map((minutes) =>
+  formatClockMinutes(minutes),
+);
 const hrvOvernightSeries = [74, 76, 78, 80, 82, 83, 84, 82, 80];
 const stressDaySeries = [36, 31, 28, 32, 35, 33, 30, 27];
 const spo2OvernightSeries = [95, 96, 97, 97, 96, 97, 97, 96, 97];
 const skinTemperatureOvernightSeries = [33.1, 33.2, 33.3, 33.4, 33.6, 33.7, 33.7, 33.6, 33.5];
 const strainCurveFractions = [0, 0, 0.04, 0.1, 0.22, 0.38, 0.71, 1];
-
-const dashboardDayKeys = scoreLabels.map((_, index) => `2026-04-${`${10 + index}`.padStart(2, '0')}`);
-const dashboardDayDates = dashboardDayKeys.map((dayKey) => {
-  const [year, month, day] = dayKey.split('-').map(Number);
-  return new Date(year, month - 1, day, 12, 0, 0, 0);
-});
 
 function buildDashboardWindowSnapshot(options: {
   title: string;
@@ -243,20 +256,12 @@ function buildDashboardDayState(selectedIndex: number): DashboardDayState {
   const availableDays: DashboardDayOption[] = dashboardDayKeys.map((dayKey, index) => ({
     dayKey,
     shortLabel: scoreLabels[index] ?? scoreLabels.at(-1)!,
-    longLabel: new Intl.DateTimeFormat('en-US', {
-      weekday: 'long',
-      month: 'long',
-      day: 'numeric',
-    }).format(dashboardDayDates[index] ?? dashboardDayDates.at(-1)!),
+    longLabel: formatLongDate(dashboardDayDates[index] ?? dashboardDayDates.at(-1)!),
   }));
   return {
     dayKey: dashboardDayKeys[selectedIndex] ?? dashboardDayKeys.at(-1)!,
     shortLabel: scoreLabels[selectedIndex] ?? scoreLabels.at(-1)!,
-    longLabel: new Intl.DateTimeFormat('en-US', {
-      weekday: 'long',
-      month: 'long',
-      day: 'numeric',
-    }).format(selectedDate),
+    longLabel: formatLongDate(selectedDate),
     isToday: selectedIndex === dashboardDayKeys.length - 1,
     olderDayKey: selectedIndex > 0 ? dashboardDayKeys[selectedIndex - 1] : null,
     olderDayLabel: selectedIndex > 0 ? scoreLabels[selectedIndex - 1] : null,
@@ -401,7 +406,12 @@ const sessionSeeds: MockSleepRecord[] = [
       { stage: 'light', minutes: 12 },
     ],
   },
-];
+].map((session) => ({
+  ...session,
+  bedtime: formatClockMinutes(session.start.getHours() * 60 + session.start.getMinutes()),
+  dateLabel: formatDateLabel(session.end),
+  wakeTime: formatClockMinutes(session.end.getHours() * 60 + session.end.getMinutes()),
+}) as MockSleepRecord);
 
 const activitySeeds = [
   {
@@ -484,10 +494,7 @@ function dayKeyForDate(date: Date) {
 }
 
 function formatDateLabel(date: Date) {
-  return new Intl.DateTimeFormat('en-US', {
-    month: 'short',
-    day: 'numeric',
-  }).format(date);
+  return formatShortDate(date);
 }
 
 function buildMockSleepRecord(start: Date, end: Date): MockSleepRecord {
@@ -1006,8 +1013,9 @@ export class MockHealthRepository implements HealthRepository {
         durationMinutes: selectedSession.durationMinutes,
         timeInBedMinutes: selectedSession.timeInBedMinutes,
         stages: selectedSession.stages,
+        startAt: formatSqliteDateTime(selectedSession.start),
         startLabel: selectedSession.bedtime,
-        middleLabel: '3:26 AM',
+        middleLabel: formatClock(addMinutes(selectedSession.start, selectedSession.durationMinutes / 2)),
         endLabel: selectedSession.wakeTime,
         completionStatus: selectedSession.completionStatus,
         isInProgress: selectedSession.isInProgress,
@@ -1023,7 +1031,9 @@ export class MockHealthRepository implements HealthRepository {
       skinTemperatureCard,
       activitySummary: selectedActivities,
       insights: buildInsights(selectedIndex, strainScore),
-      lastSyncLabel: day.isToday ? 'Last sync 7:45 AM' : `Showing ${day.shortLabel}`,
+      lastSyncLabel: day.isToday
+        ? `Last sync ${formatClock(sessionSeeds[0]?.end ?? new Date(2026, 3, 23, 7, 45, 0, 0))}`
+        : `Showing ${day.shortLabel}`,
     };
   }
 
@@ -1066,8 +1076,8 @@ export class MockHealthRepository implements HealthRepository {
     return {
       headlineScore: latestSleep?.score ?? 82,
       headlineLabel: 'Good sleep',
-      bedtime: latestSleep?.bedtime ?? '11:07 PM',
-      wakeTime: latestSleep?.wakeTime ?? '7:45 AM',
+      bedtime: latestSleep?.bedtime ?? formatClockMinutes(23 * 60 + 7),
+      wakeTime: latestSleep?.wakeTime ?? formatClockMinutes(7 * 60 + 45),
       completionStatus: latestSleep?.completionStatus ?? 'complete',
       isInProgress: latestSleep?.isInProgress ?? false,
       durationMinutes: latestSleep?.durationMinutes ?? 465,

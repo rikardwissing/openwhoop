@@ -1,25 +1,25 @@
-const shortDateFormatter = new Intl.DateTimeFormat('en-US', {
+const shortDateFormatter = new Intl.DateTimeFormat(undefined, {
   month: 'short',
   day: 'numeric',
 });
 
-const longDateFormatter = new Intl.DateTimeFormat('en-US', {
+const longDateFormatter = new Intl.DateTimeFormat(undefined, {
   weekday: 'long',
   month: 'long',
   day: 'numeric',
 });
 
-const timeFormatter = new Intl.DateTimeFormat('en-US', {
+const timeFormatter = new Intl.DateTimeFormat(undefined, {
   hour: 'numeric',
   minute: '2-digit',
 });
 
-const axisTimeFormatter = new Intl.DateTimeFormat('en-US', {
+const axisTimeFormatter = new Intl.DateTimeFormat(undefined, {
   hour: 'numeric',
   minute: '2-digit',
 });
 
-const axisTimeWithSecondsFormatter = new Intl.DateTimeFormat('en-US', {
+const axisTimeWithSecondsFormatter = new Intl.DateTimeFormat(undefined, {
   hour: 'numeric',
   minute: '2-digit',
   second: '2-digit',
@@ -60,13 +60,13 @@ export function formatClockMinutes(minutes: number): string {
 }
 
 export function formatAxisTime(date: Date, options?: { includeSeconds?: boolean }): string {
-  const result = options?.includeSeconds
+  return options?.includeSeconds
     ? axisTimeWithSecondsFormatter.format(date)
     : axisTimeFormatter.format(date);
-  if (options?.includeSeconds) {
-    return result.replace(/:00(?=\s*[AP]M$)/, '');
-  }
-  return result.replace(':00', '');
+}
+
+export function timeOfDayMinuteOffset(date: Date): number {
+  return date.getHours() * 60 + date.getMinutes() + date.getSeconds() / 60;
 }
 
 export function dateKey(date: Date): string {

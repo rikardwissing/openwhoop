@@ -1,5 +1,5 @@
 import type { HeartCardData, HeartTimelineSample, HeartTimelineWindow, TrendPoint } from '@/types/health';
-import { formatAxisTime } from '@/utils/dateTime';
+import { formatAxisTime, timeOfDayMinuteOffset } from '@/utils/dateTime';
 import { filterPlausibleRecordedBpms, sustainedPeakBpm } from '@/utils/heartRate';
 import { mean } from '@/utils/math';
 
@@ -56,6 +56,7 @@ function bucketHeartTimelineSamples(
 
     series.push({
       label: formatAxisTime(new Date(bucketStart)),
+      minuteOffset: timeOfDayMinuteOffset(new Date(bucketStart)),
       value: bucketSummary?.averageHr ?? null,
     });
   }

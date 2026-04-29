@@ -19,14 +19,13 @@ import { useWearableSyncActions, useWearableSyncState } from '@/providers/Wearab
 import { syncSleepPreparationReminder } from '@/services/notifications/sleepPreparationReminder';
 import type { AlarmScheduleKind, AlarmWakeMode, SleepStage, SleepStageSelection } from '@/types/health';
 import {
-  formatClockRangeFromStartLabel,
   formatCompactDuration,
   formatDuration,
   describeSleepScore,
   formatMetricValue,
   formatNullablePercent,
 } from '@/utils/formatters';
-import { formatClock, formatClockMinutes, parseSqliteDateTime } from '@/utils/dateTime';
+import { addMinutes, formatClock, formatClockMinutes, parseSqliteDateTime } from '@/utils/dateTime';
 import { getMetricToneColor, getSleepMetricTone } from '@/utils/metricTone';
 import {
   ALARM_WEEKDAY_FULL_MASK,
@@ -260,12 +259,8 @@ export function SleepScreen() {
     : 0;
   const selectedSessionMiddleLabel =
     selectedSession && selectedSessionStageMinutes > 0
-      ? formatClockRangeFromStartLabel(
-          selectedSession.bedtime,
-          selectedSessionStageMinutes / 2,
-          selectedSessionStageMinutes / 2,
-        ).split('-')[0]
-      : '3:00 AM';
+      ? formatClock(addMinutes(parseSqliteDateTime(selectedSession.startAt), selectedSessionStageMinutes / 2))
+      : formatClockMinutes(3 * 60);
   const selectedStageBreakdown = selectedStageTotals
     ? stageBreakdownOrder
         .filter((stage) => selectedStageTotals[stage] > 0)
@@ -927,6 +922,7 @@ export function SleepScreen() {
               middleLabel={selectedSessionMiddleLabel}
               onSelectionChange={setStageSelection}
               segments={selectedSession.stages}
+              startAt={selectedSession.startAt}
               startLabel={selectedSession.bedtime}
               testID="sleep-last-night-stage-chart"
             />

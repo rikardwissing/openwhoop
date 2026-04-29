@@ -647,7 +647,7 @@ export function resolveNearestHeartPinchZoomStep(
 
 function parseHeartAxisLabelMinutes(label: string) {
   const trimmed = label.trim();
-  const match = /^(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?\s*(AM|PM)$/i.exec(trimmed);
+  const match = /^(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?\s*(AM|PM)?$/i.exec(trimmed);
 
   if (!match) {
     return null;
@@ -660,6 +660,14 @@ function parseHeartAxisLabelMinutes(label: string) {
 
   if (!Number.isFinite(rawHours) || !Number.isFinite(minutes) || !Number.isFinite(seconds)) {
     return null;
+  }
+
+  if (!meridiem) {
+    if (rawHours < 0 || rawHours > 23) {
+      return null;
+    }
+
+    return rawHours * 60 + minutes + seconds / 60;
   }
 
   const normalizedHours = rawHours % 12 + (meridiem === 'PM' ? 12 : 0);
@@ -682,7 +690,7 @@ export function buildHeartViewportDayLabel(
     return null;
   }
 
-  const latestPointMinutes = parseHeartAxisLabelMinutes(latestLabel);
+  const latestPointMinutes = points.at(-1)?.minuteOffset ?? parseHeartAxisLabelMinutes(latestLabel);
   if (latestPointMinutes === null) {
     return null;
   }

@@ -483,7 +483,7 @@ function formatSleepStageName(stage: SleepStage) {
 
 function parseHeartPointLabelMinutes(label: string) {
   const trimmed = label.trim();
-  const match = /^(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?\s*(AM|PM)$/i.exec(trimmed);
+  const match = /^(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?\s*(AM|PM)?$/i.exec(trimmed);
 
   if (!match) {
     return null;
@@ -498,11 +498,19 @@ function parseHeartPointLabelMinutes(label: string) {
     return null;
   }
 
+  if (!meridiem) {
+    if (rawHours < 0 || rawHours > 23) {
+      return null;
+    }
+
+    return rawHours * 60 + minutes + seconds / 60;
+  }
+
   return (rawHours % 12 + (meridiem === 'PM' ? 12 : 0)) * 60 + minutes + seconds / 60;
 }
 
 function resolveHeartPointDate(
-  points: readonly { label: string }[],
+  points: readonly { label: string; minuteOffset?: number }[],
   anchorDayKey: string | undefined,
   minuteOffset: number,
   pointIntervalMinutes = DEFAULT_HEART_CHART_POINT_INTERVAL_MINUTES,
@@ -516,7 +524,7 @@ function resolveHeartPointDate(
     return null;
   }
 
-  const latestPointMinutes = parseHeartPointLabelMinutes(latestLabel);
+  const latestPointMinutes = points.at(-1)?.minuteOffset ?? parseHeartPointLabelMinutes(latestLabel);
   if (latestPointMinutes === null) {
     return null;
   }
@@ -2856,6 +2864,7 @@ export function SleepCard({
         middleLabel={cardData.middleLabel}
         onSelectionChange={handleSleepStageSelectionChange}
         segments={cardData.stages}
+        startAt={cardData.startAt}
         startLabel={cardData.startLabel}
         testID={chartTestID}
       />

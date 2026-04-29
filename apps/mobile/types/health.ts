@@ -12,6 +12,7 @@ export type DerivedRefreshStatus = 'idle' | 'pending' | 'processing' | 'error';
 
 export interface TrendPoint {
   label: string;
+  minuteOffset?: number;
   value: number | null;
 }
 
@@ -95,6 +96,7 @@ export interface SleepCardData extends EstimatedValueMeta {
   durationMinutes: number | null;
   timeInBedMinutes: number | null;
   stages: SleepStageSegment[];
+  startAt?: string | null;
   startLabel: string;
   middleLabel: string;
   endLabel: string;

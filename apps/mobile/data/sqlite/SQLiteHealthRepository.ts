@@ -53,7 +53,7 @@ import type {
   TrendData,
   WellnessData,
 } from '@/types/health';
-import { addMinutes, dateKey, formatAxisTime, formatClock, formatClockMinutes, formatLongDate, formatShortDate, formatSqliteDateTime, hoursBetween, minutesBetween, parseSqliteDateTime } from '@/utils/dateTime';
+import { addMinutes, dateKey, formatAxisTime, formatClock, formatClockMinutes, formatLongDate, formatShortDate, formatSqliteDateTime, hoursBetween, minutesBetween, parseSqliteDateTime, timeOfDayMinuteOffset } from '@/utils/dateTime';
 import { describeRecovery, describeSleepScore, formatMetricNumber } from '@/utils/formatters';
 import { buildHeartCardDataFromWindow } from '@/utils/heartTimeline';
 import {
@@ -1322,6 +1322,7 @@ function createTimeBuckets<T extends { bpm: number; date: Date }>(
     const bucketSummary = bucket ? summarizeHeartRows(bucket) : null;
     series.push({
       label: formatAxisTime(new Date(bucketStart), { includeSeconds: bucketMinutes < 1 }),
+      minuteOffset: timeOfDayMinuteOffset(new Date(bucketStart)),
       value: bucketSummary ? Math.round(bucketSummary.average) : null,
     });
   }
@@ -1369,6 +1370,7 @@ function createMetricTimeBuckets<T extends { date: Date }>(
     const value = bucket.length === 0 ? null : valueForBucket(bucket);
     series.push({
       label: formatAxisTime(new Date(bucketStart)),
+      minuteOffset: timeOfDayMinuteOffset(new Date(bucketStart)),
       value: value === null ? null : Number(value.toFixed(digits)),
     });
   }
@@ -2372,6 +2374,7 @@ function buildCumulativeStrainSeries<T extends { bpm: number; date: Date }>(
   if (maxHr <= restingHr) {
     return Array.from({ length: Math.max(0, Math.floor((lastBucket - firstBucket) / bucketMs) + 1) }, (_, index) => ({
       label: formatAxisTime(new Date(firstBucket + index * bucketMs)),
+      minuteOffset: timeOfDayMinuteOffset(new Date(firstBucket + index * bucketMs)),
       value: null,
     }));
   }
@@ -2415,6 +2418,7 @@ function buildCumulativeStrainSeries<T extends { bpm: number; date: Date }>(
 
     series.push({
       label: formatAxisTime(new Date(bucketStart)),
+      minuteOffset: timeOfDayMinuteOffset(new Date(bucketStart)),
       value: cumulativeSamples < 600 ? null : strainScoreFromTrimp(cumulativeTrimp),
     });
   }
@@ -7100,6 +7104,7 @@ function buildDashboardSleepCard(latestSleep: SleepCycleRecord | null, stageReco
     durationMinutes: summary.timeAsleepMinutes,
     timeInBedMinutes: summary.timeInBedMinutes,
     stages: summary.stages,
+    startAt: formatSqliteDateTime(summary.start),
     startLabel: formatClock(summary.start),
     middleLabel: axisLabelForMidpoint(summary.start, summary.end),
     endLabel: formatClock(summary.end),

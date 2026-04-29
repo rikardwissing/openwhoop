@@ -17,7 +17,7 @@ import { useAcquireScreenScrollLock } from '@/components/layout/ScreenScrollCont
 import { colors, sleepStageColors, typography } from '@/constants/theme';
 import type { SleepStage, SleepStageSegment, SleepStageSelection } from '@/types/health';
 import {
-  formatClockRangeFromStartLabel,
+  formatClockRangeFromStartDateTime,
   formatShortDuration,
   formatSleepStageLabel,
 } from '@/utils/formatters';
@@ -39,6 +39,7 @@ const sleepStageViewBoxWidth = 100;
 
 export function SleepStageChart({
   segments,
+  startAt,
   startLabel,
   middleLabel,
   endLabel,
@@ -48,6 +49,7 @@ export function SleepStageChart({
   testID,
 }: {
   segments: SleepStageSegment[];
+  startAt?: Date | string | null;
   startLabel: string;
   middleLabel: string;
   endLabel: string;
@@ -239,7 +241,9 @@ export function SleepStageChart({
               ]}>
               <ChartSelectionBubble
                 accentColor={accentColor}
-                detail={formatClockRangeFromStartLabel(startLabel, selection.startMinute, selection.endMinute)}
+                detail={startAt
+                  ? formatClockRangeFromStartDateTime(startAt, selection.startMinute, selection.endMinute)
+                  : `${selection.startMinute}-${selection.endMinute} min`}
                 label={formatSleepStageLabel(selection.segment.stage)}
                 size="compact"
                 testID={testID ? `${testID}-selection-bubble` : undefined}

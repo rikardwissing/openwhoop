@@ -1,5 +1,7 @@
 import type { SleepStage } from '@/types/health';
 
+import { addMinutes, formatClock, parseSqliteDateTime } from '@/utils/dateTime';
+
 export function formatDuration(minutes: number | null): string {
   if (minutes === null) {
     return '--';
@@ -112,59 +114,14 @@ export function formatNullablePercent(value: number | null): string {
   return `${Math.round(value)}%`;
 }
 
-function parseClockLabel(label: string): number | null {
-  const match = label.trim().match(/^(\d{1,2})(?::(\d{2}))?\s*([AP]M)?$/i);
-  if (!match) {
-    return null;
-  }
-
-  const [, rawHour, rawMinute = '0', meridiem] = match;
-  const hour = Number(rawHour);
-  const minute = Number(rawMinute);
-
-  if (Number.isNaN(hour) || Number.isNaN(minute) || minute < 0 || minute > 59) {
-    return null;
-  }
-
-  if (!meridiem) {
-    if (hour < 0 || hour > 23) {
-      return null;
-    }
-
-    return hour * 60 + minute;
-  }
-
-  if (hour < 1 || hour > 12) {
-    return null;
-  }
-
-  const normalizedHour = hour % 12 + (meridiem.toUpperCase() === 'PM' ? 12 : 0);
-  return normalizedHour * 60 + minute;
-}
-
-function formatClockMinutes(totalMinutes: number) {
-  const normalized = ((Math.round(totalMinutes) % (24 * 60)) + 24 * 60) % (24 * 60);
-  const hour24 = Math.floor(normalized / 60);
-  const minute = normalized % 60;
-  const meridiem = hour24 >= 12 ? 'PM' : 'AM';
-  const hour12 = hour24 % 12 || 12;
-
-  return `${hour12}:${`${minute}`.padStart(2, '0')} ${meridiem}`;
-}
-
-export function formatClockRangeFromStartLabel(
-  startLabel: string,
+export function formatClockRangeFromStartDateTime(
+  startAt: Date | string,
   startMinute: number,
   endMinute: number,
 ) {
-  const baseMinutes = parseClockLabel(startLabel);
-  if (baseMinutes === null) {
-    return `${startMinute}-${endMinute} min`;
-  }
+  const baseDate = typeof startAt === 'string' ? parseSqliteDateTime(startAt) : startAt;
 
-  return `${formatClockMinutes(baseMinutes + startMinute)}-${formatClockMinutes(
-    baseMinutes + endMinute,
-  )}`;
+  return `${formatClock(addMinutes(baseDate, startMinute))}-${formatClock(addMinutes(baseDate, endMinute))}`;
 }
 
 export function formatSleepStageLabel(stage: SleepStage) {
