@@ -1634,7 +1634,16 @@ export class WearableSyncService {
         } catch {}
       }
 
-      await releaseBackgroundSyncLock(this.db, lockOwner).catch(() => {});
+      await releaseBackgroundSyncLock(this.db, lockOwner).catch((error) => {
+        console.warn(
+          '[wearable-sync] Failed to release background sync lock',
+          JSON.stringify({
+            owner: lockOwner,
+            source,
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        );
+      });
     }
   }
 
@@ -1791,12 +1800,20 @@ export class WearableSyncService {
     }
   }
 
-  private async connectWithRetry(deviceId: string, deviceName: string) {
+  private async connectWithRetry(
+    deviceId: string,
+    deviceName: string,
+    options?: {
+      avoidDisconnectOnFirstAttempt?: boolean;
+    },
+  ) {
     let lastError: unknown = null;
 
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       try {
-        await this.manager.cancelDeviceConnection(deviceId).catch(() => {});
+        if (!(options?.avoidDisconnectOnFirstAttempt && attempt === 1)) {
+          await this.manager.cancelDeviceConnection(deviceId).catch(() => {});
+        }
         return await this.manager.connectToDevice(deviceId, { timeout: CONNECT_TIMEOUT_MS });
       } catch (error) {
         lastError = error;
@@ -1919,6 +1936,18 @@ export class WearableSyncService {
     return Boolean(selected.name && candidateName === selected.name);
   }
 
+  private async getConnectedCandidate(candidate: Device | null) {
+    if (!candidate) {
+      return null;
+    }
+
+    try {
+      return (await candidate.isConnected()) ? candidate : null;
+    } catch {
+      return null;
+    }
+  }
+
   private async connectSelectedWearable(
     selected: DeviceState,
     onProgress?: (progress: SyncProgress) => void,
@@ -1932,34 +1961,44 @@ export class WearableSyncService {
     let candidate = await this.findConnectionCandidate(selected, { allowDiscoveryScan }, onProgress);
     let resolvedDeviceId = candidate?.id ?? selected.id!;
     let resolvedDeviceName = (candidate ? resolveScanDeviceName(candidate) : null) ?? selected.name;
-    let device: Device;
+    let device = await this.getConnectedCandidate(candidate);
 
-    try {
-      device = await this.connectWithRetry(resolvedDeviceId, resolvedDeviceName ?? 'wearable');
-    } catch (error) {
-      if (!allowRescan) {
-        throw error;
+    if (!device) {
+      try {
+        device = await this.connectWithRetry(resolvedDeviceId, resolvedDeviceName ?? 'wearable', {
+          avoidDisconnectOnFirstAttempt: candidate != null,
+        });
+      } catch (error) {
+        if (!allowRescan) {
+          throw error;
+        }
+
+        onProgress?.({
+          status: 'connecting',
+          message: `Direct connect failed. Re-scanning for ${resolvedDeviceName ?? 'wearable'}...`,
+        });
+
+        const rescanned = await this.scanForMatchingDevice({
+          ...selected,
+          id: resolvedDeviceId,
+          name: resolvedDeviceName,
+        });
+
+        if (!rescanned) {
+          throw error;
+        }
+
+        candidate = rescanned;
+        resolvedDeviceId = rescanned.id;
+        resolvedDeviceName = resolveScanDeviceName(rescanned) ?? resolvedDeviceName;
+        device = await this.getConnectedCandidate(rescanned);
+
+        if (!device) {
+          device = await this.connectWithRetry(rescanned.id, resolvedDeviceName ?? 'wearable', {
+            avoidDisconnectOnFirstAttempt: true,
+          });
+        }
       }
-
-      onProgress?.({
-        status: 'connecting',
-        message: `Direct connect failed. Re-scanning for ${resolvedDeviceName ?? 'wearable'}...`,
-      });
-
-      const rescanned = await this.scanForMatchingDevice({
-        ...selected,
-        id: resolvedDeviceId,
-        name: resolvedDeviceName,
-      });
-
-      if (!rescanned) {
-        throw error;
-      }
-
-      candidate = rescanned;
-      resolvedDeviceId = rescanned.id;
-      resolvedDeviceName = resolveScanDeviceName(rescanned) ?? resolvedDeviceName;
-      device = await this.connectWithRetry(rescanned.id, resolvedDeviceName ?? 'wearable');
     }
 
     device = await device.discoverAllServicesAndCharacteristics();

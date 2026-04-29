@@ -11,7 +11,8 @@ import type {
 } from '@/types/device';
 
 const BACKGROUND_SYNC_ROW_ID = 1;
-const LOCK_STALE_MS = 15 * 60 * 1000;
+const FOREGROUND_LOCK_STALE_MS = 15 * 60 * 1000;
+const BACKGROUND_LOCK_STALE_MS = 6 * 60 * 1000;
 
 interface BackgroundSyncStateRow {
   paired_device_id: string | null;
@@ -46,6 +47,28 @@ const EMPTY_BACKGROUND_SYNC_STATE: BackgroundSyncState = {
   notificationBaselineAt: null,
   lastSyncImportSummary: null,
 };
+
+function parseLockOwnerSource(owner: string | null | undefined): SyncSource | null {
+  if (!owner) {
+    return null;
+  }
+
+  if (owner.startsWith('background:')) {
+    return 'background';
+  }
+
+  if (owner.startsWith('foreground:')) {
+    return 'foreground';
+  }
+
+  return null;
+}
+
+function resolveLockStaleMs(owner: string | null | undefined) {
+  return parseLockOwnerSource(owner) === 'background'
+    ? BACKGROUND_LOCK_STALE_MS
+    : FOREGROUND_LOCK_STALE_MS;
+}
 
 function parseNullableNumber(value: unknown) {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
@@ -327,14 +350,27 @@ export async function acquireBackgroundSyncLock(
   await withExclusiveTransaction(db, async (tx) => {
     const row = await loadBackgroundSyncStateRow(tx);
     const lockStartedAt = row?.lock_started_at ? parseSqliteDateTime(row.lock_started_at) : null;
+    const staleThresholdMs = resolveLockStaleMs(row?.lock_owner);
     const stale =
       row?.lock_owner !== null &&
       row?.lock_owner !== undefined &&
-      (!lockStartedAt || now.getTime() - lockStartedAt.getTime() > LOCK_STALE_MS);
+      (!lockStartedAt || now.getTime() - lockStartedAt.getTime() > staleThresholdMs);
 
     if (row?.lock_owner && row.lock_owner !== owner && !stale) {
       acquired = false;
       return;
+    }
+
+    if (row?.lock_owner && row.lock_owner !== owner && stale) {
+      console.warn(
+        '[background-sync] Reclaiming stale sync lock',
+        JSON.stringify({
+          previousOwner: row.lock_owner,
+          previousStartedAt: row.lock_started_at,
+          staleThresholdMs,
+          nextOwner: owner,
+        }),
+      );
     }
 
     await persistBackgroundSyncStateRow(tx, {

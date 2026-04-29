@@ -23,6 +23,12 @@ private let keepAliveReminderRequests: [(identifier: String, delaySeconds: TimeI
   ),
   (
     identifier: "btwearable-keep-open-reminder-1h",
+    delaySeconds: 10 * 60,
+    title: "Unstrap is still closed",
+    body: "Unstrap has been closed for 10 minutes. Reopen it to help keep your wearable insights syncing."
+  ),
+  (
+    identifier: "btwearable-keep-open-reminder-1h",
     delaySeconds: 60 * 60,
     title: "Unstrap is still closed",
     body: "Unstrap has been closed for 1 hour. Reopen it to help keep your wearable insights syncing."
