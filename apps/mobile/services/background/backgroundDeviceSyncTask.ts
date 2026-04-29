@@ -172,16 +172,6 @@ async function executeBackgroundDeviceSyncAsync(options: {
             ? 'Skipped because another sync is already running.'
             : `Completed background sync with ${readings} imported.`;
 
-    await scheduleBackgroundDeviceSyncNotificationAsync({
-      title:
-        pausedSafely
-          ? 'Background sync paused'
-          : outcome.status === 'skipped'
-            ? 'Background sync skipped'
-            : 'Background sync completed',
-      body: completedBody,
-    });
-
     let processedDerivedRefresh = false;
     let detectionNotifications = EMPTY_DETECTION_NOTIFICATION_RESULT;
     const shouldProcessDetectedReviewItems =
@@ -197,6 +187,16 @@ async function executeBackgroundDeviceSyncAsync(options: {
         previousDetectionSnapshot,
       ).catch(() => EMPTY_DETECTION_NOTIFICATION_RESULT);
     }
+
+    await scheduleBackgroundDeviceSyncNotificationAsync({
+      title:
+        pausedSafely
+          ? 'Background sync paused'
+          : outcome.status === 'skipped'
+            ? 'Background sync skipped'
+            : 'Background sync completed',
+      body: completedBody,
+    });
 
     return {
       detectionNotifications,

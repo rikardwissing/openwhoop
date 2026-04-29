@@ -18,7 +18,7 @@ import { useDerivedRefreshState, useTodayOverview } from '@/hooks/useHealthData'
 import { useHealthDataVersion, useHealthRepository, useRefreshHealthData } from '@/providers/HealthDataProvider';
 import { useWearableSyncActions, useWearableSyncState } from '@/providers/WearableSyncProvider';
 import type { ManualActivityKind } from '@/data/HealthRepository';
-import type { HeartCardData, HeartTimelineWindow } from '@/types/health';
+import type { HeartCardData, HeartTimelineWindow, TodayOverview } from '@/types/health';
 import { hasFreshLiveHeartRate } from '@/types/device';
 import {
   getHeartTimelineWindowPointCount,
@@ -34,7 +34,8 @@ const HEART_PREFETCH_RANGE = '7d';
 const HEART_ACTIVITY_REFRESH_SCOPES = ['dashboard', 'sleep', 'heart', 'wellness', 'trends'] as const;
 const TODAY_REFRESH_SCOPES = ['dashboard', 'sleep', 'heart', 'wellness', 'trends', 'derived'] as const;
 const DEFAULT_HEART_TIMELINE_ZOOM: HeartTimelineZoomLevel = '12h';
-const REFRESH_STATUS_HOLD_MS = 900;
+const REFRESH_STATUS_HOLD_MS = 450;
+const REFRESH_DISMISS_HOLD_MS = 300;
 const REFRESH_ERROR_HOLD_MS = 1200;
 
 function delay(ms: number) {
@@ -52,7 +53,8 @@ export function TodayScreen() {
   const heartVersion = useHealthDataVersion('heart');
   const { runBackgroundSync } = useWearableSyncActions();
   const { deviceState } = useWearableSyncState();
-  const data = state.data;
+  const [retainedOverview, setRetainedOverview] = useState<TodayOverview | null>(null);
+  const data = state.data ?? retainedOverview;
   const [selectedHeartZoom, setSelectedHeartZoom] = useState<HeartTimelineZoomLevel>(DEFAULT_HEART_TIMELINE_ZOOM);
   const [heartTimelineWindow, setHeartTimelineWindow] = useState<HeartTimelineWindow | null>(null);
   const [heartCardState, setHeartCardState] = useState<{
@@ -69,10 +71,18 @@ export function TodayScreen() {
   const [refreshState, setRefreshState] = useState<{
     active: boolean;
     message: string;
+    showStatus: boolean;
   }>({
     active: false,
     message: 'Running background sync...',
+    showStatus: false,
   });
+
+  useEffect(() => {
+    if (state.data) {
+      setRetainedOverview(state.data);
+    }
+  }, [state.data]);
 
   const showLiveHeartRate = data?.day.isToday ? hasFreshLiveHeartRate(deviceState) : false;
   const liveHeartRateLabel =
@@ -234,13 +244,14 @@ export function TodayScreen() {
     refreshAfterActivityMutation();
   }, [refreshAfterActivityMutation, repository]);
   const handleRefreshToday = useCallback(async () => {
-    if (refreshState.active) {
+    if (refreshState.active || refreshState.showStatus) {
       return;
     }
 
     setRefreshState({
       active: true,
       message: deviceState.id ? 'Running background sync...' : 'Refreshing local data...',
+      showStatus: true,
     });
 
     try {
@@ -257,6 +268,7 @@ export function TodayScreen() {
               : result.status === 'skipped'
                 ? 'Sync already running'
                 : 'Fully synced',
+        showStatus: true,
       });
 
       await delay(result.status === 'failed' ? REFRESH_ERROR_HOLD_MS : REFRESH_STATUS_HOLD_MS);
@@ -265,12 +277,14 @@ export function TodayScreen() {
       setRefreshState({
         active: true,
         message: error instanceof Error ? error.message : 'Unable to refresh today.',
+        showStatus: true,
       });
       await delay(REFRESH_ERROR_HOLD_MS);
-    } finally {
-      setRefreshState((current) => ({ ...current, active: false }));
     }
-  }, [deviceState.id, refreshHealthData, refreshState.active, runBackgroundSync]);
+    setRefreshState((current) => ({ ...current, active: false }));
+    await delay(REFRESH_DISMISS_HOLD_MS);
+    setRefreshState((current) => ({ ...current, showStatus: false }));
+  }, [deviceState.id, refreshHealthData, refreshState.active, refreshState.showStatus, runBackgroundSync]);
 
   if (!data && state.status === 'loading') {
     return (
@@ -302,6 +316,11 @@ export function TodayScreen() {
     : undefined;
   const openSleep = () => router.push('/sleep');
   const openWellness = () => router.push('/wellness');
+  const refreshTitle = refreshState.showStatus
+    ? refreshState.message
+    : deviceState.id
+      ? 'Pull to sync wearable data'
+      : 'Pull to refresh today';
 
   return (
     <ScreenShell
@@ -310,7 +329,7 @@ export function TodayScreen() {
       onRefresh={() => {
         void handleRefreshToday();
       }}
-      refreshTitle={refreshState.message}
+      refreshTitle={refreshTitle}
       refreshing={refreshState.active}>
       {state.status === 'error' ? (
         <ErrorState message="Showing the last Today overview while refresh catches up." variant="inline" />
