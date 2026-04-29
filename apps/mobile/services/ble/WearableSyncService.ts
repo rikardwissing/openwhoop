@@ -1,7 +1,12 @@
 import type { SQLiteDatabase, SQLiteStatement } from 'expo-sqlite';
 import { BleManager, type Device, type Subscription } from 'react-native-ble-plx';
 
-import { markDerivedRefreshPending, refreshHeartAggregatesForRange } from '@/data/sqlite/SQLiteHealthRepository';
+import {
+  markOneOffSleepAlarmExecutedFromDatabase,
+  markDerivedRefreshPending,
+  refreshHeartAggregatesForRange,
+  resolveNextWearableAlarmDateFromDatabase,
+} from '@/data/sqlite/SQLiteHealthRepository';
 import {
   acquireBackgroundSyncLock,
   recordBackgroundRunResult,
@@ -14,6 +19,10 @@ import { resolveScanDeviceName } from '@/services/ble/deviceNaming';
 import { createWearableBleManager, getRestoredWearableDevice } from '@/services/ble/bleManager';
 import { PacketAssembler, base64ToBytes, bytesToBase64, disableAlarmPacket, enterHighFrequencySyncPacket, exitHighFrequencySyncPacket, getBatteryLevelPacket, getBodyLocationAndStatusPacket, getNamePacket, helloHarvardPacket, historyEndPacket, historyStartPacket, parseNotification, restartPacket, setAlarmPacket, setClockPacket, toggleR7DataCollectionPacket, toggleRealtimeHrPacket, type SensorDataPacket, versionInfoPacket } from '@/services/ble/codec';
 import { HistorySyncWatchdog } from '@/services/ble/syncWatchdog';
+import {
+  notifyForWearableBatteryLevelAsync,
+  notifyForWearableEventAsync,
+} from '@/services/notifications/wearableEventNotifications';
 import type {
   BackgroundSyncResult,
   ChargingState,
@@ -47,6 +56,7 @@ const CONNECT_TIMEOUT_MS = 15_000;
 const CONNECT_SCAN_TIMEOUT_MS = 8_000;
 const BATTERY_REQUEST_TIMEOUT_MS = 1_500;
 const LIVE_UPDATES_RECONNECT_DELAY_MS = 3_000;
+const BACKGROUND_SYNC_CLEANUP_RESERVE_MS = 20_000;
 const HISTORY_WRITE_BATCH_SIZE = 250;
 const HISTORY_WRITE_MAX_RETRIES = 4;
 const HISTORY_WRITE_RETRY_DELAY_MS = 150;
@@ -388,6 +398,11 @@ export interface SyncExecutionOutcome {
   reason?: string;
 }
 
+interface SyncRunOptions {
+  abortSignal?: AbortSignal;
+  maxDurationMs?: number;
+}
+
 function formatBleError(error: unknown) {
   if (!(error instanceof Error)) {
     return 'Sync failed.';
@@ -648,6 +663,34 @@ export class WearableSyncService {
     }
   }
 
+  private async notifyForWearableNotification(
+    parsed: ReturnType<typeof parseNotification>,
+    deviceId: string,
+    deviceName: string | null,
+  ) {
+    if (parsed.type === 'battery') {
+      await notifyForWearableBatteryLevelAsync(this.db, deviceId, deviceName, parsed.battery.percent);
+      return;
+    }
+
+    if (parsed.type !== 'event') {
+      return;
+    }
+
+    if (
+      parsed.event.event === EventNumber.AppDrivenAlarmExecuted ||
+      parsed.event.event === EventNumber.StrapDrivenAlarmExecuted
+    ) {
+      await markOneOffSleepAlarmExecutedFromDatabase(this.db, new Date(parsed.event.unix));
+    }
+
+    await notifyForWearableEventAsync(this.db, deviceId, deviceName, parsed.event);
+
+    if ('percent' in parsed.event) {
+      await notifyForWearableBatteryLevelAsync(this.db, deviceId, deviceName, parsed.event.percent);
+    }
+  }
+
   async startLiveUpdates(onDeviceState: (state: DeviceState) => void, onLiveEvent?: LiveEventRecorder) {
     await this.stopLiveUpdates();
 
@@ -717,6 +760,7 @@ export class WearableSyncService {
 
     const handleNotification = async (parsed: ReturnType<typeof parseNotification>) => {
       this.recordLiveEvent(parsed, onLiveEvent);
+      void this.notifyForWearableNotification(parsed, resolvedDeviceId, resolvedDeviceName).catch(() => {});
 
       if (parsed.type === 'battery') {
         await pushState({ batteryPercent: parsed.battery.percent });
@@ -860,6 +904,22 @@ export class WearableSyncService {
     });
   }
 
+  private async rearmEnabledSleepAlarm(device: Device) {
+    const alarmAt = await resolveNextWearableAlarmDateFromDatabase(this.db);
+    if (!alarmAt) {
+      await this.sendCommand(device, disableAlarmPacket());
+      return null;
+    }
+
+    const alarmUnixSeconds = Math.floor(alarmAt.getTime() / 1000);
+    await this.sendCommand(device, setAlarmPacket(alarmUnixSeconds));
+
+    return {
+      alarmAt,
+      alarmUnixSeconds,
+    };
+  }
+
   async disableAlarm(onProgress?: (progress: SyncProgress) => void, onLiveEvent?: LiveEventRecorder) {
     await this.runDeviceCommand(
       onProgress,
@@ -905,14 +965,15 @@ export class WearableSyncService {
     };
   }
 
-  async syncInBackground(): Promise<SyncExecutionOutcome> {
-    return this.runSync('background');
+  async syncInBackground(options?: SyncRunOptions): Promise<SyncExecutionOutcome> {
+    return this.runSync('background', undefined, undefined, options);
   }
 
   private async runSync(
     source: SyncRunSource,
     onProgress?: (progress: SyncProgress) => void,
     onLiveEvent?: LiveEventRecorder,
+    options?: SyncRunOptions,
   ): Promise<SyncExecutionOutcome> {
     if (source === 'foreground') {
       await this.stopLiveUpdates();
@@ -1006,6 +1067,22 @@ export class WearableSyncService {
     const dataAssembler = new PacketAssembler();
     const responseAssembler = new PacketAssembler();
     const subscriptions: Subscription[] = [];
+    const timeBudgetDeadlineMs =
+      options?.maxDurationMs && options.maxDurationMs > 0
+        ? syncStartedAtMs + options.maxDurationMs
+        : null;
+    let stoppedForTimeBudget = false;
+    let stopReason: 'expiration' | 'time-budget' | null = null;
+    let historyIntakeClosed = false;
+
+    const closeHistorySubscriptions = () => {
+      while (subscriptions.length > 0) {
+        const subscription = subscriptions.pop();
+        try {
+          subscription?.remove();
+        } catch {}
+      }
+    };
 
     const summarizeSyncPerf = (
       status: BackgroundSyncResult,
@@ -1235,9 +1312,22 @@ export class WearableSyncService {
       const completion = new Promise<void>((resolve, reject) => {
         let settled = false;
         const watchdog = new HistorySyncWatchdog();
+        const budgetDelayMs =
+          timeBudgetDeadlineMs === null
+            ? null
+            : Math.max(0, timeBudgetDeadlineMs - Date.now() - BACKGROUND_SYNC_CLEANUP_RESERVE_MS);
+        let budgetTimer: ReturnType<typeof setTimeout> | null = null;
+        let abortListener: (() => void) | null = null;
 
         const clearTimers = () => {
           clearInterval(watchdogTimer);
+          if (budgetTimer !== null) {
+            clearTimeout(budgetTimer);
+          }
+          if (abortListener !== null) {
+            options?.abortSignal?.removeEventListener('abort', abortListener);
+            abortListener = null;
+          }
         };
 
         const succeed = () => {
@@ -1261,6 +1351,26 @@ export class WearableSyncService {
         };
         failSync = fail;
 
+        const finishForStopRequest = (reason: 'expiration' | 'time-budget') => {
+          if (settled) {
+            return;
+          }
+
+          stoppedForTimeBudget = true;
+          stopReason = reason;
+          historyIntakeClosed = true;
+          closeHistorySubscriptions();
+          onProgress?.({
+            status: 'syncing',
+            message:
+              reason === 'expiration'
+                ? `Background sync window expired. Finishing ${importedReadings} readings already received...`
+                : `Background sync window is closing. Finishing ${importedReadings} readings already received...`,
+            importedReadings,
+          });
+          succeed();
+        };
+
         const watchdogTimer = setInterval(() => {
           const timeoutError = watchdog.getTimeoutError({
             importedReadings,
@@ -1270,9 +1380,28 @@ export class WearableSyncService {
             fail(timeoutError);
           }
         }, 1000);
+        budgetTimer =
+          budgetDelayMs === null
+            ? null
+            : setTimeout(() => {
+                finishForStopRequest('time-budget');
+              }, budgetDelayMs);
+
+        abortListener = () => {
+          finishForStopRequest('expiration');
+        };
+        if (options?.abortSignal?.aborted) {
+          finishForStopRequest('expiration');
+        } else {
+          options?.abortSignal?.addEventListener('abort', abortListener, { once: true });
+        }
 
         const monitor = (characteristic: string, assembler: PacketAssembler) =>
           device!.monitorCharacteristicForService(WEARABLE_SERVICE_UUID, characteristic, (error, value) => {
+            if (historyIntakeClosed) {
+              return;
+            }
+
             if (error) {
               fail(error);
               return;
@@ -1287,6 +1416,7 @@ export class WearableSyncService {
             for (const frame of frames) {
               const parsed = parseNotification(frame);
               this.recordLiveEvent(parsed, onLiveEvent);
+              void this.notifyForWearableNotification(parsed, resolvedDeviceId, resolvedDeviceName).catch(() => {});
 
               if (writeFailure) {
                 fail(writeFailure);
@@ -1405,6 +1535,9 @@ export class WearableSyncService {
 
       await this.sendCommand(device, helloHarvardPacket());
       await this.sendCommand(device, setClockPacket(Math.floor(Date.now() / 1000)));
+      if (!stoppedForTimeBudget) {
+        await this.rearmEnabledSleepAlarm(device).catch(() => null);
+      }
       await this.sendCommand(device, getNamePacket());
       await this.sendCommand(device, versionInfoPacket());
       await this.sendCommand(device, toggleR7DataCollectionPacket(false));
@@ -1413,8 +1546,12 @@ export class WearableSyncService {
 
       onProgress?.({ status: 'syncing', message: 'Requesting wearable history...' });
       historyRequestedAtMs = Date.now();
-      await this.sendCommand(device, historyStartPacket());
+      if (!stoppedForTimeBudget) {
+        await this.sendCommand(device, historyStartPacket());
+      }
       await completion;
+      historyIntakeClosed = true;
+      closeHistorySubscriptions();
 
       await queueWrite(async () => {
         await drainPendingHistoryRows();
@@ -1444,12 +1581,19 @@ export class WearableSyncService {
         importedReadings,
         error: null,
       }).catch(() => {});
-      onProgress?.({ status: 'complete', message: `Sync complete. Imported ${importedReadings} readings.`, importedReadings });
+      onProgress?.({
+        status: 'complete',
+        message: stoppedForTimeBudget
+          ? `Background sync paused safely after importing ${importedReadings} readings.`
+          : `Sync complete. Imported ${importedReadings} readings.`,
+        importedReadings,
+      });
       await recordSyncImportSummary(this.db, summarizeSyncPerf('success')).catch(() => {});
       return {
         status: 'success',
         importedReadings,
         completedAt,
+        reason: stopReason ?? undefined,
       };
     } catch (error) {
       const message = formatBleError(error);
@@ -1478,9 +1622,7 @@ export class WearableSyncService {
       }).catch(() => {});
       await commandQueue.catch(() => {});
 
-      for (const subscription of subscriptions) {
-        subscription.remove();
-      }
+      closeHistorySubscriptions();
 
       if (device) {
         try {
@@ -1564,6 +1706,8 @@ export class WearableSyncService {
     if (batteryPercent === null) {
       return null;
     }
+
+    void notifyForWearableBatteryLevelAsync(this.db, deviceId, resolveScanDeviceName(device), batteryPercent).catch(() => {});
 
     await this.db.runAsync(
       'UPDATE device_state SET battery_percent = ?, last_seen_at = ? WHERE id = ?',

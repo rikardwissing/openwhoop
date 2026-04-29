@@ -209,6 +209,10 @@ export async function initializeDatabase(db: SQLiteDatabase) {
       target_wake_minutes INTEGER NOT NULL,
       alarm_enabled INTEGER NOT NULL DEFAULT 0,
       alarm_minutes INTEGER,
+      alarm_schedule_kind TEXT NOT NULL DEFAULT 'recurring',
+      alarm_weekday_mask INTEGER NOT NULL DEFAULT 127,
+      alarm_wake_mode TEXT NOT NULL DEFAULT 'exact_time',
+      alarm_one_off_at TEXT,
       updated_at TEXT NOT NULL
     );
 
@@ -414,6 +418,22 @@ export async function initializeDatabase(db: SQLiteDatabase) {
 
   if (!sleepPreferenceColumnNames.has('alarm_minutes')) {
     await db.execAsync('ALTER TABLE sleep_preferences ADD COLUMN alarm_minutes INTEGER;');
+  }
+
+  if (!sleepPreferenceColumnNames.has('alarm_schedule_kind')) {
+    await db.execAsync("ALTER TABLE sleep_preferences ADD COLUMN alarm_schedule_kind TEXT NOT NULL DEFAULT 'recurring';");
+  }
+
+  if (!sleepPreferenceColumnNames.has('alarm_weekday_mask')) {
+    await db.execAsync('ALTER TABLE sleep_preferences ADD COLUMN alarm_weekday_mask INTEGER NOT NULL DEFAULT 127;');
+  }
+
+  if (!sleepPreferenceColumnNames.has('alarm_wake_mode')) {
+    await db.execAsync("ALTER TABLE sleep_preferences ADD COLUMN alarm_wake_mode TEXT NOT NULL DEFAULT 'exact_time';");
+  }
+
+  if (!sleepPreferenceColumnNames.has('alarm_one_off_at')) {
+    await db.execAsync('ALTER TABLE sleep_preferences ADD COLUMN alarm_one_off_at TEXT;');
   }
 
   const deviceStateColumns = await db.getAllAsync<{ name: string }>('PRAGMA table_info(device_state)');

@@ -21,6 +21,8 @@ import type { SleepStageInputRow } from '@/data/sqlite/sleepStages';
 import { DERIVED_DATA_SCHEMA_VERSION } from '@/db/schema';
 import type {
   ActivityReviewState,
+  AlarmScheduleKind,
+  AlarmWakeMode,
   ActivitySource,
   ActivitySummary,
   DashboardDayOption,
@@ -63,7 +65,23 @@ import {
   sustainedPeakBpm,
 } from '@/utils/heartRate';
 import { clamp, mean, median, stdDev } from '@/utils/math';
-import { BASE_SLEEP_NEED_MINUTES, SLEEP_TARGET_STEP_MINUTES, applyNapCreditToSleepDebt, calculateOptimalBedtimeMinutes, calculateSleepDebtMinutes, calculateSleepNeedMinutes, normalizeClockMinutes, roundClockMinutes } from '@/utils/sleepPlan';
+import {
+  ALARM_WEEKDAY_FULL_MASK,
+  BASE_SLEEP_NEED_MINUTES,
+  SLEEP_TARGET_STEP_MINUTES,
+  applyNapCreditToSleepDebt,
+  calculateOptimalBedtimeMinutes,
+  calculateSleepDebtMinutes,
+  calculateSleepNeedMinutes,
+  nextAlarmTargetDate,
+  normalizeAlarmScheduleKind,
+  normalizeAlarmWakeMode,
+  normalizeAlarmWeekdayMask,
+  normalizeClockMinutes,
+  resolveNextWearableAlarmDate,
+  roundClockMinutes,
+  type AlarmSettingsInput,
+} from '@/utils/sleepPlan';
 
 const NO_HISTORY_REASON = 'No local history yet. Sync the wearable from Settings to unlock this view.';
 const NO_SLEEP_REASON = 'No overnight sleep has been detected yet. Leave the wearable on long enough for a full sleep window.';
@@ -476,13 +494,22 @@ interface DeviceStateRow {
 }
 
 interface SleepPreferenceRow {
-  target_wake_minutes: number;
   alarm_enabled: number | null;
+  alarm_minutes: number | null;
+  alarm_one_off_at: string | null;
+  alarm_schedule_kind: string | null;
+  alarm_wake_mode: string | null;
+  alarm_weekday_mask: number | null;
+  target_wake_minutes: number;
 }
 
 interface SleepPreferences {
-  targetWakeMinutes: number;
+  alarmOneOffAt: string | null;
   alarmEnabled: boolean;
+  alarmScheduleKind: AlarmScheduleKind;
+  alarmWakeMode: AlarmWakeMode;
+  alarmWeekdayMask: number;
+  targetWakeMinutes: number;
 }
 
 interface DerivedDataStateRow {
@@ -1664,35 +1691,102 @@ function inferTargetWakeMinutes(sleeps: SleepCycleRecord[]) {
   return roundClockMinutes(mean(wakeTimes), SLEEP_TARGET_STEP_MINUTES);
 }
 
-async function loadSleepPreferences(db: SQLiteDatabase, sleeps: SleepCycleRecord[]): Promise<SleepPreferences> {
-  const row = await db.getFirstAsync<SleepPreferenceRow>(
-    'SELECT target_wake_minutes, alarm_enabled FROM sleep_preferences WHERE id = 1 LIMIT 1',
+function normalizeSleepPreferences(
+  row: SleepPreferenceRow | null,
+  fallbackTargetWakeMinutes: number,
+): SleepPreferences {
+  const targetWakeMinutes = roundClockMinutes(
+    normalizeClockMinutes(row?.target_wake_minutes ?? fallbackTargetWakeMinutes),
+    SLEEP_TARGET_STEP_MINUTES,
   );
 
-  const targetWakeMinutes = row
-    ? roundClockMinutes(row.target_wake_minutes, SLEEP_TARGET_STEP_MINUTES)
-    : inferTargetWakeMinutes(sleeps);
-
-  return {
+  const preferences: SleepPreferences = {
     targetWakeMinutes,
     alarmEnabled: row?.alarm_enabled === 1,
+    alarmScheduleKind: normalizeAlarmScheduleKind(row?.alarm_schedule_kind),
+    alarmWeekdayMask: normalizeAlarmWeekdayMask(row?.alarm_weekday_mask),
+    alarmWakeMode: normalizeAlarmWakeMode(row?.alarm_wake_mode),
+    alarmOneOffAt: row?.alarm_one_off_at ?? null,
   };
+
+  if (
+    preferences.alarmEnabled &&
+    preferences.alarmScheduleKind === 'one_off' &&
+    preferences.alarmOneOffAt
+  ) {
+    const alarmAt = parseSqliteDateTime(preferences.alarmOneOffAt);
+
+    if (Number.isFinite(alarmAt.getTime()) && alarmAt.getTime() <= Date.now()) {
+      return {
+        ...preferences,
+        alarmEnabled: false,
+        alarmOneOffAt: null,
+      };
+    }
+  }
+
+  return preferences;
+}
+
+async function loadStoredSleepPreferences(
+  db: SQLiteDatabase,
+  fallbackTargetWakeMinutes: number,
+): Promise<SleepPreferences> {
+  const row = await db.getFirstAsync<SleepPreferenceRow>(
+    `
+      SELECT
+        target_wake_minutes,
+        alarm_enabled,
+        alarm_minutes,
+        alarm_schedule_kind,
+        alarm_weekday_mask,
+        alarm_wake_mode,
+        alarm_one_off_at
+      FROM sleep_preferences
+      WHERE id = 1
+      LIMIT 1
+    `,
+  );
+
+  return normalizeSleepPreferences(row, fallbackTargetWakeMinutes);
+}
+
+async function loadSleepPreferences(db: SQLiteDatabase, sleeps: SleepCycleRecord[]): Promise<SleepPreferences> {
+  return loadStoredSleepPreferences(db, inferTargetWakeMinutes(sleeps));
 }
 
 async function persistSleepPreferences(db: SQLiteDatabase, preferences: SleepPreferences) {
   await db.runAsync(
     `
-      INSERT INTO sleep_preferences (id, target_wake_minutes, alarm_enabled, alarm_minutes, updated_at)
-      VALUES (1, ?, ?, ?, ?)
+      INSERT INTO sleep_preferences (
+        id,
+        target_wake_minutes,
+        alarm_enabled,
+        alarm_minutes,
+        alarm_schedule_kind,
+        alarm_weekday_mask,
+        alarm_wake_mode,
+        alarm_one_off_at,
+        updated_at
+      )
+      VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         target_wake_minutes = excluded.target_wake_minutes,
         alarm_enabled = excluded.alarm_enabled,
         alarm_minutes = excluded.alarm_minutes,
+        alarm_schedule_kind = excluded.alarm_schedule_kind,
+        alarm_weekday_mask = excluded.alarm_weekday_mask,
+        alarm_wake_mode = excluded.alarm_wake_mode,
+        alarm_one_off_at = excluded.alarm_one_off_at,
         updated_at = excluded.updated_at
     `,
     preferences.targetWakeMinutes,
     preferences.alarmEnabled ? 1 : 0,
     preferences.targetWakeMinutes,
+    preferences.alarmScheduleKind,
+    preferences.alarmWeekdayMask,
+    preferences.alarmWakeMode,
+    preferences.alarmOneOffAt,
     formatSqliteDateTime(new Date()),
   );
 }
@@ -1704,6 +1798,7 @@ function buildSleepPlan(
   now = new Date(),
 ): SleepPlan {
   const completeSleeps = completeSleepCycles(sleeps);
+  const latestInProgressSleep = sleeps.filter((sleep) => sleep.isInProgress).at(-1) ?? null;
   const latestSleep = completeSleeps.at(-1) ?? null;
   const recentSleepDurations = completeSleeps.map((sleep) => sleep.asleepMinutes ?? minutesBetween(sleep.start, sleep.end));
   const rawSleepDebtMinutes = calculateSleepDebtMinutes(recentSleepDurations);
@@ -1718,6 +1813,15 @@ function buildSleepPlan(
   const sleepDebtMinutes = applyNapCreditToSleepDebt(rawSleepDebtMinutes, napCreditMinutes);
   const sleepNeedMinutes = BASE_SLEEP_NEED_MINUTES + sleepDebtMinutes;
   const optimalBedtimeMinutes = calculateOptimalBedtimeMinutes(preferences.targetWakeMinutes, sleepNeedMinutes);
+  const nextAlarmAt = resolveNextWearableAlarmDate(
+    {
+      ...preferences,
+      alarmOneOffAt: preferences.alarmOneOffAt ? parseSqliteDateTime(preferences.alarmOneOffAt) : null,
+      inProgressSleepStart: latestInProgressSleep?.start ?? null,
+      sleepNeedMinutes,
+    },
+    now,
+  );
 
   return {
     targetWakeMinutes: preferences.targetWakeMinutes,
@@ -1728,6 +1832,11 @@ function buildSleepPlan(
     sleepDebtMinutes,
     napCreditMinutes,
     alarmEnabled: preferences.alarmEnabled,
+    alarmScheduleKind: preferences.alarmScheduleKind,
+    alarmWeekdayMask: preferences.alarmWeekdayMask,
+    alarmWakeMode: preferences.alarmWakeMode,
+    alarmOneOffAt: preferences.alarmOneOffAt,
+    nextAlarmAt: nextAlarmAt ? formatSqliteDateTime(nextAlarmAt) : null,
   };
 }
 
@@ -2823,6 +2932,11 @@ function buildEmptyTodayOverview(now: Date, _deviceState: DeviceStateRow | null)
       sleepDebtMinutes: 0,
       napCreditMinutes: 0,
       alarmEnabled: false,
+      alarmScheduleKind: 'recurring',
+      alarmWeekdayMask: ALARM_WEEKDAY_FULL_MASK,
+      alarmWakeMode: 'exact_time',
+      alarmOneOffAt: null,
+      nextAlarmAt: null,
     },
     sleepCard: emptyHistory.sleepCard,
     strainCard: emptyHistory.strainCard,
@@ -5172,6 +5286,78 @@ async function loadRecentSleepCyclesForDashboard(db: SQLiteDatabase, limit: numb
   return rows.reverse();
 }
 
+export async function resolveNextWearableAlarmDateFromDatabase(
+  db: SQLiteDatabase,
+  now = new Date(),
+) {
+  await expirePastOneOffSleepAlarmFromDatabase(db, now);
+
+  const sleepCycles = await loadRecentSleepCyclesForDashboard(db, 15);
+  const [stageRecords, scoreNapActivities] = await Promise.all([
+    loadSleepStageRecordsForIds(db, sleepCycles.map((sleep) => sleep.sleepId)),
+    loadNapActivitiesForSleepScoreRange(db, sleepCycles),
+  ]);
+  const sleepSummaries = buildSleepStageSummaryMap(sleepCycles, stageRecords);
+  const rescoredSleepCycles = rescoreSleepCyclesWithSummaries(sleepCycles, sleepSummaries, scoreNapActivities);
+  const completeRescoredSleepCycles = completeSleepCycles(rescoredSleepCycles);
+  const preferences = await loadSleepPreferences(db, completeRescoredSleepCycles);
+  const latestCompleteSleep = completeRescoredSleepCycles.at(-1) ?? null;
+  const napActivities = latestCompleteSleep
+    ? await queryActivities(
+        db,
+        `
+          SELECT ${ACTIVITY_SELECT_COLUMNS}
+          FROM activities
+          WHERE activity = 'Nap' AND start >= ? AND review_state <> 'dismissed'
+          ORDER BY start ASC
+        `,
+        [formatSqliteDateTime(latestCompleteSleep.end)],
+      )
+    : [];
+  const sleepPlan = buildSleepPlan(preferences, rescoredSleepCycles, napActivities, now);
+
+  return sleepPlan.nextAlarmAt ? parseSqliteDateTime(sleepPlan.nextAlarmAt) : null;
+}
+
+export async function expirePastOneOffSleepAlarmFromDatabase(
+  db: SQLiteDatabase,
+  now = new Date(),
+) {
+  await db.runAsync(
+    `
+      UPDATE sleep_preferences
+      SET alarm_enabled = 0,
+          alarm_one_off_at = NULL,
+          updated_at = ?
+      WHERE id = 1
+        AND alarm_enabled = 1
+        AND alarm_schedule_kind = 'one_off'
+        AND alarm_one_off_at IS NOT NULL
+        AND alarm_one_off_at <= ?
+    `,
+    formatSqliteDateTime(now),
+    formatSqliteDateTime(now),
+  );
+}
+
+export async function markOneOffSleepAlarmExecutedFromDatabase(
+  db: SQLiteDatabase,
+  executedAt = new Date(),
+) {
+  await db.runAsync(
+    `
+      UPDATE sleep_preferences
+      SET alarm_enabled = 0,
+          alarm_one_off_at = NULL,
+          updated_at = ?
+      WHERE id = 1
+        AND alarm_enabled = 1
+        AND alarm_schedule_kind = 'one_off'
+    `,
+    formatSqliteDateTime(executedAt),
+  );
+}
+
 async function loadDashboardDayKeys(db: SQLiteDatabase, limit: number) {
   const rows = await withAggregateReadLock(db, () =>
     db.getAllAsync<{ day: string }>(
@@ -6990,7 +7176,7 @@ async function buildTodayOverview(db: SQLiteDatabase): Promise<TodayOverview> {
   const restingHr = personalizeRestingHr(completeRescoredSleepCycles, dailyMinima);
   const maxHr = personalizeMaxHrFromObservedPeak(heartState.observed_peak_bpm, restingHr);
   const recovery = estimateRecoveryScoreFromSleeps(latestCompleteSleep, completeRescoredSleepCycles, heartState.latest_stress);
-  const tonightPlan = buildSleepPlan(sleepPreferences, completeRescoredSleepCycles, napActivities);
+  const tonightPlan = buildSleepPlan(sleepPreferences, rescoredSleepCycles, napActivities);
   const sleepCard = buildDashboardSleepCard(latestSleep, stageRecords);
   const dayStatsByDay = new Map(heartDayStats.map((stat) => [stat.day, stat]));
   const todayStrain = dayStatsByDay.get(selectedDayKey)?.strainScore ?? null;
@@ -8110,22 +8296,48 @@ export class SQLiteHealthRepository implements HealthRepository {
         normalizeClockMinutes(minutes),
         SLEEP_TARGET_STEP_MINUTES,
       );
+      const current = await loadStoredSleepPreferences(this.db, nextTargetWakeMinutes);
       await persistSleepPreferences(this.db, {
+        ...current,
         targetWakeMinutes: nextTargetWakeMinutes,
         alarmEnabled: false,
+        alarmOneOffAt: null,
       });
     });
   }
 
-  async enableAlarm(targetWakeMinutes: number): Promise<void> {
+  async enableAlarm(settings: AlarmSettingsInput): Promise<void> {
     await this.runRepositoryMutation(async () => {
       const nextTargetWakeMinutes = roundClockMinutes(
-        normalizeClockMinutes(targetWakeMinutes),
+        normalizeClockMinutes(settings.targetWakeMinutes),
         SLEEP_TARGET_STEP_MINUTES,
       );
+      const alarmScheduleKind = normalizeAlarmScheduleKind(settings.alarmScheduleKind);
+      const alarmWeekdayMask = Math.trunc(settings.alarmWeekdayMask) & ALARM_WEEKDAY_FULL_MASK;
+
+      if (alarmScheduleKind === 'recurring' && alarmWeekdayMask === 0) {
+        throw new Error('Select at least one wake day before enabling a recurring alarm.');
+      }
+
+      const alarmOneOffAt =
+        alarmScheduleKind === 'one_off'
+          ? nextAlarmTargetDate(
+              {
+                ...settings,
+                alarmScheduleKind,
+                alarmWeekdayMask: normalizeAlarmWeekdayMask(alarmWeekdayMask),
+                targetWakeMinutes: nextTargetWakeMinutes,
+              },
+              new Date(),
+            )
+          : null;
       await persistSleepPreferences(this.db, {
         targetWakeMinutes: nextTargetWakeMinutes,
         alarmEnabled: true,
+        alarmScheduleKind,
+        alarmWeekdayMask: normalizeAlarmWeekdayMask(alarmWeekdayMask),
+        alarmWakeMode: normalizeAlarmWakeMode(settings.alarmWakeMode),
+        alarmOneOffAt: alarmOneOffAt ? formatSqliteDateTime(alarmOneOffAt) : null,
       });
     });
   }
@@ -8136,9 +8348,12 @@ export class SQLiteHealthRepository implements HealthRepository {
         normalizeClockMinutes(targetWakeMinutes),
         SLEEP_TARGET_STEP_MINUTES,
       );
+      const current = await loadStoredSleepPreferences(this.db, nextTargetWakeMinutes);
       await persistSleepPreferences(this.db, {
+        ...current,
         targetWakeMinutes: nextTargetWakeMinutes,
         alarmEnabled: false,
+        alarmOneOffAt: null,
       });
     });
   }
@@ -8161,7 +8376,7 @@ export class SQLiteHealthRepository implements HealthRepository {
         const preferences = await loadSleepPreferences(this.db, completeRescoredSleepCycles);
         const latestSleepForPlan = completeRescoredSleepCycles.at(-1) ?? null;
         const napActivities = latestSleepForPlan ? await this.loadNapActivitiesSince(latestSleepForPlan.end) : [];
-        const sleepPlan = buildSleepPlan(preferences, completeRescoredSleepCycles, napActivities);
+        const sleepPlan = buildSleepPlan(preferences, rescoredSleepCycles, napActivities);
         const sessions = rescoredSleepCycles.slice(-rangeDays(range)).reverse();
         const completeSessionsForStats = completeRescoredSleepCycles.slice(-rangeDays(range));
         const latestSleep = sessions[0] ?? null;
@@ -8207,6 +8422,8 @@ export class SQLiteHealthRepository implements HealthRepository {
 
           return {
             id: session.id,
+            startAt: formatSqliteDateTime(session.start),
+            endAt: formatSqliteDateTime(session.end),
             dateLabel: formatShortDate(session.end),
             score: session.score,
             bedtime: formatClock(summary.start),

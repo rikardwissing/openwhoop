@@ -9,8 +9,46 @@ import { useRefreshHealthData } from '@/providers/HealthDataProvider';
 import { useWearableSyncActions, useWearableSyncState } from '@/providers/WearableSyncProvider';
 import { syncSleepPreparationReminder } from '@/services/notifications/sleepPreparationReminder';
 import type { SleepPlan } from '@/types/health';
+import { formatClock, parseSqliteDateTime } from '@/utils/dateTime';
 import { formatDuration } from '@/utils/formatters';
-import { nextUpcomingClockDate } from '@/utils/sleepPlan';
+import {
+  ALARM_WEEKDAY_FULL_MASK,
+  isAlarmWeekdaySelected,
+  nextAlarmTargetDate,
+  resolveNextWearableAlarmDate,
+} from '@/utils/sleepPlan';
+
+const weekdayLabels = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const;
+
+function alarmScheduleSummary(plan: SleepPlan) {
+  if (plan.alarmScheduleKind === 'one_off') {
+    return 'One-off alarm';
+  }
+
+  const selectedDays = weekdayLabels.filter((_, index) => isAlarmWeekdaySelected(plan.alarmWeekdayMask, index));
+
+  if (selectedDays.length === weekdayLabels.length) {
+    return 'Recurring daily';
+  }
+
+  if (selectedDays.length === 0) {
+    return 'Recurring with no wake days';
+  }
+
+  return `Recurring ${selectedDays.join(', ')}`;
+}
+
+function alarmWakeModeSummary(plan: SleepPlan) {
+  switch (plan.alarmWakeMode) {
+    case 'score_or_time':
+      return '100% or time';
+    case 'score_only':
+      return 'Wait until 100%';
+    case 'exact_time':
+    default:
+      return 'Exact time';
+  }
+}
 
 export function TonightPlanCard({
   onOpenSleep,
@@ -27,6 +65,14 @@ export function TonightPlanCard({
   const [savingAlarm, setSavingAlarm] = useState(false);
   const [alarmError, setAlarmError] = useState<string | null>(null);
   const [reminderNotice, setReminderNotice] = useState<string | null>(null);
+  const alarmSettings = {
+    alarmScheduleKind: plan.alarmScheduleKind,
+    alarmWakeMode: plan.alarmWakeMode,
+    alarmWeekdayMask: plan.alarmWeekdayMask & ALARM_WEEKDAY_FULL_MASK,
+    targetWakeMinutes: plan.targetWakeMinutes,
+  };
+  const nextDisplayedAlarmAt = plan.nextAlarmAt ? parseSqliteDateTime(plan.nextAlarmAt) : null;
+  const alarmSummary = `${alarmScheduleSummary(plan)} · ${alarmWakeModeSummary(plan)}`;
 
   useEffect(() => {
     setAlarmEnabled(plan.alarmEnabled);
@@ -47,7 +93,7 @@ export function TonightPlanCard({
 
     try {
       if (nextAlarmEnabled) {
-        await repository.enableAlarm(plan.targetWakeMinutes);
+        await repository.enableAlarm(alarmSettings);
         savedLocally = true;
         const reminderResult = await syncSleepPreparationReminder(
           {
@@ -66,7 +112,25 @@ export function TonightPlanCard({
         }
 
         if (deviceState.id) {
-          await setAlarm(Math.floor(nextUpcomingClockDate(plan.targetWakeMinutes).getTime() / 1000));
+          const oneOffAlarmAt =
+            plan.alarmScheduleKind === 'one_off'
+              ? nextAlarmTargetDate(alarmSettings)
+              : plan.alarmOneOffAt
+                ? parseSqliteDateTime(plan.alarmOneOffAt)
+                : null;
+          const alarmAt = resolveNextWearableAlarmDate({
+            ...alarmSettings,
+            alarmEnabled: true,
+            alarmOneOffAt: oneOffAlarmAt,
+            inProgressSleepStart: null,
+            sleepNeedMinutes: plan.sleepNeedMinutes,
+          });
+
+          if (alarmAt) {
+            await setAlarm(Math.floor(alarmAt.getTime() / 1000));
+          } else {
+            await disableAlarm();
+          }
         }
       } else {
         await repository.disableAlarm(plan.targetWakeMinutes);
@@ -115,8 +179,12 @@ export function TonightPlanCard({
 
       <Text style={styles.caption}>
         {alarmEnabled
-          ? 'Alarm is active for your current wake target, with a quiet phone reminder before bed.'
-          : 'Enable the alarm to push your current wake target to the wearable and schedule the phone reminder.'}
+          ? `${alarmSummary}. ${
+              nextDisplayedAlarmAt
+                ? `Next wearable alarm ${formatClock(nextDisplayedAlarmAt)}.`
+                : 'Wearable will arm after sleep is detected and a 100% time can be projected.'
+            }`
+          : `${alarmSummary}. Open Sleep to edit schedule and wake mode, then enable to push the next computed alarm.`}
       </Text>
 
       <View style={styles.actions}>

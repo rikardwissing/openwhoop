@@ -1,8 +1,9 @@
 import { Ionicons } from '@expo/vector-icons';
-import { Image } from 'react-native';
+import { Image, StyleSheet, View } from 'react-native';
 import { Tabs } from 'expo-router';
 
 import { brandMark } from '@/constants/assets';
+import { LoadingState } from '@/components/ui/ScreenState';
 import { colors, typography } from '@/constants/theme';
 import { PairWearableScreen } from '@/screens/PairWearableScreen';
 import { useWearableSyncState } from '@/providers/WearableSyncProvider';
@@ -39,7 +40,11 @@ export default function TabLayout() {
   const { deviceState, isReady } = useWearableSyncState();
 
   if (!isReady) {
-    return null;
+    return (
+      <View style={styles.loadingRoot}>
+        <LoadingState label="Preparing wearable data..." />
+      </View>
+    );
   }
 
   if (!deviceState.id) {
@@ -128,3 +133,11 @@ export default function TabLayout() {
     </Tabs>
   );
 }
+
+const styles = StyleSheet.create({
+  loadingRoot: {
+    backgroundColor: colors.background,
+    flex: 1,
+    justifyContent: 'center',
+  },
+});

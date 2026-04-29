@@ -33,7 +33,18 @@ import { formatAxisTime, formatClockMinutes } from '@/utils/dateTime';
 import { describeRecovery } from '@/utils/formatters';
 import { sustainedPeakBpm } from '@/utils/heartRate';
 import { buildHeartCardDataFromWindow } from '@/utils/heartTimeline';
-import { BASE_SLEEP_NEED_MINUTES, calculateOptimalBedtimeMinutes, calculateSleepDebtMinutes, roundClockMinutes } from '@/utils/sleepPlan';
+import {
+  ALARM_WEEKDAY_FULL_MASK,
+  BASE_SLEEP_NEED_MINUTES,
+  calculateOptimalBedtimeMinutes,
+  calculateSleepDebtMinutes,
+  nextAlarmTargetDate,
+  normalizeAlarmScheduleKind,
+  normalizeAlarmWakeMode,
+  normalizeAlarmWeekdayMask,
+  roundClockMinutes,
+  type AlarmSettingsInput,
+} from '@/utils/sleepPlan';
 
 function delay(ms: number) {
   return new Promise((resolve) => {
@@ -282,7 +293,7 @@ function buildInsights(selectedIndex: number, strain: number | null): DashboardI
   ];
 }
 
-interface MockSleepRecord extends SleepSession {
+interface MockSleepRecord extends Omit<SleepSession, 'startAt' | 'endAt'> {
   end: Date;
   endDayKey: string;
   start: Date;
@@ -504,28 +515,53 @@ function buildMockSleepRecord(start: Date, end: Date): MockSleepRecord {
   };
 }
 
+function toSleepSession(session: MockSleepRecord): SleepSession {
+  return {
+    ...session,
+    startAt: session.start.toISOString(),
+    endAt: session.end.toISOString(),
+  };
+}
+
 function parseSleepMarkerId(sleepId: string) {
   const match = /^sleep-(.+)$/.exec(sleepId);
   return match?.[1] ?? null;
 }
 
-function buildSleepPlan(sleepSessions: readonly MockSleepRecord[], targetWakeMinutes: number, alarmEnabled: boolean): SleepPlan {
+function buildSleepPlan(
+  sleepSessions: readonly MockSleepRecord[],
+  alarmSettings: {
+    alarmEnabled: boolean;
+    alarmOneOffAt: string | null;
+    alarmScheduleKind: SleepPlan['alarmScheduleKind'];
+    alarmWakeMode: SleepPlan['alarmWakeMode'];
+    alarmWeekdayMask: number;
+    targetWakeMinutes: number;
+  },
+): SleepPlan {
   const chronologicalSessions = [...sleepSessions].reverse();
   const sleepDebtMinutes = calculateSleepDebtMinutes(
     chronologicalSessions.map((session) => session.durationMinutes),
   );
   const sleepNeedMinutes = BASE_SLEEP_NEED_MINUTES + sleepDebtMinutes;
-  const optimalBedtimeMinutes = calculateOptimalBedtimeMinutes(targetWakeMinutes, sleepNeedMinutes);
+  const optimalBedtimeMinutes = calculateOptimalBedtimeMinutes(alarmSettings.targetWakeMinutes, sleepNeedMinutes);
 
   return {
-    targetWakeMinutes,
-    targetWakeTime: formatClockMinutes(targetWakeMinutes),
+    targetWakeMinutes: alarmSettings.targetWakeMinutes,
+    targetWakeTime: formatClockMinutes(alarmSettings.targetWakeMinutes),
     optimalBedtimeMinutes,
     optimalBedtime: formatClockMinutes(optimalBedtimeMinutes),
     sleepNeedMinutes,
     sleepDebtMinutes,
     napCreditMinutes: 0,
-    alarmEnabled,
+    alarmEnabled: alarmSettings.alarmEnabled,
+    alarmScheduleKind: alarmSettings.alarmScheduleKind,
+    alarmWeekdayMask: alarmSettings.alarmWeekdayMask,
+    alarmWakeMode: alarmSettings.alarmWakeMode,
+    alarmOneOffAt: alarmSettings.alarmOneOffAt,
+    nextAlarmAt: alarmSettings.alarmEnabled && alarmSettings.alarmWakeMode !== 'score_only'
+      ? (alarmSettings.alarmOneOffAt ?? nextAlarmTargetDate(alarmSettings)?.toISOString() ?? null)
+      : null,
   };
 }
 
@@ -536,7 +572,7 @@ function buildTrendMetric(metric: MetricSeries, id: TrendMetric['id']): TrendMet
   };
 }
 
-function buildMockSleepMarkerDetails(session: SleepSession): HeartIntradayMarker['details'] {
+function buildMockSleepMarkerDetails(session: MockSleepRecord): HeartIntradayMarker['details'] {
   return {
     durationMinutes: session.durationMinutes,
     score: session.score,
@@ -621,6 +657,10 @@ function activitiesOverlap(left: MockActivityRecord, right: MockActivityRecord) 
 export class MockHealthRepository implements HealthRepository {
   private targetWakeMinutes = 7 * 60 + 45;
   private alarmEnabled = true;
+  private alarmScheduleKind: SleepPlan['alarmScheduleKind'] = 'recurring';
+  private alarmWeekdayMask = ALARM_WEEKDAY_FULL_MASK;
+  private alarmWakeMode: SleepPlan['alarmWakeMode'] = 'exact_time';
+  private alarmOneOffAt: string | null = null;
   private manualActivityCount = 0;
   private activities: MockActivityRecord[] = activitySeedRecords.map((activity) => ({ ...activity }));
   private sleepSessions: MockSleepRecord[] = sessionSeeds.map((session) => ({
@@ -691,6 +731,17 @@ export class MockHealthRepository implements HealthRepository {
       : [];
 
     return [...sleepMarkers, ...activityMarkers];
+  }
+
+  private getAlarmSettingsForPlan() {
+    return {
+      targetWakeMinutes: this.targetWakeMinutes,
+      alarmEnabled: this.alarmEnabled,
+      alarmScheduleKind: this.alarmScheduleKind,
+      alarmWeekdayMask: this.alarmWeekdayMask,
+      alarmWakeMode: this.alarmWakeMode,
+      alarmOneOffAt: this.alarmOneOffAt,
+    };
   }
 
   private getActivityById(activityId: string) {
@@ -920,7 +971,7 @@ export class MockHealthRepository implements HealthRepository {
       0,
       selectedIndex >= dashboardDayKeys.length - 2 ? 3 : selectedIndex >= dashboardDayKeys.length - 4 ? 2 : 1,
     );
-    const tonightPlan = buildSleepPlan(this.sleepSessions, this.targetWakeMinutes, this.alarmEnabled);
+    const tonightPlan = buildSleepPlan(this.sleepSessions, this.getAlarmSettingsForPlan());
 
     return {
       layoutVersion: 2,
@@ -1022,8 +1073,8 @@ export class MockHealthRepository implements HealthRepository {
       wakeConsistency: 91,
       scoreTrend: takeTail(series(scoreLabels, sleepScores), range),
       durationTrend: takeTail(series(scoreLabels, sleepDurations), range),
-      sessions: this.sleepSessions.slice(0, 3),
-      sleepPlan: buildSleepPlan(this.sleepSessions, this.targetWakeMinutes, this.alarmEnabled),
+      sessions: this.sleepSessions.slice(0, 3).map(toSleepSession),
+      sleepPlan: buildSleepPlan(this.sleepSessions, this.getAlarmSettingsForPlan()),
     };
   }
 
@@ -1394,11 +1445,31 @@ export class MockHealthRepository implements HealthRepository {
     await this.wait();
     this.targetWakeMinutes = roundClockMinutes(minutes);
     this.alarmEnabled = false;
+    this.alarmOneOffAt = null;
   }
 
-  async enableAlarm(targetWakeMinutes: number): Promise<void> {
+  async enableAlarm(settings: AlarmSettingsInput): Promise<void> {
     await this.wait();
-    this.targetWakeMinutes = roundClockMinutes(targetWakeMinutes);
+    const alarmScheduleKind = normalizeAlarmScheduleKind(settings.alarmScheduleKind);
+    const alarmWeekdayMask = Math.trunc(settings.alarmWeekdayMask) & ALARM_WEEKDAY_FULL_MASK;
+
+    if (alarmScheduleKind === 'recurring' && alarmWeekdayMask === 0) {
+      throw new Error('Select at least one wake day before enabling a recurring alarm.');
+    }
+
+    this.targetWakeMinutes = roundClockMinutes(settings.targetWakeMinutes);
+    this.alarmScheduleKind = alarmScheduleKind;
+    this.alarmWeekdayMask = normalizeAlarmWeekdayMask(alarmWeekdayMask);
+    this.alarmWakeMode = normalizeAlarmWakeMode(settings.alarmWakeMode);
+    this.alarmOneOffAt =
+      alarmScheduleKind === 'one_off'
+        ? nextAlarmTargetDate({
+            ...settings,
+            alarmScheduleKind,
+            alarmWeekdayMask: this.alarmWeekdayMask,
+            targetWakeMinutes: this.targetWakeMinutes,
+          })?.toISOString() ?? null
+        : null;
     this.alarmEnabled = true;
   }
 
@@ -1406,5 +1477,6 @@ export class MockHealthRepository implements HealthRepository {
     await this.wait();
     this.targetWakeMinutes = roundClockMinutes(targetWakeMinutes);
     this.alarmEnabled = false;
+    this.alarmOneOffAt = null;
   }
 }

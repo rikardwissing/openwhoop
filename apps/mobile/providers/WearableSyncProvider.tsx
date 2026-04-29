@@ -15,6 +15,7 @@ import { AppState, type AppStateStatus } from 'react-native';
 import { openAppDatabaseAsync } from '@/db/appDatabase';
 import { useHealthRepository, useRefreshHealthData } from '@/providers/HealthDataProvider';
 import { useAppDatabaseControls } from '@/providers/AppDatabaseProvider';
+import { registerBackgroundDeviceSyncTaskAsync } from '@/services/background/backgroundDeviceSyncTask';
 import { getBackgroundSyncState } from '@/services/background/backgroundSyncState';
 import { WearableSyncService } from '@/services/ble/WearableSyncService';
 import {
@@ -334,6 +335,16 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
 
     void refreshBackgroundState({ refreshHealth: true });
   }, [appState, deviceState.id, refreshBackgroundState]);
+
+  useEffect(() => {
+    if (!isReady || !deviceState.id) {
+      return;
+    }
+
+    void registerBackgroundDeviceSyncTaskAsync({
+      requestNotificationPermission: true,
+    }).catch(() => {});
+  }, [deviceState.id, isReady]);
 
   useEffect(() => {
     let cancelled = false;

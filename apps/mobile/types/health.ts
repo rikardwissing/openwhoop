@@ -3,6 +3,8 @@ export type AccentTone = 'green' | 'cyan' | 'alert' | 'heart' | 'violet';
 export type MetricTone = 'good' | 'caution' | 'alert' | 'neutral';
 export type SleepStage = 'awake' | 'rem' | 'deep' | 'light';
 export type SleepCompletionStatus = 'complete' | 'in_progress';
+export type AlarmScheduleKind = 'one_off' | 'recurring';
+export type AlarmWakeMode = 'exact_time' | 'score_or_time' | 'score_only';
 export type ActivitySource = 'detected' | 'manual';
 export type ActivityReviewState = 'none' | 'confirmed' | 'relabelled' | 'dismissed';
 export type PartialDataReason = string;
@@ -156,6 +158,8 @@ export interface TodayOverview {
 
 export interface SleepSession extends EstimatedValueMeta {
   id: string;
+  startAt: string;
+  endAt: string;
   dateLabel: string;
   score: number | null;
   bedtime: string;
@@ -183,6 +187,11 @@ export interface SleepPlan {
   sleepDebtMinutes: number;
   napCreditMinutes: number;
   alarmEnabled: boolean;
+  alarmScheduleKind: AlarmScheduleKind;
+  alarmWeekdayMask: number;
+  alarmWakeMode: AlarmWakeMode;
+  alarmOneOffAt: string | null;
+  nextAlarmAt: string | null;
 }
 
 export interface SleepHistoryData extends EstimatedValueMeta {

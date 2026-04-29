@@ -12,6 +12,7 @@ import type {
   TrendData,
   WellnessData,
 } from '@/types/health';
+import type { AlarmSettingsInput } from '@/utils/sleepPlan';
 
 export type HealthDataScope = 'all' | 'sleep' | 'heart' | 'dashboard' | 'wellness' | 'trends' | 'derived';
 export type HealthRefreshScope = Exclude<HealthDataScope, 'all'> | 'all';
@@ -42,6 +43,6 @@ export interface HealthRepository {
   dismissActivity(activityId: string): Promise<void>;
   relabelActivity(activityId: string, activity: ManualActivityKind): Promise<void>;
   setTargetWakeMinutes(minutes: number): Promise<void>;
-  enableAlarm(targetWakeMinutes: number): Promise<void>;
+  enableAlarm(settings: AlarmSettingsInput): Promise<void>;
   disableAlarm(targetWakeMinutes: number): Promise<void>;
 }

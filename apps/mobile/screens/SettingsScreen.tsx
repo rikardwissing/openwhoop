@@ -25,7 +25,13 @@ import {
   useWearableSyncState,
 } from '@/providers/WearableSyncProvider';
 import { exportAndShareDatabaseSnapshot } from '@/services/databaseExport';
-import { runSimpleLogBackgroundTaskAsync } from '@/services/background/simpleLogBackgroundTask';
+import {
+  BACKGROUND_DEVICE_SYNC_INTERVAL_MINUTES,
+  BACKGROUND_DEVICE_SYNC_TIME_BUDGET_MS,
+  isBackgroundDeviceSyncTaskRegisteredAsync,
+  registerBackgroundDeviceSyncTaskAsync,
+  runBackgroundDeviceSyncNowAsync,
+} from '@/services/background/backgroundDeviceSyncTask';
 import {
   describeBatteryStatus,
   describeChargingState,
@@ -310,17 +316,24 @@ export function SettingsScreen() {
     status: 'idle',
     message: 'Delete pending detected activities and rerun local activity detection across the history already on this phone.',
   });
-  const [backgroundTaskState, setBackgroundTaskState] = useState<{
+  const [backgroundDeviceSyncRegistrationState, setBackgroundDeviceSyncRegistrationState] = useState<{
+    status: 'checking' | 'registered' | 'not_registered' | 'error';
+    message: string;
+  }>({
+    status: 'checking',
+    message: 'Checking device sync task registration...',
+  });
+  const [backgroundDeviceSyncRunState, setBackgroundDeviceSyncRunState] = useState<{
     status: 'idle' | 'running' | 'success' | 'error';
     message: string;
   }>({
     status: 'idle',
-    message: 'Run the Expo background task worker and print a timestamped log entry.',
+    message: 'Run the bounded background sync path immediately for the selected wearable.',
   });
   const deviceBusy = isBlockingSyncStatus(progress.status);
   const maintenanceBusy = maintenanceState.status === 'running';
   const activityRescanBusy = activityRescanState.status === 'running';
-  const backgroundTaskBusy = backgroundTaskState.status === 'running';
+  const backgroundDeviceSyncBusy = backgroundDeviceSyncRunState.status === 'running';
   const batteryChipAccent = batteryAccent(deviceState.batteryPercent);
   const chargingChipAccent = chargingAccent(deviceState.chargingStatus);
   const wearChipAccent = wearAccent(deviceState.bodyStatus);
@@ -344,8 +357,94 @@ export function SettingsScreen() {
     clearDataState.status === 'running' ||
     maintenanceBusy ||
     activityRescanBusy;
+  const backgroundDeviceSyncDisabled =
+    !deviceState.id ||
+    progress.status === 'scanning' ||
+    deviceBusy ||
+    exportState.status === 'running' ||
+    performanceSweepState.status === 'running' ||
+    clearDataState.status === 'running' ||
+    maintenanceBusy ||
+    activityRescanBusy ||
+    backgroundDeviceSyncBusy;
   const latestSyncImportSummary = backgroundSyncState.lastSyncImportSummary;
   const latestPerformanceRun = performanceRuns[0] ?? null;
+
+  async function refreshBackgroundDeviceSyncRegistrationState() {
+    setBackgroundDeviceSyncRegistrationState({
+      status: 'checking',
+      message: 'Checking device sync task registration...',
+    });
+
+    try {
+      if (deviceState.id) {
+        await registerBackgroundDeviceSyncTaskAsync({
+          requestNotificationPermission: true,
+        });
+      }
+
+      const isRegistered = await isBackgroundDeviceSyncTaskRegisteredAsync();
+      const syncWindowMinutes = Math.round(BACKGROUND_DEVICE_SYNC_TIME_BUDGET_MS / 60_000);
+
+      setBackgroundDeviceSyncRegistrationState({
+        status: isRegistered ? 'registered' : 'not_registered',
+        message: isRegistered
+          ? `Registered with Expo BackgroundTask, minimum interval ${BACKGROUND_DEVICE_SYNC_INTERVAL_MINUTES} minutes, ${syncWindowMinutes} minute safe sync window.`
+          : deviceState.id
+            ? 'Not registered yet. Keep the app open briefly so Expo can accept the background task registration.'
+            : 'Not registered yet. Pair a wearable to register device background sync automatically.',
+      });
+    } catch (error) {
+      setBackgroundDeviceSyncRegistrationState({
+        status: 'error',
+        message: error instanceof Error ? error.message : 'Unable to check device sync task registration.',
+      });
+    }
+  }
+
+  useEffect(() => {
+    void refreshBackgroundDeviceSyncRegistrationState();
+  }, [deviceState.id]);
+
+  async function handleRunBackgroundDeviceSyncNow() {
+    setBackgroundDeviceSyncRunState({
+      status: 'running',
+      message: 'Running bounded background sync now...',
+    });
+
+    try {
+      const result = await runBackgroundDeviceSyncNowAsync();
+      const notificationMessage = result.notificationPermissionGranted
+        ? 'Local notifications are enabled for this run.'
+        : 'Notification permission is not granted, so no local sync or detection notification was sent.';
+      const detectionNotificationCount =
+        result.detectionNotifications.activityReadyCount +
+        result.detectionNotifications.sleepReadyCount +
+        result.detectionNotifications.sleepStartedCount;
+      const detectionMessage =
+        detectionNotificationCount > 0
+          ? `Sent ${detectionNotificationCount} detection ${detectionNotificationCount === 1 ? 'notification' : 'notifications'}.`
+          : result.processedDerivedRefresh
+            ? 'Checked derived sleep and activity detection.'
+            : '';
+
+      if (result.importedReadings > 0 || result.processedDerivedRefresh) {
+        refreshHealthData(['dashboard', 'sleep', 'heart', 'wellness', 'trends', 'derived']);
+      }
+
+      setBackgroundDeviceSyncRunState({
+        status: result.status === 'failed' ? 'error' : 'success',
+        message: `${result.message} ${notificationMessage}${detectionMessage ? ` ${detectionMessage}` : ''}`,
+      });
+    } catch (error) {
+      setBackgroundDeviceSyncRunState({
+        status: 'error',
+        message: error instanceof Error ? error.message : 'Unable to run background sync now.',
+      });
+    } finally {
+      await refreshBackgroundDeviceSyncRegistrationState();
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -565,32 +664,6 @@ export function SettingsScreen() {
     }
   }
 
-  async function handleRunBackgroundLogTask() {
-    setBackgroundTaskState({
-      status: 'running',
-      message: 'Registering the Expo background task...',
-    });
-
-    try {
-      const result = await runSimpleLogBackgroundTaskAsync();
-      const notificationMessage = result.notificationPermissionGranted
-        ? 'A local notification is scheduled from the task run.'
-        : 'Notification permission is not granted, so only the log entry was produced.';
-      setBackgroundTaskState({
-        status: 'success',
-        message:
-          result.mode === 'expo-worker'
-            ? `Expo background task worker triggered${result.triggered ? '' : ' without a run confirmation'}. Check the Metro or native logs for the timestamped entry. ${notificationMessage}`
-            : `Simple background task log printed at ${result.loggedAt ?? 'the current time'}. ${notificationMessage}`,
-      });
-    } catch (error) {
-      setBackgroundTaskState({
-        status: 'error',
-        message: error instanceof Error ? error.message : 'Unable to run the simple background task.',
-      });
-    }
-  }
-
   async function confirmClearAllData() {
     if (!databaseControls) {
       setClearDataState({
@@ -770,20 +843,33 @@ export function SettingsScreen() {
       </GlassCard>
 
       <GlassCard accentColor={colors.violet}>
-        <SectionHeader title="Background Task" trailing={backgroundTaskState.status === 'running' ? 'Running' : 'Expo'} />
+        <SectionHeader
+          title="Background Sync"
+          trailing={backgroundDeviceSyncRegistrationState.status === 'registered' ? 'Registered' : 'Expo'}
+        />
         <View style={styles.settingColumn}>
           <View>
-            <Text style={styles.settingTitle}>Simple log task</Text>
-            <Text style={styles.settingSubtitle}>Runs the Expo background worker and prints a timestamped log entry.</Text>
+            <Text style={styles.settingTitle}>Device sync task</Text>
+            <Text style={styles.settingSubtitle}>
+              Syncs the selected wearable within a bounded background window and sends local start, completion, and failure notifications.
+            </Text>
+            <Text
+              style={[
+                styles.settingSubtitle,
+                backgroundDeviceSyncRegistrationState.status === 'registered' ? styles.successText : null,
+                backgroundDeviceSyncRegistrationState.status === 'error' ? styles.errorText : null,
+              ]}>
+              Status: {backgroundDeviceSyncRegistrationState.message}
+            </Text>
           </View>
 
           <View style={styles.buttonRow}>
             <ActionButton
-              label={backgroundTaskBusy ? 'Running Log Task...' : 'Run Log Task'}
+              label={backgroundDeviceSyncBusy ? 'Running Sync...' : 'Run Background Sync'}
               onPress={() => {
-                void handleRunBackgroundLogTask();
+                void handleRunBackgroundDeviceSyncNow();
               }}
-              disabled={backgroundTaskBusy}
+              disabled={backgroundDeviceSyncDisabled}
               tone="secondary"
             />
           </View>
@@ -791,9 +877,9 @@ export function SettingsScreen() {
           <Text
             style={[
               styles.roadmapText,
-              backgroundTaskState.status === 'error' ? styles.errorText : null,
+              backgroundDeviceSyncRunState.status === 'error' ? styles.errorText : null,
             ]}>
-            {backgroundTaskState.message}
+            {backgroundDeviceSyncRunState.message}
           </Text>
         </View>
       </GlassCard>
@@ -1218,6 +1304,9 @@ const styles = StyleSheet.create({
     fontFamily: typography.body,
     fontSize: 13,
     lineHeight: 20,
+  },
+  successText: {
+    color: colors.success,
   },
   roadmapText: {
     color: colors.muted,

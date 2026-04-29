@@ -14,10 +14,10 @@ import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
 import { SleepStageBreakdownChip } from '@/components/ui/SleepStageBreakdownChip';
 import { colors, sleepStageColors, typography } from '@/constants/theme';
 import { useDerivedRefreshState, useSleepHistory } from '@/hooks/useHealthData';
-import { useHealthRepository } from '@/providers/HealthDataProvider';
+import { useHealthRepository, useRefreshHealthData } from '@/providers/HealthDataProvider';
 import { useWearableSyncActions, useWearableSyncState } from '@/providers/WearableSyncProvider';
 import { syncSleepPreparationReminder } from '@/services/notifications/sleepPreparationReminder';
-import type { SleepStage, SleepStageSelection } from '@/types/health';
+import type { AlarmScheduleKind, AlarmWakeMode, SleepStage, SleepStageSelection } from '@/types/health';
 import {
   formatClockRangeFromStartLabel,
   formatCompactDuration,
@@ -26,18 +26,97 @@ import {
   formatMetricValue,
   formatNullablePercent,
 } from '@/utils/formatters';
-import { formatClockMinutes } from '@/utils/dateTime';
+import { formatClock, formatClockMinutes, parseSqliteDateTime } from '@/utils/dateTime';
 import { getMetricToneColor, getSleepMetricTone } from '@/utils/metricTone';
-import { calculateOptimalBedtimeMinutes, nextUpcomingClockDate, roundClockMinutes } from '@/utils/sleepPlan';
+import {
+  ALARM_WEEKDAY_FULL_MASK,
+  calculateOptimalBedtimeMinutes,
+  isAlarmWeekdaySelected,
+  nextAlarmTargetDate,
+  resolveNextWearableAlarmDate,
+  roundClockMinutes,
+} from '@/utils/sleepPlan';
 
 const stageBreakdownOrder: SleepStage[] = ['deep', 'light', 'rem', 'awake'];
+const weekdayOptions = [
+  { index: 0, label: 'Sun' },
+  { index: 1, label: 'Mon' },
+  { index: 2, label: 'Tue' },
+  { index: 3, label: 'Wed' },
+  { index: 4, label: 'Thu' },
+  { index: 5, label: 'Fri' },
+  { index: 6, label: 'Sat' },
+] as const;
+
+function alarmScheduleLabel(kind: AlarmScheduleKind, weekdayMask: number) {
+  if (kind === 'one_off') {
+    return 'One-off';
+  }
+
+  const selectedDays = weekdayOptions.filter((day) => isAlarmWeekdaySelected(weekdayMask, day.index));
+
+  if (selectedDays.length === weekdayOptions.length) {
+    return 'Recurring daily';
+  }
+
+  if (selectedDays.length === 0) {
+    return 'Recurring with no wake days';
+  }
+
+  return `Recurring ${selectedDays.map((day) => day.label).join(', ')}`;
+}
+
+function alarmWakeModeLabel(mode: AlarmWakeMode) {
+  switch (mode) {
+    case 'score_or_time':
+      return '100% or time';
+    case 'score_only':
+      return 'Wait until 100%';
+    case 'exact_time':
+    default:
+      return 'Exact time';
+  }
+}
 
 function formatStageBadgeLabel(stage: SleepStage) {
   return stage === 'rem' ? 'REM' : `${stage[0].toUpperCase()}${stage.slice(1)}`;
 }
 
+function AlarmOptionButton({
+  active,
+  caption,
+  disabled,
+  label,
+  onPress,
+}: {
+  active: boolean;
+  caption?: string;
+  disabled?: boolean;
+  label: string;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      disabled={disabled}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.alarmOptionButton,
+        active ? styles.alarmOptionButtonActive : null,
+        disabled ? styles.targetButtonDisabled : null,
+        pressed ? styles.targetButtonPressed : null,
+      ]}>
+      <Text style={[styles.alarmOptionButtonLabel, active ? styles.alarmOptionButtonLabelActive : null]}>
+        {label}
+      </Text>
+      {caption ? <Text style={styles.alarmOptionButtonCaption}>{caption}</Text> : null}
+    </Pressable>
+  );
+}
+
 export function SleepScreen() {
   const repository = useHealthRepository();
+  const refreshHealthData = useRefreshHealthData();
   const { deviceState } = useWearableSyncState();
   const { setAlarm, disableAlarm } = useWearableSyncActions();
   const state = useSleepHistory('14d');
@@ -46,6 +125,9 @@ export function SleepScreen() {
   const [pinnedStage, setPinnedStage] = useState<SleepStage | null>(null);
   const [targetWakeMinutes, setTargetWakeMinutes] = useState<number | null>(null);
   const [alarmEnabled, setAlarmEnabled] = useState<boolean | null>(null);
+  const [alarmScheduleKind, setAlarmScheduleKind] = useState<AlarmScheduleKind>('recurring');
+  const [alarmWeekdayMask, setAlarmWeekdayMask] = useState(ALARM_WEEKDAY_FULL_MASK);
+  const [alarmWakeMode, setAlarmWakeMode] = useState<AlarmWakeMode>('exact_time');
   const [wakeTargetError, setWakeTargetError] = useState<string | null>(null);
   const [savingAlarm, setSavingAlarm] = useState(false);
   const [alarmError, setAlarmError] = useState<string | null>(null);
@@ -72,6 +154,9 @@ export function SleepScreen() {
     }
 
     setAlarmEnabled(data.sleepPlan.alarmEnabled);
+    setAlarmScheduleKind(data.sleepPlan.alarmScheduleKind);
+    setAlarmWeekdayMask(data.sleepPlan.alarmWeekdayMask);
+    setAlarmWakeMode(data.sleepPlan.alarmWakeMode);
   }, [data]);
 
   useEffect(() => {
@@ -132,6 +217,10 @@ export function SleepScreen() {
   const hasOlderSession =
     resolvedSelectedSessionIndex >= 0 && resolvedSelectedSessionIndex < sessions.length - 1;
   const hasNewerSession = resolvedSelectedSessionIndex > 0;
+  const latestInProgressSession = sessions.find((session) => session.isInProgress) ?? null;
+  const inProgressSleepStart = latestInProgressSession
+    ? parseSqliteDateTime(latestInProgressSession.startAt)
+    : null;
   const displayedIsInProgress = selectedSession?.isInProgress ?? data.isInProgress;
   const displayedSleepScore = selectedSession ? selectedSession.score : data.headlineScore;
   const displayedSleepLabel = displayedIsInProgress
@@ -187,6 +276,35 @@ export function SleepScreen() {
   const activeStage = stageSelection?.segment.stage ?? pinnedStage;
   const resolvedTargetWakeMinutes = targetWakeMinutes ?? data.sleepPlan.targetWakeMinutes;
   const resolvedAlarmEnabled = alarmEnabled ?? data.sleepPlan.alarmEnabled;
+  const resolvedAlarmScheduleKind = alarmScheduleKind;
+  const resolvedAlarmWeekdayMask = alarmWeekdayMask & ALARM_WEEKDAY_FULL_MASK;
+  const resolvedAlarmWakeMode = alarmWakeMode;
+  const alarmSettings = {
+    alarmScheduleKind: resolvedAlarmScheduleKind,
+    alarmWakeMode: resolvedAlarmWakeMode,
+    alarmWeekdayMask: resolvedAlarmWeekdayMask,
+    targetWakeMinutes: resolvedTargetWakeMinutes,
+  };
+  const alarmSettingsChanged =
+    resolvedTargetWakeMinutes !== data.sleepPlan.targetWakeMinutes ||
+    resolvedAlarmScheduleKind !== data.sleepPlan.alarmScheduleKind ||
+    resolvedAlarmWeekdayMask !== data.sleepPlan.alarmWeekdayMask ||
+    resolvedAlarmWakeMode !== data.sleepPlan.alarmWakeMode;
+  const hasRecurringWakeDay = resolvedAlarmScheduleKind !== 'recurring' || resolvedAlarmWeekdayMask !== 0;
+  const oneOffAlarmAt =
+    resolvedAlarmScheduleKind === 'one_off'
+      ? nextAlarmTargetDate(alarmSettings)
+      : data.sleepPlan.alarmOneOffAt
+        ? parseSqliteDateTime(data.sleepPlan.alarmOneOffAt)
+        : null;
+  const nextWearableAlarmAt = resolveNextWearableAlarmDate({
+    ...alarmSettings,
+    alarmEnabled: resolvedAlarmEnabled,
+    alarmOneOffAt: oneOffAlarmAt,
+    inProgressSleepStart,
+    sleepNeedMinutes: data.sleepPlan.sleepNeedMinutes,
+  });
+  const alarmSummary = `${alarmScheduleLabel(resolvedAlarmScheduleKind, resolvedAlarmWeekdayMask)} · ${alarmWakeModeLabel(resolvedAlarmWakeMode)}`;
   const displayedOptimalBedtimeMinutes = calculateOptimalBedtimeMinutes(
     resolvedTargetWakeMinutes,
     data.sleepPlan.sleepNeedMinutes,
@@ -198,6 +316,11 @@ export function SleepScreen() {
     optimalBedtimeMinutes: displayedOptimalBedtimeMinutes,
     optimalBedtime: formatClockMinutes(displayedOptimalBedtimeMinutes),
     alarmEnabled: resolvedAlarmEnabled,
+    alarmScheduleKind: resolvedAlarmScheduleKind,
+    alarmWeekdayMask: resolvedAlarmWeekdayMask,
+    alarmWakeMode: resolvedAlarmWakeMode,
+    alarmOneOffAt: oneOffAlarmAt ? oneOffAlarmAt.toISOString() : null,
+    nextAlarmAt: nextWearableAlarmAt ? nextWearableAlarmAt.toISOString() : null,
   };
   const derivedRefreshMessage =
     derivedRefresh.data?.status === 'pending' || derivedRefresh.data?.status === 'processing'
@@ -272,6 +395,11 @@ export function SleepScreen() {
       return;
     }
 
+    if (!hasRecurringWakeDay) {
+      setAlarmError('Select at least one wake day before enabling a recurring alarm.');
+      return;
+    }
+
     setSavingAlarm(true);
     setAlarmError(null);
     setReminderNotice(null);
@@ -286,7 +414,7 @@ export function SleepScreen() {
     let savedLocally = false;
 
     try {
-      await repository.enableAlarm(resolvedTargetWakeMinutes);
+      await repository.enableAlarm(alarmSettings);
       savedLocally = true;
       const reminderResult = await syncSleepPreparationReminder(
         {
@@ -303,8 +431,22 @@ export function SleepScreen() {
       }
 
       if (deviceState.id) {
-        await setAlarm(Math.floor(nextUpcomingClockDate(resolvedTargetWakeMinutes).getTime() / 1000));
+        const alarmAt = resolveNextWearableAlarmDate({
+          ...alarmSettings,
+          alarmEnabled: true,
+          alarmOneOffAt: oneOffAlarmAt,
+          inProgressSleepStart,
+          sleepNeedMinutes: sleepPlan.sleepNeedMinutes,
+        });
+
+        if (alarmAt) {
+          await setAlarm(Math.floor(alarmAt.getTime() / 1000));
+        } else {
+          await disableAlarm();
+        }
       }
+
+      refreshHealthData(['dashboard', 'sleep']);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unable to update the alarm.';
       setAlarmEnabled(false);
@@ -314,6 +456,10 @@ export function SleepScreen() {
           ? `Alarm saved locally, but the wearable update failed. ${message}`
           : message,
       );
+
+      if (savedLocally) {
+        refreshHealthData(['dashboard', 'sleep']);
+      }
     } finally {
       setSavingAlarm(false);
     }
@@ -348,6 +494,8 @@ export function SleepScreen() {
       if (deviceState.id) {
         await disableAlarm();
       }
+
+      refreshHealthData(['dashboard', 'sleep']);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unable to disable the alarm.';
       setAlarmEnabled(true);
@@ -357,6 +505,10 @@ export function SleepScreen() {
           ? `Alarm was disabled locally, but the wearable update failed. ${message}`
           : message,
       );
+
+      if (savedLocally) {
+        refreshHealthData(['dashboard', 'sleep']);
+      }
     } finally {
       setSavingAlarm(false);
     }
@@ -487,22 +639,133 @@ export function SleepScreen() {
                 sleepPlan.alarmEnabled ? styles.alarmBadgeEnabled : styles.alarmBadgeDisabled,
               ]}>
               <Text style={styles.alarmBadgeLabel}>
-                {sleepPlan.alarmEnabled ? 'Enabled' : 'Disabled'}
+                {sleepPlan.alarmEnabled
+                  ? alarmSettingsChanged ? 'Unsaved changes' : 'Enabled'
+                  : 'Disabled'}
               </Text>
             </View>
           </View>
           <Text style={styles.alarmCaption}>
             {sleepPlan.alarmEnabled
-              ? 'Enabled for your current target wake-up time. Unstrap also schedules a quiet phone reminder one hour before your optimal bedtime.'
-              : 'Wake-up changes stay local until you press Enable alarm. Enabling it also schedules a quiet phone reminder one hour before bed.'}
+              ? alarmSettingsChanged
+                ? `${alarmSummary}. Press Update alarm to save this schedule and re-arm the wearable.`
+                : `${alarmSummary}. ${
+                    sleepPlan.nextAlarmAt
+                      ? `Wearable alarm is set for ${formatClock(parseSqliteDateTime(sleepPlan.nextAlarmAt))}.`
+                      : 'The wearable will be armed after sleep is detected and a 100% time can be projected.'
+                  }`
+              : `${alarmSummary}. Changes stay local until you press Enable alarm. Enabling also schedules a quiet phone reminder one hour before bed.`}
           </Text>
+
+          <View style={styles.alarmSettingGroup}>
+            <Text style={styles.alarmSettingLabel}>Schedule</Text>
+            <View style={styles.alarmOptionRow}>
+              <AlarmOptionButton
+                active={resolvedAlarmScheduleKind === 'one_off'}
+                caption="Next wake time"
+                disabled={savingAlarm}
+                label="One-off"
+                onPress={() => {
+                  setAlarmScheduleKind('one_off');
+                  setAlarmError(null);
+                }}
+              />
+              <AlarmOptionButton
+                active={resolvedAlarmScheduleKind === 'recurring'}
+                caption="Custom days"
+                disabled={savingAlarm}
+                label="Recurring"
+                onPress={() => {
+                  setAlarmScheduleKind('recurring');
+                  setAlarmError(null);
+                }}
+              />
+            </View>
+
+            {resolvedAlarmScheduleKind === 'recurring' ? (
+              <View style={styles.weekdayChipRow}>
+                {weekdayOptions.map((weekday) => {
+                  const selected = isAlarmWeekdaySelected(resolvedAlarmWeekdayMask, weekday.index);
+
+                  return (
+                    <Pressable
+                      accessibilityRole="button"
+                      disabled={savingAlarm}
+                      key={weekday.index}
+                      onPress={() => {
+                        setAlarmWeekdayMask((currentMask) => {
+                          const nextMask =
+                            (currentMask & ALARM_WEEKDAY_FULL_MASK) ^ (1 << weekday.index);
+                          return nextMask & ALARM_WEEKDAY_FULL_MASK;
+                        });
+                        setAlarmError(null);
+                      }}
+                      style={({ pressed }) => [
+                        styles.weekdayChip,
+                        selected ? styles.weekdayChipSelected : null,
+                        savingAlarm ? styles.targetButtonDisabled : null,
+                        pressed ? styles.targetButtonPressed : null,
+                      ]}>
+                      <Text style={[styles.weekdayChipLabel, selected ? styles.weekdayChipLabelSelected : null]}>
+                        {weekday.label}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            ) : null}
+          </View>
+
+          <View style={styles.alarmSettingGroup}>
+            <Text style={styles.alarmSettingLabel}>Wake mode</Text>
+            <View style={styles.alarmOptionColumn}>
+              <AlarmOptionButton
+                active={resolvedAlarmWakeMode === 'exact_time'}
+                caption="Always ring at target wake time"
+                disabled={savingAlarm}
+                label="Exact time"
+                onPress={() => {
+                  setAlarmWakeMode('exact_time');
+                  setAlarmError(null);
+                }}
+              />
+              <AlarmOptionButton
+                active={resolvedAlarmWakeMode === 'score_or_time'}
+                caption="Use projected 100% sleep score if it is earlier"
+                disabled={savingAlarm}
+                label="100% or time, whichever comes first"
+                onPress={() => {
+                  setAlarmWakeMode('score_or_time');
+                  setAlarmError(null);
+                }}
+              />
+              <AlarmOptionButton
+                active={resolvedAlarmWakeMode === 'score_only'}
+                caption="Do not arm the wearable until sleep is in progress"
+                disabled={savingAlarm}
+                label="Wait until 100%"
+                onPress={() => {
+                  setAlarmWakeMode('score_only');
+                  setAlarmError(null);
+                }}
+              />
+            </View>
+          </View>
+
+          {!hasRecurringWakeDay ? (
+            <Text style={styles.planError}>Select at least one wake day before enabling a recurring alarm.</Text>
+          ) : null}
 
           <Pressable
             accessibilityRole="button"
-            disabled={savingAlarm}
+            disabled={savingAlarm || (!hasRecurringWakeDay && !sleepPlan.alarmEnabled)}
             onPress={() => {
               if (sleepPlan.alarmEnabled) {
-                void turnAlarmOff();
+                if (alarmSettingsChanged) {
+                  void turnAlarmOn();
+                } else {
+                  void turnAlarmOff();
+                }
                 return;
               }
 
@@ -510,12 +773,16 @@ export function SleepScreen() {
             }}
             style={({ pressed }) => [
               styles.alarmToggleButton,
-              sleepPlan.alarmEnabled ? styles.alarmToggleButtonDanger : styles.alarmToggleButtonPrimary,
+              sleepPlan.alarmEnabled && !alarmSettingsChanged
+                ? styles.alarmToggleButtonDanger
+                : styles.alarmToggleButtonPrimary,
               savingAlarm ? styles.targetButtonDisabled : null,
               pressed ? styles.targetButtonPressed : null,
             ]}>
             <Text style={styles.alarmToggleLabel}>
-              {sleepPlan.alarmEnabled ? 'Disable alarm' : 'Enable alarm'}
+              {sleepPlan.alarmEnabled
+                ? alarmSettingsChanged ? 'Update alarm' : 'Disable alarm'
+                : 'Enable alarm'}
             </Text>
           </Pressable>
         </View>
@@ -523,10 +790,10 @@ export function SleepScreen() {
         <Text style={styles.planFootnote}>
           Based on your recent three-night sleep debt and any nap credit since your last overnight sleep.
           {' '}
-          Changing your wake-up time does not update the alarm until you confirm it with Enable alarm.
+          Changing your wake-up time, schedule, or wake mode does not update the alarm until you confirm it with Enable alarm.
           {' '}
           {deviceState.id
-            ? 'Enable alarm pushes the current target wake-up time to the selected wearable.'
+            ? 'Enable alarm pushes the next computed alarm time to the selected wearable when one exists.'
             : 'Select a wearable before enabling if you want to push it to hardware.'}
         </Text>
         {reminderNotice ? <Text style={styles.planFootnote}>{reminderNotice}</Text> : null}
@@ -778,6 +1045,79 @@ const styles = StyleSheet.create({
     fontFamily: typography.body,
     fontSize: 13,
     lineHeight: 19,
+  },
+  alarmSettingGroup: {
+    gap: 8,
+    marginTop: 4,
+  },
+  alarmSettingLabel: {
+    color: colors.subtle,
+    fontFamily: typography.bodySemiBold,
+    fontSize: 12,
+  },
+  alarmOptionRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  alarmOptionColumn: {
+    gap: 10,
+  },
+  alarmOptionButton: {
+    backgroundColor: colors.surfaceMuted,
+    borderColor: colors.border,
+    borderRadius: 14,
+    borderWidth: 1,
+    flex: 1,
+    minHeight: 54,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  alarmOptionButtonActive: {
+    backgroundColor: 'rgba(126, 255, 169, 0.14)',
+    borderColor: 'rgba(126, 255, 169, 0.36)',
+  },
+  alarmOptionButtonLabel: {
+    color: colors.text,
+    fontFamily: typography.bodySemiBold,
+    fontSize: 13,
+    lineHeight: 17,
+  },
+  alarmOptionButtonLabelActive: {
+    color: colors.primaryBright,
+  },
+  alarmOptionButtonCaption: {
+    color: colors.muted,
+    fontFamily: typography.body,
+    fontSize: 11,
+    lineHeight: 15,
+    marginTop: 4,
+  },
+  weekdayChipRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  weekdayChip: {
+    alignItems: 'center',
+    backgroundColor: colors.surfaceMuted,
+    borderColor: colors.border,
+    borderRadius: 999,
+    borderWidth: 1,
+    minWidth: 45,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  weekdayChipSelected: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  weekdayChipLabel: {
+    color: colors.muted,
+    fontFamily: typography.bodySemiBold,
+    fontSize: 12,
+  },
+  weekdayChipLabelSelected: {
+    color: colors.background,
   },
   alarmBadge: {
     borderRadius: 999,

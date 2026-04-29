@@ -5,7 +5,7 @@ import { useFonts } from 'expo-font';
 import * as Notifications from 'expo-notifications';
 import { Stack, useRouter } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { StyleSheet } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { StatusBar } from 'expo-status-bar';
@@ -15,7 +15,7 @@ import { WearableProgressOverlay } from '@/components/ui/WearableProgressOverlay
 import { navTheme } from '@/constants/theme';
 import { AppDatabaseProvider } from '@/providers/AppDatabaseProvider';
 import { HealthDataProvider } from '@/providers/HealthDataProvider';
-import { WearableSyncProvider } from '@/providers/WearableSyncProvider';
+import { WearableSyncProvider, useWearableSyncState } from '@/providers/WearableSyncProvider';
 import { routeFromNotificationData } from '@/services/notifications/notificationRouting';
 
 export {
@@ -55,37 +55,13 @@ export default function RootLayout() {
 }
 
 function RootLayoutNav() {
-  const router = useRouter();
-
-  useEffect(() => {
-    let mounted = true;
-
-    const openNotificationRoute = (route: string | null) => {
-      if (mounted && route) {
-        router.push(route as never);
-      }
-    };
-
-    void Notifications.getLastNotificationResponseAsync().then((response) => {
-      openNotificationRoute(routeFromNotificationData(response?.notification.request.content.data));
-    });
-
-    const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
-      openNotificationRoute(routeFromNotificationData(response.notification.request.content.data));
-    });
-
-    return () => {
-      mounted = false;
-      subscription.remove();
-    };
-  }, [router]);
-
   return (
     <GestureHandlerRootView style={styles.root}>
       <ThemeProvider value={navTheme}>
         <AppDatabaseProvider>
           <HealthDataProvider>
             <WearableSyncProvider>
+              <NotificationRouteSync />
               <StatusBar style="light" />
               <SleepPreparationReminderSync />
               <Stack>
@@ -100,6 +76,73 @@ function RootLayoutNav() {
       </ThemeProvider>
     </GestureHandlerRootView>
   );
+}
+
+function NotificationRouteSync() {
+  const { isReady } = useWearableSyncState();
+  const router = useRouter();
+  const handledNotificationResponsesRef = useRef(new Set<string>());
+
+  useEffect(() => {
+    if (!isReady) {
+      return;
+    }
+
+    let mounted = true;
+    const navigationTimeouts = new Set<ReturnType<typeof setTimeout>>();
+
+    const openNotificationRoute = (response: Notifications.NotificationResponse | null) => {
+      const route = routeFromNotificationData(response?.notification.request.content.data);
+      if (!route) {
+        return;
+      }
+
+      const responseKey = [
+        response?.notification.request.identifier ?? 'unknown',
+        response?.notification.date ?? 'unknown',
+        response?.actionIdentifier ?? 'unknown',
+      ].join(':');
+
+      if (handledNotificationResponsesRef.current.has(responseKey)) {
+        return;
+      }
+
+      handledNotificationResponsesRef.current.add(responseKey);
+
+      const timeout = setTimeout(() => {
+        navigationTimeouts.delete(timeout);
+
+        if (!mounted) {
+          return;
+        }
+
+        router.replace(route as never);
+
+        if (typeof Notifications.clearLastNotificationResponse === 'function') {
+          Notifications.clearLastNotificationResponse();
+        }
+      }, 0);
+
+      navigationTimeouts.add(timeout);
+    };
+
+    void Notifications.getLastNotificationResponseAsync().then((response) => {
+      openNotificationRoute(response);
+    }).catch(() => {});
+
+    const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
+      openNotificationRoute(response);
+    });
+
+    return () => {
+      mounted = false;
+      navigationTimeouts.forEach((timeout) => clearTimeout(timeout));
+      navigationTimeouts.clear();
+      subscription.remove();
+    };
+  }, [isReady, router]);
+
+  return null;
 }
 
 const styles = StyleSheet.create({
