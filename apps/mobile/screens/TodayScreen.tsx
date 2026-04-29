@@ -16,7 +16,11 @@ import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
 import { colors, typography } from '@/constants/theme';
 import { useDerivedRefreshState, useTodayOverview } from '@/hooks/useHealthData';
 import { useHealthDataVersion, useHealthRepository, useRefreshHealthData } from '@/providers/HealthDataProvider';
-import { useWearableSyncActions, useWearableSyncState } from '@/providers/WearableSyncProvider';
+import {
+  useWearableSyncActions,
+  useWearableSyncProgress,
+  useWearableSyncState,
+} from '@/providers/WearableSyncProvider';
 import type { ManualActivityKind } from '@/data/HealthRepository';
 import type { HeartCardData, HeartTimelineWindow, TodayOverview } from '@/types/health';
 import { hasFreshLiveHeartRate } from '@/types/device';
@@ -34,15 +38,6 @@ const HEART_PREFETCH_RANGE = '7d';
 const HEART_ACTIVITY_REFRESH_SCOPES = ['dashboard', 'sleep', 'heart', 'wellness', 'trends'] as const;
 const TODAY_REFRESH_SCOPES = ['dashboard', 'sleep', 'heart', 'wellness', 'trends', 'derived'] as const;
 const DEFAULT_HEART_TIMELINE_ZOOM: HeartTimelineZoomLevel = '12h';
-const REFRESH_STATUS_HOLD_MS = 450;
-const REFRESH_DISMISS_HOLD_MS = 300;
-const REFRESH_ERROR_HOLD_MS = 1200;
-
-function delay(ms: number) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
 
 export function TodayScreen() {
   const router = useRouter();
@@ -51,6 +46,7 @@ export function TodayScreen() {
   const repository = useHealthRepository();
   const refreshHealthData = useRefreshHealthData();
   const heartVersion = useHealthDataVersion('heart');
+  const { backgroundSyncRefreshIndicator } = useWearableSyncProgress();
   const { runBackgroundSync } = useWearableSyncActions();
   const { deviceState } = useWearableSyncState();
   const [retainedOverview, setRetainedOverview] = useState<TodayOverview | null>(null);
@@ -67,15 +63,6 @@ export function TodayScreen() {
     isRefreshing: false,
     cardData: null,
     status: 'idle',
-  });
-  const [refreshState, setRefreshState] = useState<{
-    active: boolean;
-    message: string;
-    showStatus: boolean;
-  }>({
-    active: false,
-    message: 'Running background sync...',
-    showStatus: false,
   });
 
   useEffect(() => {
@@ -244,47 +231,17 @@ export function TodayScreen() {
     refreshAfterActivityMutation();
   }, [refreshAfterActivityMutation, repository]);
   const handleRefreshToday = useCallback(async () => {
-    if (refreshState.active || refreshState.showStatus) {
+    if (backgroundSyncRefreshIndicator.active || backgroundSyncRefreshIndicator.showStatus) {
       return;
     }
 
-    setRefreshState({
-      active: true,
-      message: deviceState.id ? 'Running background sync...' : 'Refreshing local data...',
-      showStatus: true,
-    });
-
     try {
-      const result = await runBackgroundSync({ showOverlay: false });
+      await runBackgroundSync({ showOverlay: false });
       refreshHealthData(TODAY_REFRESH_SCOPES);
-
-      setRefreshState({
-        active: true,
-        message:
-          result.status === 'failed'
-            ? result.message
-            : result.status === 'no_device'
-              ? 'Local data refreshed'
-              : result.status === 'skipped'
-                ? 'Sync already running'
-                : 'Fully synced',
-        showStatus: true,
-      });
-
-      await delay(result.status === 'failed' ? REFRESH_ERROR_HOLD_MS : REFRESH_STATUS_HOLD_MS);
     } catch (error) {
       refreshHealthData(TODAY_REFRESH_SCOPES);
-      setRefreshState({
-        active: true,
-        message: error instanceof Error ? error.message : 'Unable to refresh today.',
-        showStatus: true,
-      });
-      await delay(REFRESH_ERROR_HOLD_MS);
     }
-    setRefreshState((current) => ({ ...current, active: false }));
-    await delay(REFRESH_DISMISS_HOLD_MS);
-    setRefreshState((current) => ({ ...current, showStatus: false }));
-  }, [deviceState.id, refreshHealthData, refreshState.active, refreshState.showStatus, runBackgroundSync]);
+  }, [backgroundSyncRefreshIndicator.active, backgroundSyncRefreshIndicator.showStatus, refreshHealthData, runBackgroundSync]);
 
   if (!data && state.status === 'loading') {
     return (
@@ -316,8 +273,8 @@ export function TodayScreen() {
     : undefined;
   const openSleep = () => router.push('/sleep');
   const openWellness = () => router.push('/wellness');
-  const refreshTitle = refreshState.showStatus
-    ? refreshState.message
+  const refreshTitle = backgroundSyncRefreshIndicator.showStatus
+    ? backgroundSyncRefreshIndicator.message
     : deviceState.id
       ? 'Pull to sync wearable data'
       : 'Pull to refresh today';
@@ -330,7 +287,7 @@ export function TodayScreen() {
         void handleRefreshToday();
       }}
       refreshTitle={refreshTitle}
-      refreshing={refreshState.active}>
+      refreshing={backgroundSyncRefreshIndicator.active}>
       {state.status === 'error' ? (
         <ErrorState message="Showing the last Today overview while refresh catches up." variant="inline" />
       ) : null}

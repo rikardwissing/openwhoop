@@ -32,6 +32,9 @@ import {
 } from '@/types/device';
 
 const MAX_LIVE_EVENTS = 200;
+const BACKGROUND_SYNC_REFRESH_STATUS_HOLD_MS = 450;
+const BACKGROUND_SYNC_REFRESH_DISMISS_HOLD_MS = 300;
+const BACKGROUND_SYNC_REFRESH_ERROR_HOLD_MS = 1200;
 
 const SHOULD_LOG_MOBILE_SYNC_PERF =
   typeof __DEV__ !== 'undefined' &&
@@ -39,6 +42,24 @@ const SHOULD_LOG_MOBILE_SYNC_PERF =
   (typeof process === 'undefined' || process.env.NODE_ENV !== 'test');
 
 type PerformanceLogValue = string | number | boolean | null;
+
+interface BackgroundSyncRefreshIndicator {
+  active: boolean;
+  message: string;
+  showStatus: boolean;
+}
+
+const DEFAULT_BACKGROUND_SYNC_REFRESH_INDICATOR: BackgroundSyncRefreshIndicator = {
+  active: false,
+  message: 'Running background sync...',
+  showStatus: false,
+};
+
+function delay(ms: number) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
 
 function logMobileSyncPerf(label: string, startedAt: number, details?: Record<string, PerformanceLogValue>) {
   if (!SHOULD_LOG_MOBILE_SYNC_PERF) {
@@ -56,6 +77,7 @@ function logMobileSyncPerf(label: string, startedAt: number, details?: Record<st
 
 export interface WearableSyncContextValue {
   isReady: boolean;
+  backgroundSyncRefreshIndicator: BackgroundSyncRefreshIndicator;
   deviceState: DeviceState;
   backgroundSyncState: BackgroundSyncState;
   liveEvents: WearableLiveEvent[];
@@ -79,6 +101,7 @@ interface WearableStateContextValue {
 }
 
 interface WearableProgressContextValue {
+  backgroundSyncRefreshIndicator: BackgroundSyncRefreshIndicator;
   progress: SyncProgress;
 }
 
@@ -118,6 +141,7 @@ export const emptyDeviceState: DeviceState = {
 
 export const defaultWearableSyncContextValue: WearableSyncContextValue = {
   isReady: false,
+  backgroundSyncRefreshIndicator: DEFAULT_BACKGROUND_SYNC_REFRESH_INDICATOR,
   deviceState: emptyDeviceState,
   backgroundSyncState: {
     pairedDeviceId: null,
@@ -183,8 +207,11 @@ export function WearableSyncContextProvider({
     [value.backgroundSyncState, value.deviceState, value.isReady],
   );
   const progressValue = useMemo<WearableProgressContextValue>(
-    () => ({ progress: value.progress }),
-    [value.progress],
+    () => ({
+      backgroundSyncRefreshIndicator: value.backgroundSyncRefreshIndicator,
+      progress: value.progress,
+    }),
+    [value.backgroundSyncRefreshIndicator, value.progress],
   );
   const liveEventsValue = useMemo<WearableLiveEventsContextValue>(
     () => ({ liveEvents: value.liveEvents }),
@@ -245,11 +272,15 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
   const [backgroundSyncState, setBackgroundSyncState] = useState<BackgroundSyncState>(
     defaultWearableSyncContextValue.backgroundSyncState,
   );
+  const [backgroundSyncRefreshIndicator, setBackgroundSyncRefreshIndicator] = useState<BackgroundSyncRefreshIndicator>(
+    DEFAULT_BACKGROUND_SYNC_REFRESH_INDICATOR,
+  );
   const [liveEvents, setLiveEvents] = useState<WearableLiveEvent[]>([]);
   const [progress, setProgress] = useState<SyncProgress>(defaultWearableSyncContextValue.progress);
   const [scanResults, setScanResults] = useState<WearableScanResult[]>([]);
   const [appState, setAppState] = useState<AppStateStatus>(AppState.currentState);
   const backgroundSyncStateRef = useRef(backgroundSyncState);
+  const backgroundSyncRefreshRunIdRef = useRef(0);
 
   useEffect(() => {
     backgroundSyncStateRef.current = backgroundSyncState;
@@ -262,6 +293,50 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
   const resetLiveEvents = useCallback(() => {
     setLiveEvents([]);
   }, []);
+
+  const startBackgroundSyncRefreshIndicator = useCallback((message: string) => {
+    backgroundSyncRefreshRunIdRef.current += 1;
+    const runId = backgroundSyncRefreshRunIdRef.current;
+
+    setBackgroundSyncRefreshIndicator({
+      active: true,
+      message,
+      showStatus: true,
+    });
+
+    return runId;
+  }, []);
+
+  const finalizeBackgroundSyncRefreshIndicator = useCallback(
+    (runId: number, message: string, holdMs: number) => {
+      void (async () => {
+        setBackgroundSyncRefreshIndicator({
+          active: true,
+          message,
+          showStatus: true,
+        });
+
+        await delay(holdMs);
+        if (backgroundSyncRefreshRunIdRef.current !== runId) {
+          return;
+        }
+
+        setBackgroundSyncRefreshIndicator({
+          active: false,
+          message,
+          showStatus: true,
+        });
+
+        await delay(BACKGROUND_SYNC_REFRESH_DISMISS_HOLD_MS);
+        if (backgroundSyncRefreshRunIdRef.current !== runId) {
+          return;
+        }
+
+        setBackgroundSyncRefreshIndicator(DEFAULT_BACKGROUND_SYNC_REFRESH_INDICATOR);
+      })();
+    },
+    [],
+  );
 
   const triggerDerivedRefresh = useCallback(() => {
     refreshHealthData(['dashboard', 'heart', 'trends', 'derived']);
@@ -391,6 +466,7 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
     async (options?: { showOverlay?: boolean }) => {
       const showOverlay = options?.showOverlay ?? true;
       const syncStartedAt = Date.now();
+      const refreshIndicatorRunId = startBackgroundSyncRefreshIndicator('Running background sync...');
 
       setProgress({
         status: 'syncing',
@@ -421,6 +497,20 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
           showOverlay,
         });
 
+        finalizeBackgroundSyncRefreshIndicator(
+          refreshIndicatorRunId,
+          result.status === 'failed'
+            ? result.message
+            : result.status === 'no_device'
+              ? 'Local data refreshed'
+              : result.status === 'skipped'
+                ? 'Sync already running'
+                : 'Fully synced',
+          result.status === 'failed'
+            ? BACKGROUND_SYNC_REFRESH_ERROR_HOLD_MS
+            : BACKGROUND_SYNC_REFRESH_STATUS_HOLD_MS,
+        );
+
         logMobileSyncPerf('background.syncNow', syncStartedAt, {
           importedReadings: result.importedReadings,
           showOverlay,
@@ -436,6 +526,11 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
           message: error instanceof Error ? error.message : 'Unable to run background sync now.',
           showOverlay,
         });
+        finalizeBackgroundSyncRefreshIndicator(
+          refreshIndicatorRunId,
+          error instanceof Error ? error.message : 'Unable to run background sync now.',
+          BACKGROUND_SYNC_REFRESH_ERROR_HOLD_MS,
+        );
         logMobileSyncPerf('background.syncNow', syncStartedAt, {
           importedReadings: null,
           showOverlay,
@@ -597,8 +692,11 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
     [backgroundSyncState, deviceState, isReady],
   );
   const progressValue = useMemo<WearableProgressContextValue>(
-    () => ({ progress }),
-    [progress],
+    () => ({
+      backgroundSyncRefreshIndicator,
+      progress,
+    }),
+    [backgroundSyncRefreshIndicator, progress],
   );
   const liveEventsValue = useMemo<WearableLiveEventsContextValue>(
     () => ({ liveEvents }),
