@@ -116,6 +116,16 @@ function notificationForWearableEvent(
   const resolvedDeviceName = resolveNotificationDeviceName(deviceName);
 
   switch (event.event) {
+    case EventNumber.BatteryLevel:
+      return {
+        title: 'Battery level received',
+        body: `${resolvedDeviceName} reported ${event.percent}% battery.`,
+      };
+    case EventNumber.ExtendedBatteryInformation:
+      return {
+        title: 'Extended battery info received',
+        body: `${resolvedDeviceName} sent extended battery information.`,
+      };
     case EventNumber.WristOn:
       return {
         title: 'Wearable on body',
@@ -135,6 +145,16 @@ function notificationForWearableEvent(
       return {
         title: 'Wearable unplugged',
         body: `${resolvedDeviceName} stopped charging.`,
+      };
+    case EventNumber.DoubleTap:
+      return {
+        title: 'Device double tapped',
+        body: `${resolvedDeviceName} was double tapped.`,
+      };
+    case EventNumber.HighFreqSyncPrompt:
+      return {
+        title: 'Sync prompt received',
+        body: `${resolvedDeviceName} requested a high-frequency sync.`,
       };
     default:
       return null;

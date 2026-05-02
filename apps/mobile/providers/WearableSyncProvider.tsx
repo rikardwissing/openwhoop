@@ -17,9 +17,14 @@ import { useHealthRepository, useRefreshHealthData } from '@/providers/HealthDat
 import { useAppDatabaseControls } from '@/providers/AppDatabaseProvider';
 import {
   registerBackgroundDeviceSyncTaskAsync,
+  runBackgroundDeviceSyncWithServiceAsync,
   runBackgroundDeviceSyncNowAsync,
   type BackgroundDeviceSyncManualRunResult,
 } from '@/services/background/backgroundDeviceSyncTask';
+import {
+  beginBackgroundExecutionAssertionAsync,
+  endBackgroundExecutionAssertionAsync,
+} from '@/services/background/backgroundExecutionAssertion';
 import { getBackgroundSyncState } from '@/services/background/backgroundSyncState';
 import { WearableSyncService } from '@/services/ble/WearableSyncService';
 import {
@@ -35,6 +40,8 @@ const MAX_LIVE_EVENTS = 200;
 const BACKGROUND_SYNC_REFRESH_STATUS_HOLD_MS = 450;
 const BACKGROUND_SYNC_REFRESH_DISMISS_HOLD_MS = 300;
 const BACKGROUND_SYNC_REFRESH_ERROR_HOLD_MS = 1200;
+const DOUBLE_TAP_LIVE_EVENT_KIND = 'double-tap';
+const DOUBLE_TAP_BACKGROUND_SYNC_COOLDOWN_MS = 60_000;
 
 const SHOULD_LOG_MOBILE_SYNC_PERF =
   typeof __DEV__ !== 'undefined' &&
@@ -42,6 +49,11 @@ const SHOULD_LOG_MOBILE_SYNC_PERF =
   (typeof process === 'undefined' || process.env.NODE_ENV !== 'test');
 
 type PerformanceLogValue = string | number | boolean | null;
+
+interface WearableBackgroundSyncOptions {
+  showOverlay?: boolean;
+  useExistingBleService?: boolean;
+}
 
 interface BackgroundSyncRefreshIndicator {
   active: boolean;
@@ -88,7 +100,7 @@ export interface WearableSyncContextValue {
   pairDevice: (device: WearableScanResult) => Promise<void>;
   selectDevice: (device: WearableScanResult) => Promise<void>;
   forgetDevice: () => Promise<void>;
-  runBackgroundSync: (options?: { showOverlay?: boolean }) => Promise<BackgroundDeviceSyncManualRunResult>;
+  runBackgroundSync: (options?: WearableBackgroundSyncOptions) => Promise<BackgroundDeviceSyncManualRunResult>;
   restartDevice: () => Promise<void>;
   setAlarm: (unixSeconds: number) => Promise<void>;
   disableAlarm: () => Promise<void>;
@@ -119,7 +131,7 @@ interface WearableActionsContextValue {
   pairDevice: (device: WearableScanResult) => Promise<void>;
   selectDevice: (device: WearableScanResult) => Promise<void>;
   forgetDevice: () => Promise<void>;
-  runBackgroundSync: (options?: { showOverlay?: boolean }) => Promise<BackgroundDeviceSyncManualRunResult>;
+  runBackgroundSync: (options?: WearableBackgroundSyncOptions) => Promise<BackgroundDeviceSyncManualRunResult>;
   restartDevice: () => Promise<void>;
   setAlarm: (unixSeconds: number) => Promise<void>;
   disableAlarm: () => Promise<void>;
@@ -281,6 +293,9 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
   const [appState, setAppState] = useState<AppStateStatus>(AppState.currentState);
   const backgroundSyncStateRef = useRef(backgroundSyncState);
   const backgroundSyncRefreshRunIdRef = useRef(0);
+  const handledDoubleTapEventIdRef = useRef<string | null>(null);
+  const doubleTapBackgroundSyncInFlightRef = useRef(false);
+  const lastDoubleTapBackgroundSyncAtRef = useRef(0);
 
   useEffect(() => {
     backgroundSyncStateRef.current = backgroundSyncState;
@@ -462,21 +477,40 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
     };
   }, [appendLiveEvent, deviceState.id, progress.status, service]);
 
+  const restartLiveUpdates = useCallback(async () => {
+    await service.startLiveUpdates(
+      (nextState) => {
+        setDeviceState(nextState);
+      },
+      appendLiveEvent,
+    );
+  }, [appendLiveEvent, service]);
+
   const runBackgroundSync = useCallback(
-    async (options?: { showOverlay?: boolean }) => {
+    async (options?: WearableBackgroundSyncOptions) => {
       const showOverlay = options?.showOverlay ?? true;
+      const useExistingBleService = options?.useExistingBleService ?? false;
       const syncStartedAt = Date.now();
       const refreshIndicatorRunId = startBackgroundSyncRefreshIndicator('Running background sync...');
+      let stoppedLiveUpdates = false;
 
-      setProgress({
-        status: 'syncing',
-        message: 'Running bounded background sync...',
-        showOverlay,
-      });
+      if (!useExistingBleService) {
+        setProgress({
+          status: 'syncing',
+          message: 'Running bounded background sync...',
+          showOverlay,
+        });
+      }
 
       try {
-        await service.stopLiveUpdates().catch(() => {});
-        const result = await runBackgroundDeviceSyncNowAsync();
+        let result: BackgroundDeviceSyncManualRunResult;
+        if (useExistingBleService) {
+          result = await runBackgroundDeviceSyncWithServiceAsync(db, service);
+        } else {
+          await service.stopLiveUpdates().catch(() => {});
+          stoppedLiveUpdates = true;
+          result = await runBackgroundDeviceSyncNowAsync();
+        }
 
         setDeviceState(await service.getDeviceState());
         await refreshBackgroundState({
@@ -537,10 +571,69 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
           status: 'failed',
         });
         throw error;
+      } finally {
+        if (stoppedLiveUpdates) {
+          void restartLiveUpdates().catch(() => {});
+        }
       }
     },
-    [refreshBackgroundState, refreshHealthData, service],
+    [db, refreshBackgroundState, refreshHealthData, restartLiveUpdates, service],
   );
+
+  useEffect(() => {
+    const latestEvent = liveEvents[0];
+
+    if (!latestEvent || latestEvent.kind !== DOUBLE_TAP_LIVE_EVENT_KIND) {
+      return;
+    }
+
+    if (handledDoubleTapEventIdRef.current === latestEvent.id) {
+      return;
+    }
+
+    handledDoubleTapEventIdRef.current = latestEvent.id;
+
+    const now = Date.now();
+    const cooldownRemainingMs =
+      DOUBLE_TAP_BACKGROUND_SYNC_COOLDOWN_MS - (now - lastDoubleTapBackgroundSyncAtRef.current);
+    const blockedReason =
+      doubleTapBackgroundSyncInFlightRef.current
+        ? 'already in flight'
+        : cooldownRemainingMs > 0
+          ? `cooldown ${Math.ceil(cooldownRemainingMs / 1000)}s`
+          : progress.status === 'scanning'
+            ? 'scan in progress'
+            : isBlockingSyncStatus(progress.status)
+              ? `blocked status ${progress.status}`
+              : null;
+
+    if (blockedReason) {
+      return;
+    }
+
+    doubleTapBackgroundSyncInFlightRef.current = true;
+    lastDoubleTapBackgroundSyncAtRef.current = now;
+    void (async () => {
+      let assertionId: number | null = null;
+
+      try {
+        assertionId = await beginBackgroundExecutionAssertionAsync('DoubleTapSync');
+        const result = await runBackgroundSync({
+          showOverlay: false,
+          useExistingBleService: true,
+        });
+
+        if (result.status === 'failed' || result.status === 'skipped') {
+          lastDoubleTapBackgroundSyncAtRef.current = 0;
+        }
+      } catch {
+        lastDoubleTapBackgroundSyncAtRef.current = 0;
+      } finally {
+        await endBackgroundExecutionAssertionAsync(assertionId);
+        doubleTapBackgroundSyncInFlightRef.current = false;
+      }
+    })();
+  }, [liveEvents, progress.status, runBackgroundSync]);
 
   const scan = useCallback(async () => {
     setProgress({

@@ -397,9 +397,13 @@ export interface SyncExecutionOutcome {
   reason?: string;
 }
 
-interface SyncRunOptions {
+export interface SyncRunOptions {
   abortSignal?: AbortSignal;
+  allowDiscoveryScan?: boolean;
+  allowRescan?: boolean;
+  connectedDevice?: Device;
   maxDurationMs?: number;
+  preserveConnection?: boolean;
 }
 
 function formatBleError(error: unknown) {
@@ -446,6 +450,8 @@ function wearDetail(bodyStatus: WearState) {
 
 export class WearableSyncService {
   private liveUpdatesCleanup: (() => Promise<void>) | null = null;
+  private liveUpdatesDevice: Device | null = null;
+  private liveDeviceEventSideEffectsSuspendCount = 0;
   private nextLiveEventId = 0;
   private liveHeartRate: { bpm: number | null; observedAt: number | null } = { bpm: null, observedAt: null };
 
@@ -627,6 +633,8 @@ export class WearableSyncService {
     switch (parsed.event.event) {
       case EventNumber.BatteryLevel:
         return this.createLiveEvent('event', 'battery-event', 'Battery event', `${parsed.event.percent}%`, parsed.event.unix);
+      case EventNumber.ExtendedBatteryInformation:
+        return this.createLiveEvent('event', 'extended-battery-event', 'Extended battery event', null, parsed.event.unix);
       case EventNumber.External5vOn:
         return this.createLiveEvent('event', 'external-power-on', 'External power connected', null, parsed.event.unix);
       case EventNumber.External5vOff:
@@ -638,6 +646,8 @@ export class WearableSyncService {
       case EventNumber.WristOn:
       case EventNumber.WristOff:
         return this.createLiveEvent('event', 'wear-changed', 'Wear changed', wearDetail(parsed.event.bodyStatus), parsed.event.unix);
+      case EventNumber.DoubleTap:
+        return this.createLiveEvent('event', 'double-tap', 'Device double tapped', null, parsed.event.unix);
       case EventNumber.StrapDrivenAlarmSet:
         return this.createLiveEvent('event', 'strap-alarm-set', 'Strap alarm set', null, parsed.event.unix);
       case EventNumber.StrapDrivenAlarmExecuted:
@@ -646,6 +656,8 @@ export class WearableSyncService {
         return this.createLiveEvent('event', 'app-alarm-executed', 'App alarm executed', null, parsed.event.unix);
       case EventNumber.StrapDrivenAlarmDisabled:
         return this.createLiveEvent('event', 'strap-alarm-disabled', 'Strap alarm disabled', null, parsed.event.unix);
+      case EventNumber.HighFreqSyncPrompt:
+        return this.createLiveEvent('event', 'high-frequency-sync-prompt', 'High-frequency sync prompt', null, parsed.event.unix);
     }
 
     return null;
@@ -722,6 +734,9 @@ export class WearableSyncService {
         try {
           await this.sendCommand(device, toggleRealtimeHrPacket(false));
         } catch {}
+        if (this.liveUpdatesDevice?.id === device.id) {
+          this.liveUpdatesDevice = null;
+        }
         try {
           await device.cancelConnection();
         } catch {}
@@ -758,8 +773,13 @@ export class WearableSyncService {
     };
 
     const handleNotification = async (parsed: ReturnType<typeof parseNotification>) => {
-      this.recordLiveEvent(parsed, onLiveEvent);
-      void this.notifyForWearableNotification(parsed, resolvedDeviceId, resolvedDeviceName).catch(() => {});
+      const suppressEventSideEffects =
+        parsed.type === 'event' && this.liveDeviceEventSideEffectsSuspendCount > 0;
+
+      if (!suppressEventSideEffects) {
+        this.recordLiveEvent(parsed, onLiveEvent);
+        void this.notifyForWearableNotification(parsed, resolvedDeviceId, resolvedDeviceName).catch(() => {});
+      }
 
       if (parsed.type === 'battery') {
         await pushState({ batteryPercent: parsed.battery.percent });
@@ -780,6 +800,10 @@ export class WearableSyncService {
       }
 
       if (parsed.type !== 'event') {
+        return;
+      }
+
+      if (suppressEventSideEffects) {
         return;
       }
 
@@ -811,6 +835,7 @@ export class WearableSyncService {
         }
 
         ({ device, resolvedDeviceId, resolvedDeviceName } = await this.connectSelectedWearable(latestSelected));
+        this.liveUpdatesDevice = device;
         await this.persistDeviceState({
           id: resolvedDeviceId,
           name: resolvedDeviceName,
@@ -955,6 +980,31 @@ export class WearableSyncService {
 
   async syncInBackground(options?: SyncRunOptions): Promise<SyncExecutionOutcome> {
     return this.runSync('background', undefined, undefined, options);
+  }
+
+  async syncOnLiveConnection(options?: SyncRunOptions): Promise<SyncExecutionOutcome> {
+    const liveDevice = this.liveUpdatesDevice;
+    const isLiveDeviceConnected = liveDevice ? await liveDevice.isConnected().catch(() => false) : false;
+
+    if (!liveDevice || !isLiveDeviceConnected) {
+      throw new Error('Live wearable connection is not active.');
+    }
+
+    this.liveDeviceEventSideEffectsSuspendCount += 1;
+    try {
+      return await this.runSync('background', undefined, undefined, {
+        ...options,
+        allowDiscoveryScan: false,
+        allowRescan: false,
+        connectedDevice: liveDevice,
+        preserveConnection: true,
+      });
+    } finally {
+      this.liveDeviceEventSideEffectsSuspendCount = Math.max(
+        0,
+        this.liveDeviceEventSideEffectsSuspendCount - 1,
+      );
+    }
   }
 
   private async runSync(
@@ -1283,18 +1333,30 @@ export class WearableSyncService {
 
     try {
       connectStartedAtMs = Date.now();
-      ({
-        device,
-        resolvedDeviceId,
-        resolvedDeviceName,
-      } = await this.connectSelectedWearable(
-        selected,
-        onProgress,
-        {
-          allowDiscoveryScan: source === 'foreground',
-          allowRescan: source === 'foreground',
-        },
-      ));
+      if (options?.connectedDevice) {
+        device = await this.getConnectedCandidate(options.connectedDevice);
+
+        if (!device) {
+          throw new Error('Live wearable connection is not active.');
+        }
+
+        device = await device.discoverAllServicesAndCharacteristics();
+        resolvedDeviceId = device.id;
+        resolvedDeviceName = resolveScanDeviceName(device) ?? selected.name;
+      } else {
+        ({
+          device,
+          resolvedDeviceId,
+          resolvedDeviceName,
+        } = await this.connectSelectedWearable(
+          selected,
+          onProgress,
+          {
+            allowDiscoveryScan: options?.allowDiscoveryScan ?? source === 'foreground',
+            allowRescan: options?.allowRescan ?? source === 'foreground',
+          },
+        ));
+      }
       connectCompletedAtMs = Date.now();
 
       const completion = new Promise<void>((resolve, reject) => {
@@ -1403,8 +1465,10 @@ export class WearableSyncService {
             const frames = assembler.push(base64ToBytes(value.value));
             for (const frame of frames) {
               const parsed = parseNotification(frame);
-              this.recordLiveEvent(parsed, onLiveEvent);
-              void this.notifyForWearableNotification(parsed, resolvedDeviceId, resolvedDeviceName).catch(() => {});
+              if (parsed.type !== 'event') {
+                this.recordLiveEvent(parsed, onLiveEvent);
+                void this.notifyForWearableNotification(parsed, resolvedDeviceId, resolvedDeviceName).catch(() => {});
+              }
 
               if (writeFailure) {
                 fail(writeFailure);
@@ -1617,9 +1681,11 @@ export class WearableSyncService {
           await this.sendCommand(device, exitHighFrequencySyncPacket());
         } catch {}
 
-        try {
-          await device.cancelConnection();
-        } catch {}
+        if (!options?.preserveConnection) {
+          try {
+            await device.cancelConnection();
+          } catch {}
+        }
       }
 
       await releaseBackgroundSyncLock(this.db, lockOwner).catch((error) => {

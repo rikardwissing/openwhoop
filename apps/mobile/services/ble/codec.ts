@@ -81,6 +81,14 @@ export interface DeviceBodyEventPacket {
   bodyStatus: 'on-body' | 'off-body';
 }
 
+export interface DeviceSimpleEventPacket {
+  event:
+    | EventNumber.DoubleTap
+    | EventNumber.ExtendedBatteryInformation
+    | EventNumber.HighFreqSyncPrompt;
+  unix: number;
+}
+
 export interface DeviceAlarmEventPacket {
   event:
     | EventNumber.StrapDrivenAlarmSet
@@ -94,6 +102,7 @@ export type DeviceEventPacket =
   | DeviceBatteryEventPacket
   | DeviceChargingEventPacket
   | DeviceBodyEventPacket
+  | DeviceSimpleEventPacket
   | DeviceAlarmEventPacket;
 
 export interface RawCommandResponsePacket {
@@ -587,6 +596,20 @@ function parseEventPacket(packet: FramedPacket): ParsedNotification {
         event: packet.cmd,
         unix,
         bodyStatus: packet.cmd === EventNumber.WristOn ? 'on-body' : 'off-body',
+      },
+    };
+  }
+
+  if (
+    packet.cmd === EventNumber.DoubleTap ||
+    packet.cmd === EventNumber.ExtendedBatteryInformation ||
+    packet.cmd === EventNumber.HighFreqSyncPrompt
+  ) {
+    return {
+      type: 'event',
+      event: {
+        event: packet.cmd,
+        unix,
       },
     };
   }

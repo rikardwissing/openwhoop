@@ -29,11 +29,13 @@ export enum EventNumber {
   ChargingOff = 8,
   WristOn = 9,
   WristOff = 10,
+  DoubleTap = 14,
   StrapDrivenAlarmSet = 56,
   StrapDrivenAlarmExecuted = 57,
   AppDrivenAlarmExecuted = 58,
   StrapDrivenAlarmDisabled = 59,
   ExtendedBatteryInformation = 63,
+  HighFreqSyncPrompt = 96,
 }
 
 export enum CommandNumber {

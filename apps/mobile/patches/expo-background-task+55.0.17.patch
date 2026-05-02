@@ -1,0 +1,36 @@
+diff --git a/node_modules/expo-background-task/android/src/main/java/expo/modules/backgroundtask/BackgroundTaskScheduler.kt b/node_modules/expo-background-task/android/src/main/java/expo/modules/backgroundtask/BackgroundTaskScheduler.kt
+index 74c5719..b2c8384 100644
+--- a/node_modules/expo-background-task/android/src/main/java/expo/modules/backgroundtask/BackgroundTaskScheduler.kt
++++ b/node_modules/expo-background-task/android/src/main/java/expo/modules/backgroundtask/BackgroundTaskScheduler.kt
+@@ -7,7 +7,6 @@ import androidx.work.Constraints
+ import androidx.work.Data
+ import androidx.work.ExistingPeriodicWorkPolicy
+ import androidx.work.ExistingWorkPolicy
+-import androidx.work.NetworkType
+ import androidx.work.OneTimeWorkRequestBuilder
+ import androidx.work.Operation
+ import androidx.work.PeriodicWorkRequestBuilder
+@@ -104,9 +103,7 @@ object BackgroundTaskScheduler {
+     val data = Data.Builder()
+       .putString("appScopeKey", appScopeKey)
+       .build()
+-    val constraints = Constraints.Builder()
+-      .setRequiredNetworkType(NetworkType.CONNECTED)
+-      .build()
++    val constraints = Constraints.Builder().build()
+ 
+     // Get Work manager
+     val workManager = WorkManager.getInstance(context)
+diff --git a/node_modules/expo-background-task/ios/BackgroundTaskScheduler.swift b/node_modules/expo-background-task/ios/BackgroundTaskScheduler.swift
+index 906678b..66ac13c 100644
+--- a/node_modules/expo-background-task/ios/BackgroundTaskScheduler.swift
++++ b/node_modules/expo-background-task/ios/BackgroundTaskScheduler.swift
+@@ -90,7 +90,7 @@ public class BackgroundTaskScheduler {
+       stopWorkerOnce()
+ 
+       let request = BGProcessingTaskRequest(identifier: BackgroundTaskConstants.BackgroundWorkerIdentifier)
+-      request.requiresNetworkConnectivity = true
++      request.requiresNetworkConnectivity = false
+       request.requiresExternalPower = false
+       request.earliestBeginDate = Date().addingTimeInterval(intervalSeconds)
+ 

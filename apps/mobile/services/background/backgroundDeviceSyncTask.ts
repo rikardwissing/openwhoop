@@ -4,7 +4,11 @@ import * as TaskManager from 'expo-task-manager';
 
 import { processPendingDerivedRefresh } from '@/data/sqlite/SQLiteHealthRepository';
 import { openAppDatabaseAsync } from '@/db/appDatabase';
-import { WearableSyncService } from '@/services/ble/WearableSyncService';
+import {
+  WearableSyncService,
+  type SyncExecutionOutcome,
+  type SyncRunOptions,
+} from '@/services/ble/WearableSyncService';
 import {
   loadDetectedReviewNotificationSnapshot,
   notifyForNewDetectedReviewItemsAsync,
@@ -41,6 +45,19 @@ function hasNotificationPermission(settings: Notifications.NotificationPermissio
 
 function formatImportedReadings(count: number) {
   return `${count} ${count === 1 ? 'reading' : 'readings'}`;
+}
+
+function formatElapsedDuration(elapsedMs: number) {
+  const totalSeconds = Math.max(0, Math.round(elapsedMs / 1000));
+
+  if (totalSeconds < 60) {
+    return `${totalSeconds}s`;
+  }
+
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+
+  return seconds === 0 ? `${minutes}m` : `${minutes}m ${seconds}s`;
 }
 
 function errorMessage(error: unknown) {
@@ -113,11 +130,20 @@ async function runBackgroundDeviceSyncTaskAsync() {
 }
 
 async function executeBackgroundDeviceSyncAsync(options: {
+  db?: Awaited<ReturnType<typeof openAppDatabaseAsync>>;
   requestNotificationPermission: boolean;
+  service?: WearableSyncService;
+  syncRunner?: (
+    service: WearableSyncService,
+    options: SyncRunOptions,
+  ) => Promise<SyncExecutionOutcome>;
   useExpirationListener: boolean;
 }): Promise<BackgroundDeviceSyncManualRunResult> {
+  const runStartedAtMs = Date.now();
   let db: Awaited<ReturnType<typeof openAppDatabaseAsync>> | null = null;
   let service: WearableSyncService | null = null;
+  const ownsDatabase = !options.db;
+  const ownsService = !options.service;
   const expirationController = new AbortController();
   let expirationSubscription: { remove: () => void } | null = null;
   const notificationPermissionGranted = await ensureBackgroundDeviceSyncNotificationPermissionAsync(
@@ -126,8 +152,8 @@ async function executeBackgroundDeviceSyncAsync(options: {
   await ensureBackgroundDeviceSyncNotificationChannelAsync();
 
   try {
-    db = await openAppDatabaseAsync();
-    service = new WearableSyncService(db);
+    db = options.db ?? await openAppDatabaseAsync();
+    service = options.service ?? new WearableSyncService(db);
 
     if (options.useExpirationListener) {
       try {
@@ -156,21 +182,16 @@ async function executeBackgroundDeviceSyncAsync(options: {
       body: `Syncing ${deviceName} in the background.`,
     });
 
-    const outcome = await service.syncInBackground({
+    const syncOptions = {
       abortSignal: expirationController.signal,
       maxDurationMs: BACKGROUND_DEVICE_SYNC_TIME_BUDGET_MS,
-    });
+    };
+    const outcome = await (options.syncRunner
+      ? options.syncRunner(service, syncOptions)
+      : service.syncInBackground(syncOptions));
     const readings = formatImportedReadings(outcome.importedReadings);
     const pausedSafely = outcome.reason === 'time-budget' || outcome.reason === 'expiration';
     const status = pausedSafely ? 'paused' : outcome.status === 'skipped' ? 'skipped' : 'completed';
-    const completedBody =
-      outcome.reason === 'expiration'
-        ? `Paused safely because the system background window expired after importing ${readings}. Sync will continue later.`
-        : outcome.reason === 'time-budget'
-          ? `Paused safely after importing ${readings}. Sync will continue in a later background window.`
-          : outcome.status === 'skipped'
-            ? 'Skipped because another sync is already running.'
-            : `Completed background sync with ${readings} imported.`;
 
     let processedDerivedRefresh = false;
     let detectionNotifications = EMPTY_DETECTION_NOTIFICATION_RESULT;
@@ -187,6 +208,16 @@ async function executeBackgroundDeviceSyncAsync(options: {
         previousDetectionSnapshot,
       ).catch(() => EMPTY_DETECTION_NOTIFICATION_RESULT);
     }
+
+    const elapsed = formatElapsedDuration(Date.now() - runStartedAtMs);
+    const completedBody =
+      outcome.reason === 'expiration'
+        ? `Paused safely after ${elapsed} because the system background window expired after importing ${readings}. Sync will continue later.`
+        : outcome.reason === 'time-budget'
+          ? `Paused safely after ${elapsed} with ${readings} imported. Sync will continue in a later background window.`
+          : outcome.status === 'skipped'
+            ? 'Skipped because another sync is already running.'
+            : `Completed background sync in ${elapsed} with ${readings} imported.`;
 
     await scheduleBackgroundDeviceSyncNotificationAsync({
       title:
@@ -225,10 +256,10 @@ async function executeBackgroundDeviceSyncAsync(options: {
     };
   } finally {
     expirationSubscription?.remove();
-    if (service) {
+    if (service && ownsService) {
       await service.dispose().catch(() => {});
     }
-    if (db) {
+    if (db && ownsDatabase) {
       await db.closeAsync().catch(() => {});
     }
   }
@@ -265,6 +296,23 @@ export async function runBackgroundDeviceSyncNowAsync() {
 
   return executeBackgroundDeviceSyncAsync({
     requestNotificationPermission: true,
+    useExpirationListener: false,
+  });
+}
+
+export async function runBackgroundDeviceSyncWithServiceAsync(
+  db: Awaited<ReturnType<typeof openAppDatabaseAsync>>,
+  service: WearableSyncService,
+) {
+  await registerBackgroundDeviceSyncTaskAsync({
+    requestNotificationPermission: true,
+  });
+
+  return executeBackgroundDeviceSyncAsync({
+    db,
+    requestNotificationPermission: true,
+    service,
+    syncRunner: (activeService, syncOptions) => activeService.syncOnLiveConnection(syncOptions),
     useExpirationListener: false,
   });
 }
