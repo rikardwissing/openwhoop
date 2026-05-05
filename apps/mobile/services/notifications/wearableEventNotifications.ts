@@ -121,11 +121,6 @@ function notificationForWearableEvent(
         title: 'Battery level received',
         body: `${resolvedDeviceName} reported ${event.percent}% battery.`,
       };
-    case EventNumber.ExtendedBatteryInformation:
-      return {
-        title: 'Extended battery info received',
-        body: `${resolvedDeviceName} sent extended battery information.`,
-      };
     case EventNumber.WristOn:
       return {
         title: 'Wearable on body',

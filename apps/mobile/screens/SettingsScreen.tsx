@@ -316,8 +316,8 @@ export function SettingsScreen() {
     message: 'Delete pending detected activities and rerun local activity detection across the history already on this phone.',
   });
   const [backgroundDeviceSyncRegistrationState, setBackgroundDeviceSyncRegistrationState] = useState<{
-    status: 'checking' | 'registered' | 'not_registered' | 'error';
     message: string;
+    status: 'checking' | 'registered' | 'not_registered' | 'error';
   }>({
     status: 'checking',
     message: 'Checking device sync task registration...',
@@ -837,7 +837,11 @@ export function SettingsScreen() {
       <GlassCard accentColor={colors.violet}>
         <SectionHeader
           title="Background Sync"
-          trailing={backgroundDeviceSyncRegistrationState.status === 'registered' ? 'Registered' : 'Expo'}
+          trailing={
+            backgroundDeviceSyncRegistrationState.status === 'registered'
+              ? 'Registered'
+              : 'Expo'
+          }
         />
         <View style={styles.settingColumn}>
           <View>

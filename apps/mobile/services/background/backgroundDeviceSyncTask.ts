@@ -121,6 +121,7 @@ async function scheduleBackgroundDeviceSyncNotificationAsync(content: {
 async function runBackgroundDeviceSyncTaskAsync() {
   const result = await executeBackgroundDeviceSyncAsync({
     requestNotificationPermission: false,
+    triggerLabel: 'background processing',
     useExpirationListener: true,
   });
 
@@ -137,6 +138,7 @@ async function executeBackgroundDeviceSyncAsync(options: {
     service: WearableSyncService,
     options: SyncRunOptions,
   ) => Promise<SyncExecutionOutcome>;
+  triggerLabel: string;
   useExpirationListener: boolean;
 }): Promise<BackgroundDeviceSyncManualRunResult> {
   const runStartedAtMs = Date.now();
@@ -179,7 +181,7 @@ async function executeBackgroundDeviceSyncAsync(options: {
     const deviceName = deviceState.name?.trim() || 'wearable';
     await scheduleBackgroundDeviceSyncNotificationAsync({
       title: 'Background sync started',
-      body: `Syncing ${deviceName} in the background.`,
+      body: `Syncing ${deviceName} in the background. Triggered by ${options.triggerLabel}.`,
     });
 
     const syncOptions = {
@@ -289,13 +291,16 @@ export async function isBackgroundDeviceSyncTaskRegisteredAsync() {
   return TaskManager.isTaskRegisteredAsync(BACKGROUND_DEVICE_SYNC_TASK_NAME);
 }
 
-export async function runBackgroundDeviceSyncNowAsync() {
+export async function runBackgroundDeviceSyncNowAsync(options?: {
+  triggerLabel?: string;
+}) {
   await registerBackgroundDeviceSyncTaskAsync({
     requestNotificationPermission: true,
   });
 
   return executeBackgroundDeviceSyncAsync({
     requestNotificationPermission: true,
+    triggerLabel: options?.triggerLabel ?? 'manual trigger',
     useExpirationListener: false,
   });
 }
@@ -303,6 +308,9 @@ export async function runBackgroundDeviceSyncNowAsync() {
 export async function runBackgroundDeviceSyncWithServiceAsync(
   db: Awaited<ReturnType<typeof openAppDatabaseAsync>>,
   service: WearableSyncService,
+  options?: {
+    triggerLabel?: string;
+  },
 ) {
   await registerBackgroundDeviceSyncTaskAsync({
     requestNotificationPermission: true,
@@ -312,7 +320,8 @@ export async function runBackgroundDeviceSyncWithServiceAsync(
     db,
     requestNotificationPermission: true,
     service,
-    syncRunner: (activeService, syncOptions) => activeService.syncOnLiveConnection(syncOptions),
+    syncRunner: (activeService, syncOptions) => activeService.syncInBackground(syncOptions),
+    triggerLabel: options?.triggerLabel ?? 'manual trigger',
     useExpirationListener: false,
   });
 }

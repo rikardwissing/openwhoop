@@ -1,5 +1,4 @@
 import type { SQLiteDatabase, SQLiteStatement } from 'expo-sqlite';
-import { BleManager, type Device, type Subscription } from 'react-native-ble-plx';
 
 import {
   markOneOffSleepAlarmExecutedFromDatabase,
@@ -14,10 +13,9 @@ import {
   recordSyncImportSummary,
   releaseBackgroundSyncLock,
 } from '@/services/background/backgroundSyncState';
-import { CMD_FROM_STRAP_UUID, CMD_TO_STRAP_UUID, DATA_FROM_STRAP_UUID, EVENTS_FROM_STRAP_UUID, EventNumber, MEMFAULT_UUID, WEARABLE_SERVICE_UUID } from '@/services/ble/constants';
-import { resolveScanDeviceName } from '@/services/ble/deviceNaming';
-import { createWearableBleManager, getRestoredWearableDevice } from '@/services/ble/bleManager';
-import { PacketAssembler, base64ToBytes, bytesToBase64, disableAlarmPacket, enterHighFrequencySyncPacket, exitHighFrequencySyncPacket, getBatteryLevelPacket, getBodyLocationAndStatusPacket, getNamePacket, helloHarvardPacket, historyEndPacket, historyStartPacket, parseNotification, restartPacket, setAlarmPacket, setClockPacket, toggleR7DataCollectionPacket, toggleRealtimeHrPacket, type SensorDataPacket, versionInfoPacket } from '@/services/ble/codec';
+import { EventNumber } from '@/services/ble/constants';
+import { WearableConnectionManager, type LiveConnectionHandle } from '@/services/ble/WearableConnectionManager';
+import { disableAlarmPacket, enterHighFrequencySyncPacket, exitHighFrequencySyncPacket, getBatteryLevelPacket, getBodyLocationAndStatusPacket, getNamePacket, helloHarvardPacket, historyEndPacket, historyStartPacket, restartPacket, setAlarmPacket, setClockPacket, toggleR7DataCollectionPacket, toggleRealtimeHrPacket, type FramedPacket, type ParsedNotification, type SensorDataPacket, versionInfoPacket } from '@/services/ble/codec';
 import { HistorySyncWatchdog } from '@/services/ble/syncWatchdog';
 import {
   notifyForWearableBatteryLevelAsync,
@@ -51,10 +49,7 @@ const SELECTED_DEVICE_SQL = `
     sync_error = excluded.sync_error
 `;
 
-const CONNECT_TIMEOUT_MS = 15_000;
-const CONNECT_SCAN_TIMEOUT_MS = 8_000;
 const BATTERY_REQUEST_TIMEOUT_MS = 1_500;
-const LIVE_UPDATES_RECONNECT_DELAY_MS = 3_000;
 const BACKGROUND_SYNC_CLEANUP_RESERVE_MS = 20_000;
 const HISTORY_WRITE_BATCH_SIZE = 250;
 const HISTORY_WRITE_MAX_RETRIES = 4;
@@ -401,9 +396,8 @@ export interface SyncRunOptions {
   abortSignal?: AbortSignal;
   allowDiscoveryScan?: boolean;
   allowRescan?: boolean;
-  connectedDevice?: Device;
   maxDurationMs?: number;
-  preserveConnection?: boolean;
+  requireExistingConnection?: boolean;
 }
 
 function formatBleError(error: unknown) {
@@ -450,18 +444,18 @@ function wearDetail(bodyStatus: WearState) {
 
 export class WearableSyncService {
   private liveUpdatesCleanup: (() => Promise<void>) | null = null;
-  private liveUpdatesDevice: Device | null = null;
+  private liveUpdatesHandle: LiveConnectionHandle | null = null;
   private liveDeviceEventSideEffectsSuspendCount = 0;
   private nextLiveEventId = 0;
   private liveHeartRate: { bpm: number | null; observedAt: number | null } = { bpm: null, observedAt: null };
 
   constructor(
     private readonly db: SQLiteDatabase,
-    private readonly manager: BleManager = createWearableBleManager(),
+    private readonly connectionManager: WearableConnectionManager = new WearableConnectionManager(),
   ) {}
 
   async dispose() {
-    this.manager.destroy();
+    await this.connectionManager.dispose();
   }
 
   async getDeviceState(): Promise<DeviceState> {
@@ -509,41 +503,12 @@ export class WearableSyncService {
   }
 
   async scan(): Promise<WearableScanResult[]> {
-    await this.ensurePoweredOn();
-
-    const found = new Map<string, WearableScanResult>();
-
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.manager.stopDeviceScan();
-        resolve(
-          [...found.values()].sort((left, right) => (right.rssi ?? -999) - (left.rssi ?? -999)),
-        );
-      }, 5000);
-
-      this.manager.startDeviceScan([WEARABLE_SERVICE_UUID], null, (error, device) => {
-        if (error) {
-          clearTimeout(timeout);
-          this.manager.stopDeviceScan();
-          reject(error);
-          return;
-        }
-
-        if (!device) {
-          return;
-        }
-
-        found.set(device.id, {
-          id: device.id,
-          name: resolveScanDeviceName(device),
-          rssi: device.rssi ?? null,
-        });
-      });
-    });
+    return this.connectionManager.scan();
   }
 
   async selectDevice(device: WearableScanResult) {
     await this.stopLiveUpdates();
+    await this.connectionManager.disconnect();
     this.clearLiveHeartRate();
     await this.db.execAsync('DELETE FROM device_state;');
     await this.persistDeviceState({
@@ -554,6 +519,7 @@ export class WearableSyncService {
 
   async forgetDevice() {
     await this.stopLiveUpdates();
+    await this.connectionManager.disconnect();
     this.clearLiveHeartRate();
     await this.db.execAsync('DELETE FROM device_state;');
   }
@@ -604,7 +570,7 @@ export class WearableSyncService {
     };
   }
 
-  private toLiveEvent(parsed: ReturnType<typeof parseNotification>): WearableLiveEvent | null {
+  private toLiveEvent(parsed: ParsedNotification): WearableLiveEvent | null {
     if (parsed.type === 'battery') {
       return this.createLiveEvent('command', 'battery-reply', 'Battery reply', `${parsed.battery.percent}%`);
     }
@@ -663,7 +629,7 @@ export class WearableSyncService {
     return null;
   }
 
-  private recordLiveEvent(parsed: ReturnType<typeof parseNotification>, onLiveEvent?: LiveEventRecorder) {
+  private recordLiveEvent(parsed: ParsedNotification, onLiveEvent?: LiveEventRecorder) {
     if (!onLiveEvent) {
       return;
     }
@@ -675,7 +641,7 @@ export class WearableSyncService {
   }
 
   private async notifyForWearableNotification(
-    parsed: ReturnType<typeof parseNotification>,
+    parsed: ParsedNotification,
     deviceId: string,
     deviceName: string | null,
   ) {
@@ -711,51 +677,8 @@ export class WearableSyncService {
     }
 
     let closed = false;
-    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-    let subscriptions: Subscription[] = [];
-    let device: Device | null = null;
     let resolvedDeviceId = selected.id;
     let resolvedDeviceName = selected.name;
-
-    const clearReconnect = () => {
-      if (reconnectTimer) {
-        clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-      }
-    };
-
-    const teardownConnection = async () => {
-      for (const subscription of subscriptions) {
-        subscription.remove();
-      }
-      subscriptions = [];
-
-      if (device) {
-        try {
-          await this.sendCommand(device, toggleRealtimeHrPacket(false));
-        } catch {}
-        if (this.liveUpdatesDevice?.id === device.id) {
-          this.liveUpdatesDevice = null;
-        }
-        try {
-          await device.cancelConnection();
-        } catch {}
-        device = null;
-      }
-
-      this.clearLiveHeartRate();
-    };
-
-    const scheduleReconnect = () => {
-      if (closed || reconnectTimer) {
-        return;
-      }
-
-      reconnectTimer = setTimeout(() => {
-        reconnectTimer = null;
-        void connectAndMonitor();
-      }, LIVE_UPDATES_RECONNECT_DELAY_MS);
-    };
 
     const pushState = async (update: Partial<Pick<DeviceStateUpdate, 'batteryPercent' | 'chargingStatus' | 'bodyStatus'>>) => {
       if (closed) {
@@ -772,7 +695,7 @@ export class WearableSyncService {
       onDeviceState(await this.getDeviceState());
     };
 
-    const handleNotification = async (parsed: ReturnType<typeof parseNotification>) => {
+    const handleNotification = async (parsed: ParsedNotification) => {
       const suppressEventSideEffects =
         parsed.type === 'event' && this.liveDeviceEventSideEffectsSuspendCount > 0;
 
@@ -822,77 +745,61 @@ export class WearableSyncService {
       }
     };
 
-    const connectAndMonitor = async () => {
+    const sendLiveSetupCommands = async () => {
+      await this.sendCommand(helloHarvardPacket());
+      await this.sendCommand(toggleRealtimeHrPacket(true));
+      await this.sendCommand(getBatteryLevelPacket());
+      await this.sendCommand(getBodyLocationAndStatusPacket());
+      await this.sendCommand(getNamePacket());
+      await this.sendCommand(versionInfoPacket());
+    };
+
+    const unsubscribePackets = this.connectionManager.addPacketConsumer(({ parsed }) => {
       if (closed) {
         return;
       }
 
-      try {
-        await teardownConnection();
-        const latestSelected = await this.getDeviceState();
-        if (!latestSelected.id) {
+      void handleNotification(parsed).catch(() => {});
+    });
+
+    const cleanup = async () => {
+      closed = true;
+      unsubscribePackets();
+      await this.sendCommand(toggleRealtimeHrPacket(false)).catch(() => {});
+      const handle = this.liveUpdatesHandle;
+      this.liveUpdatesHandle = null;
+      await handle?.stop();
+      if (this.liveUpdatesCleanup === cleanup) {
+        this.liveUpdatesCleanup = null;
+      }
+      this.clearLiveHeartRate();
+    };
+
+    this.liveUpdatesCleanup = cleanup;
+    this.liveUpdatesHandle = await this.connectionManager.startLiveConnection(selected, {
+      onConnected: async (lease) => {
+        if (closed) {
           return;
         }
 
-        ({ device, resolvedDeviceId, resolvedDeviceName } = await this.connectSelectedWearable(latestSelected));
-        this.liveUpdatesDevice = device;
+        resolvedDeviceId = lease.resolvedDeviceId;
+        resolvedDeviceName = lease.resolvedDeviceName;
         await this.persistDeviceState({
           id: resolvedDeviceId,
           name: resolvedDeviceName,
         });
         onDeviceState(await this.getDeviceState());
+        await sendLiveSetupCommands();
+      },
+      onDisconnected: async () => {
+        if (closed) {
+          return;
+        }
 
-        const commandAssembler = new PacketAssembler();
-        const eventAssembler = new PacketAssembler();
-        const dataAssembler = new PacketAssembler();
-        const monitor = (characteristic: string, assembler: PacketAssembler) =>
-          device!.monitorCharacteristicForService(WEARABLE_SERVICE_UUID, characteristic, (error, value) => {
-            if (closed) {
-              return;
-            }
-
-            if (error) {
-              scheduleReconnect();
-              return;
-            }
-
-            if (!value?.value) {
-              return;
-            }
-
-            const frames = assembler.push(base64ToBytes(value.value));
-            for (const frame of frames) {
-              void handleNotification(parseNotification(frame)).catch(() => {});
-            }
-          });
-
-        subscriptions.push(monitor(CMD_FROM_STRAP_UUID, commandAssembler));
-        subscriptions.push(monitor(EVENTS_FROM_STRAP_UUID, eventAssembler));
-        subscriptions.push(monitor(DATA_FROM_STRAP_UUID, dataAssembler));
-
-        await this.sendCommand(device, helloHarvardPacket());
-        await this.sendCommand(device, toggleRealtimeHrPacket(true));
-        await this.sendCommand(device, getBatteryLevelPacket());
-        await this.sendCommand(device, getBodyLocationAndStatusPacket());
-        await this.sendCommand(device, getNamePacket());
-        await this.sendCommand(device, versionInfoPacket());
-      } catch {
-        await teardownConnection();
-        scheduleReconnect();
-      }
-    };
-
-    const cleanup = async () => {
-      closed = true;
-      clearReconnect();
-      await teardownConnection();
-      if (this.liveUpdatesCleanup === cleanup) {
-        this.liveUpdatesCleanup = null;
-      }
-    };
-
-    this.liveUpdatesCleanup = cleanup;
-    await connectAndMonitor();
+        this.clearLiveHeartRate();
+        onDeviceState(await this.getDeviceState());
+      },
+    });
   }
 
   async stopLiveUpdates() {
@@ -914,10 +821,10 @@ export class WearableSyncService {
     await this.runDeviceCommand(
       onProgress,
       `Setting alarm for ${formatSqliteDateTime(alarmAt)}...`,
-      async (device) => {
-        await this.sendCommand(device, helloHarvardPacket());
-        await this.sendCommand(device, setClockPacket(Math.floor(Date.now() / 1000)));
-        await this.sendCommand(device, setAlarmPacket(unixSeconds));
+      async () => {
+        await this.sendCommand(helloHarvardPacket());
+        await this.sendCommand(setClockPacket(Math.floor(Date.now() / 1000)));
+        await this.sendCommand(setAlarmPacket(unixSeconds));
       },
       onLiveEvent,
     );
@@ -928,15 +835,15 @@ export class WearableSyncService {
     });
   }
 
-  private async rearmEnabledSleepAlarm(device: Device) {
+  private async rearmEnabledSleepAlarm() {
     const alarmAt = await resolveNextWearableAlarmDateFromDatabase(this.db);
     if (!alarmAt) {
-      await this.sendCommand(device, disableAlarmPacket());
+      await this.sendCommand(disableAlarmPacket());
       return null;
     }
 
     const alarmUnixSeconds = Math.floor(alarmAt.getTime() / 1000);
-    await this.sendCommand(device, setAlarmPacket(alarmUnixSeconds));
+    await this.sendCommand(setAlarmPacket(alarmUnixSeconds));
 
     return {
       alarmAt,
@@ -948,9 +855,9 @@ export class WearableSyncService {
     await this.runDeviceCommand(
       onProgress,
       'Disabling alarm on the wearable...',
-      async (device) => {
-        await this.sendCommand(device, helloHarvardPacket());
-        await this.sendCommand(device, disableAlarmPacket());
+      async () => {
+        await this.sendCommand(helloHarvardPacket());
+        await this.sendCommand(disableAlarmPacket());
       },
       onLiveEvent,
     );
@@ -965,9 +872,9 @@ export class WearableSyncService {
     await this.runDeviceCommand(
       onProgress,
       'Restarting the wearable...',
-      async (device) => {
-        await this.sendCommand(device, helloHarvardPacket());
-        await this.sendCommand(device, restartPacket());
+      async () => {
+        await this.sendCommand(helloHarvardPacket());
+        await this.sendCommand(restartPacket());
       },
       onLiveEvent,
     );
@@ -983,28 +890,12 @@ export class WearableSyncService {
   }
 
   async syncOnLiveConnection(options?: SyncRunOptions): Promise<SyncExecutionOutcome> {
-    const liveDevice = this.liveUpdatesDevice;
-    const isLiveDeviceConnected = liveDevice ? await liveDevice.isConnected().catch(() => false) : false;
-
-    if (!liveDevice || !isLiveDeviceConnected) {
-      throw new Error('Live wearable connection is not active.');
-    }
-
-    this.liveDeviceEventSideEffectsSuspendCount += 1;
-    try {
-      return await this.runSync('background', undefined, undefined, {
-        ...options,
-        allowDiscoveryScan: false,
-        allowRescan: false,
-        connectedDevice: liveDevice,
-        preserveConnection: true,
-      });
-    } finally {
-      this.liveDeviceEventSideEffectsSuspendCount = Math.max(
-        0,
-        this.liveDeviceEventSideEffectsSuspendCount - 1,
-      );
-    }
+    return this.runSync('background', undefined, undefined, {
+      ...options,
+      allowDiscoveryScan: false,
+      allowRescan: false,
+      requireExistingConnection: true,
+    });
   }
 
   private async runSync(
@@ -1013,10 +904,6 @@ export class WearableSyncService {
     onLiveEvent?: LiveEventRecorder,
     options?: SyncRunOptions,
   ): Promise<SyncExecutionOutcome> {
-    if (source === 'foreground') {
-      await this.stopLiveUpdates();
-    }
-
     const selected = await this.getDeviceState();
     if (!selected.id) {
       throw new Error('Select a wearable before syncing.');
@@ -1056,10 +943,9 @@ export class WearableSyncService {
       };
     }
 
-    await this.ensurePoweredOn();
     onProgress?.({ status: 'connecting', message: `Connecting to ${selected.name ?? 'wearable'}...` });
 
-    let device: Device | null = null;
+    let connectionLease: Awaited<ReturnType<WearableConnectionManager['acquireConnection']>> | null = null;
     let firmware: string | null = null;
     let batteryPercent: number | null = null;
     let importedReadings = 0;
@@ -1102,9 +988,6 @@ export class WearableSyncService {
     let firstSensorReadingTime: string | null = null;
     let loggedHistoryPacketSamples = 0;
     const historyPacketShapeCounts = new Map<string, number>();
-    const dataAssembler = new PacketAssembler();
-    const responseAssembler = new PacketAssembler();
-    const subscriptions: Subscription[] = [];
     const timeBudgetDeadlineMs =
       options?.maxDurationMs && options.maxDurationMs > 0
         ? syncStartedAtMs + options.maxDurationMs
@@ -1112,14 +995,15 @@ export class WearableSyncService {
     let stoppedForTimeBudget = false;
     let stopReason: 'expiration' | 'time-budget' | null = null;
     let historyIntakeClosed = false;
+    let unsubscribeSyncPackets: (() => void) | null = null;
+    let resolveBatteryResponse: ((value: number | null) => void) | null = null;
+    this.liveDeviceEventSideEffectsSuspendCount += 1;
 
     const closeHistorySubscriptions = () => {
-      while (subscriptions.length > 0) {
-        const subscription = subscriptions.pop();
-        try {
-          subscription?.remove();
-        } catch {}
-      }
+      unsubscribeSyncPackets?.();
+      unsubscribeSyncPackets = null;
+      resolveBatteryResponse?.(null);
+      resolveBatteryResponse = null;
     };
 
     const summarizeSyncPerf = (
@@ -1307,7 +1191,6 @@ export class WearableSyncService {
 
           await queueCommand(() =>
             this.sendCommand(
-              device!,
               historyEndPacket(nextAck.cursor),
             ),
           );
@@ -1331,32 +1214,57 @@ export class WearableSyncService {
       );
     };
 
+    const requestBatteryPercentFromSyncStream = async () => {
+      if (!connectionLease) {
+        return null;
+      }
+
+      resolveBatteryResponse?.(null);
+
+      let timeout: ReturnType<typeof setTimeout> | null = null;
+      let finished = false;
+      let finish: (value: number | null) => void = () => {};
+      const response = new Promise<number | null>((resolve) => {
+        finish = (value) => {
+          if (finished) {
+            return;
+          }
+
+          finished = true;
+          if (timeout !== null) {
+            clearTimeout(timeout);
+          }
+          if (resolveBatteryResponse === finish) {
+            resolveBatteryResponse = null;
+          }
+          resolve(value);
+        };
+        resolveBatteryResponse = finish;
+        timeout = setTimeout(() => {
+          finish(null);
+        }, BATTERY_REQUEST_TIMEOUT_MS);
+      });
+
+      await this.sendCommand(getBatteryLevelPacket()).catch(() => {
+        finish(null);
+      });
+
+      return response;
+    };
+
     try {
       connectStartedAtMs = Date.now();
-      if (options?.connectedDevice) {
-        device = await this.getConnectedCandidate(options.connectedDevice);
-
-        if (!device) {
-          throw new Error('Live wearable connection is not active.');
-        }
-
-        device = await device.discoverAllServicesAndCharacteristics();
-        resolvedDeviceId = device.id;
-        resolvedDeviceName = resolveScanDeviceName(device) ?? selected.name;
-      } else {
-        ({
-          device,
-          resolvedDeviceId,
-          resolvedDeviceName,
-        } = await this.connectSelectedWearable(
-          selected,
-          onProgress,
-          {
-            allowDiscoveryScan: options?.allowDiscoveryScan ?? source === 'foreground',
-            allowRescan: options?.allowRescan ?? source === 'foreground',
-          },
-        ));
-      }
+      connectionLease = await this.connectionManager.acquireConnection(
+        selected,
+        onProgress,
+        {
+          allowDiscoveryScan: options?.allowDiscoveryScan ?? source === 'foreground',
+          allowRescan: options?.allowRescan ?? source === 'foreground',
+          requireExistingConnection: options?.requireExistingConnection ?? false,
+        },
+      );
+      resolvedDeviceId = connectionLease.resolvedDeviceId;
+      resolvedDeviceName = connectionLease.resolvedDeviceName;
       connectCompletedAtMs = Date.now();
 
       const completion = new Promise<void>((resolve, reject) => {
@@ -1446,160 +1354,154 @@ export class WearableSyncService {
           options?.abortSignal?.addEventListener('abort', abortListener, { once: true });
         }
 
-        const monitor = (characteristic: string, assembler: PacketAssembler) =>
-          device!.monitorCharacteristicForService(WEARABLE_SERVICE_UUID, characteristic, (error, value) => {
-            if (historyIntakeClosed) {
+        const handleSyncPacket = (frame: FramedPacket, parsed: ParsedNotification) => {
+          if (historyIntakeClosed) {
+            return;
+          }
+
+          watchdog.markPacketActivity();
+          if (parsed.type !== 'event') {
+            this.recordLiveEvent(parsed, onLiveEvent);
+            void this.notifyForWearableNotification(parsed, resolvedDeviceId, resolvedDeviceName).catch(() => {});
+          }
+
+          if (parsed.type === 'battery') {
+            batteryPercent = parsed.battery.percent;
+            resolveBatteryResponse?.(parsed.battery.percent);
+          }
+
+          if (writeFailure) {
+            fail(writeFailure);
+            return;
+          }
+
+          if (parsed.type === 'history') {
+            if (historyFirstPacketAtMs === null) {
+              historyFirstPacketAtMs = Date.now();
+            }
+            historyLastPacketAtMs = Date.now();
+            importedReadings += 1;
+            lastHistoryCursor = parsed.reading.unix;
+            watchdog.markProgress();
+
+            const readingTime = formatSqliteDateTime(new Date(parsed.reading.unix));
+            const imuSampleCount = parsed.reading.imuSampleCount;
+            const hasImuData = imuSampleCount > 0;
+            const hasSensorData = parsed.reading.sensorData !== null;
+
+            incrementLogCounter(historyPacketShapeCounts, `${frame.seq}:${frame.data.length}`);
+
+            if (hasImuData) {
+              historyPacketsWithImu += 1;
+              maxImuSamplesPerHistoryPacket = Math.max(maxImuSamplesPerHistoryPacket, imuSampleCount);
+              firstImuReadingTime ??= readingTime;
+            } else if (hasSensorData) {
+              historyPacketsWithSensor += 1;
+              firstSensorReadingTime ??= readingTime;
+            } else {
+              historyPacketsWithoutSensorOrImu += 1;
+            }
+
+            if (loggedHistoryPacketSamples < HISTORY_PACKET_DEBUG_SAMPLE_LIMIT) {
+              loggedHistoryPacketSamples += 1;
+              logSyncImportPerfSummary('sync.history.packet', {
+                index: importedReadings,
+                seq: frame.seq,
+                payload_len: frame.data.length,
+                has_imu: hasImuData,
+                imu_samples: imuSampleCount || null,
+                has_sensor: hasSensorData,
+                bpm: parsed.reading.bpm,
+                time: readingTime,
+              });
+            }
+
+            if (!shouldPersistHistoryReading(parsed.reading)) {
               return;
             }
 
-            if (error) {
-              fail(error);
-              return;
+            earliestImportedTime =
+              earliestImportedTime === null || readingTime < earliestImportedTime
+                ? readingTime
+                : earliestImportedTime;
+            latestImportedTime =
+              latestImportedTime === null || readingTime > latestImportedTime
+                ? readingTime
+                : latestImportedTime;
+            pendingHistoryRows.push({
+              bpm: parsed.reading.bpm,
+              time: readingTime,
+              rrIntervals: rrToString(parsed.reading.rr),
+              ...serializeSensorColumns(parsed.reading.sensorData),
+            });
+            queuedPersistableHistoryRowCount += 1;
+            maxPendingHistoryRows = Math.max(maxPendingHistoryRows, pendingHistoryRows.length);
+
+            if (pendingHistoryRows.length >= HISTORY_WRITE_BATCH_SIZE) {
+              queuePendingHistoryFlush();
             }
 
-            if (!value?.value) {
-              return;
+            if (importedReadings % 250 === 0) {
+              onProgress?.({
+                status: 'syncing',
+                message: `Imported ${importedReadings} readings...`,
+                importedReadings,
+              });
+            }
+          }
+
+          if (parsed.type === 'metadata') {
+            watchdog.markProgress();
+            if (parsed.metadata.kind === 2) {
+              historyEndCount += 1;
+              pendingHistoryAcks.push({
+                cursor: parsed.metadata.data,
+                targetPersistedCount: queuedPersistableHistoryRowCount,
+                enqueuedAtMs: Date.now(),
+              });
+              queuePendingHistoryAckProcessing();
             }
 
-            watchdog.markPacketActivity();
-            const frames = assembler.push(base64ToBytes(value.value));
-            for (const frame of frames) {
-              const parsed = parseNotification(frame);
-              if (parsed.type !== 'event') {
-                this.recordLiveEvent(parsed, onLiveEvent);
-                void this.notifyForWearableNotification(parsed, resolvedDeviceId, resolvedDeviceName).catch(() => {});
-              }
-
-              if (writeFailure) {
-                fail(writeFailure);
-                return;
-              }
-
-              if (parsed.type === 'history') {
-                if (historyFirstPacketAtMs === null) {
-                  historyFirstPacketAtMs = Date.now();
-                }
-                historyLastPacketAtMs = Date.now();
-                importedReadings += 1;
-                lastHistoryCursor = parsed.reading.unix;
-                watchdog.markProgress();
-
-                const readingTime = formatSqliteDateTime(new Date(parsed.reading.unix));
-                const imuSampleCount = parsed.reading.imuSampleCount;
-                const hasImuData = imuSampleCount > 0;
-                const hasSensorData = parsed.reading.sensorData !== null;
-
-                incrementLogCounter(historyPacketShapeCounts, `${frame.seq}:${frame.data.length}`);
-
-                if (hasImuData) {
-                  historyPacketsWithImu += 1;
-                  maxImuSamplesPerHistoryPacket = Math.max(maxImuSamplesPerHistoryPacket, imuSampleCount);
-                  firstImuReadingTime ??= readingTime;
-                } else if (hasSensorData) {
-                  historyPacketsWithSensor += 1;
-                  firstSensorReadingTime ??= readingTime;
-                } else {
-                  historyPacketsWithoutSensorOrImu += 1;
-                }
-
-                if (loggedHistoryPacketSamples < HISTORY_PACKET_DEBUG_SAMPLE_LIMIT) {
-                  loggedHistoryPacketSamples += 1;
-                  logSyncImportPerfSummary('sync.history.packet', {
-                    index: importedReadings,
-                    seq: frame.seq,
-                    payload_len: frame.data.length,
-                    has_imu: hasImuData,
-                    imu_samples: imuSampleCount || null,
-                    has_sensor: hasSensorData,
-                    bpm: parsed.reading.bpm,
-                    time: readingTime,
-                  });
-                }
-
-                if (!shouldPersistHistoryReading(parsed.reading)) {
-                  continue;
-                }
-
-                earliestImportedTime =
-                  earliestImportedTime === null || readingTime < earliestImportedTime
-                    ? readingTime
-                    : earliestImportedTime;
-                latestImportedTime =
-                  latestImportedTime === null || readingTime > latestImportedTime
-                    ? readingTime
-                    : latestImportedTime;
-                pendingHistoryRows.push({
-                  bpm: parsed.reading.bpm,
-                  time: readingTime,
-                  rrIntervals: rrToString(parsed.reading.rr),
-                  ...serializeSensorColumns(parsed.reading.sensorData),
-                });
-                queuedPersistableHistoryRowCount += 1;
-                maxPendingHistoryRows = Math.max(maxPendingHistoryRows, pendingHistoryRows.length);
-
-                if (pendingHistoryRows.length >= HISTORY_WRITE_BATCH_SIZE) {
-                  queuePendingHistoryFlush();
-                }
-
-                if (importedReadings % 250 === 0) {
-                  onProgress?.({
-                    status: 'syncing',
-                    message: `Imported ${importedReadings} readings...`,
-                    importedReadings,
-                  });
-                }
-              }
-
-              if (parsed.type === 'metadata') {
-                watchdog.markProgress();
-                if (parsed.metadata.kind === 2) {
-                  historyEndCount += 1;
-                  pendingHistoryAcks.push({
-                    cursor: parsed.metadata.data,
-                    targetPersistedCount: queuedPersistableHistoryRowCount,
-                    enqueuedAtMs: Date.now(),
-                  });
-                  queuePendingHistoryAckProcessing();
-                }
-
-                if (parsed.metadata.kind === 3) {
-                  historyCompletedAtMs = Date.now();
-                  queuePendingHistoryFlush();
-                  succeed();
-                }
-              }
-
-              if (parsed.type === 'version') {
-                firmware = parsed.version.harvard;
-              }
-
-              if (parsed.type === 'deviceName') {
-                resolvedDeviceName = parsed.device.name;
-              }
+            if (parsed.metadata.kind === 3) {
+              historyCompletedAtMs = Date.now();
+              queuePendingHistoryFlush();
+              succeed();
             }
-          });
+          }
 
-        subscriptions.push(monitor(DATA_FROM_STRAP_UUID, dataAssembler));
-        subscriptions.push(monitor(CMD_FROM_STRAP_UUID, responseAssembler));
-        subscriptions.push(monitor(EVENTS_FROM_STRAP_UUID, responseAssembler));
-        subscriptions.push(monitor(MEMFAULT_UUID, responseAssembler));
+          if (parsed.type === 'version') {
+            firmware = parsed.version.harvard;
+          }
+
+          if (parsed.type === 'deviceName') {
+            resolvedDeviceName = parsed.device.name;
+          }
+        };
+
+        unsubscribeSyncPackets = this.connectionManager.addPacketConsumer(({ frame, parsed }) => {
+          try {
+            handleSyncPacket(frame, parsed);
+          } catch (error) {
+            fail(toError(error, 'Failed to process wearable packet.'));
+          }
+        });
       });
 
-      await this.sendCommand(device, helloHarvardPacket());
-      await this.sendCommand(device, setClockPacket(Math.floor(Date.now() / 1000)));
+      await this.sendCommand(helloHarvardPacket());
+      await this.sendCommand(setClockPacket(Math.floor(Date.now() / 1000)));
       if (!stoppedForTimeBudget) {
-        await this.rearmEnabledSleepAlarm(device).catch(() => null);
+        await this.rearmEnabledSleepAlarm().catch(() => null);
       }
-      await this.sendCommand(device, getNamePacket());
-      await this.sendCommand(device, versionInfoPacket());
-      await this.sendCommand(device, toggleR7DataCollectionPacket(false));
-      batteryPercent = await this.refreshBatteryPercent(device, resolvedDeviceId);
-      await this.sendCommand(device, enterHighFrequencySyncPacket());
+      await this.sendCommand(getNamePacket());
+      await this.sendCommand(versionInfoPacket());
+      await this.sendCommand(toggleR7DataCollectionPacket(false));
+      batteryPercent = await requestBatteryPercentFromSyncStream();
+      await this.sendCommand(enterHighFrequencySyncPacket());
 
       onProgress?.({ status: 'syncing', message: 'Requesting wearable history...' });
       historyRequestedAtMs = Date.now();
       if (!stoppedForTimeBudget) {
-        await this.sendCommand(device, historyStartPacket());
+        await this.sendCommand(historyStartPacket());
       }
       await completion;
       historyIntakeClosed = true;
@@ -1675,18 +1577,23 @@ export class WearableSyncService {
       await commandQueue.catch(() => {});
 
       closeHistorySubscriptions();
+      this.liveDeviceEventSideEffectsSuspendCount = Math.max(
+        0,
+        this.liveDeviceEventSideEffectsSuspendCount - 1,
+      );
 
-      if (device) {
-        try {
-          await this.sendCommand(device, exitHighFrequencySyncPacket());
-        } catch {}
+      try {
+        await this.sendCommand(exitHighFrequencySyncPacket());
+      } catch {}
 
-        if (!options?.preserveConnection) {
-          try {
-            await device.cancelConnection();
-          } catch {}
-        }
+      if (connectionLease && (options?.requireExistingConnection || this.liveUpdatesHandle)) {
+        await this.sendCommand(helloHarvardPacket()).catch(() => {});
+        await this.sendCommand(toggleRealtimeHrPacket(true)).catch(() => {});
+        await this.sendCommand(getBatteryLevelPacket()).catch(() => {});
+        await this.sendCommand(getBodyLocationAndStatusPacket()).catch(() => {});
       }
+
+      await connectionLease?.release({ disconnectIfIdle: !options?.requireExistingConnection });
 
       await releaseBackgroundSyncLock(this.db, lockOwner).catch((error) => {
         console.warn(
@@ -1701,21 +1608,14 @@ export class WearableSyncService {
     }
   }
 
-  private async sendCommand(device: Device, bytes: Uint8Array) {
-    await device.writeCharacteristicWithoutResponseForService(
-      WEARABLE_SERVICE_UUID,
-      CMD_TO_STRAP_UUID,
-      bytesToBase64(bytes),
-    );
-    await delay(120);
+  private async sendCommand(bytes: Uint8Array) {
+    await this.connectionManager.sendCommand(bytes);
   }
 
-  private async requestBatteryPercent(device: Device, onLiveEvent?: LiveEventRecorder): Promise<number | null> {
-    const assembler = new PacketAssembler();
-
+  private async requestBatteryPercent(onLiveEvent?: LiveEventRecorder): Promise<number | null> {
     return new Promise<number | null>((resolve) => {
       let settled = false;
-      let subscription: Subscription | null = null;
+      let unsubscribePackets: (() => void) | null = null;
 
       const finish = (batteryPercent: number | null) => {
         if (settled) {
@@ -1724,7 +1624,7 @@ export class WearableSyncService {
 
         settled = true;
         clearTimeout(timeout);
-        subscription?.remove();
+        unsubscribePackets?.();
         resolve(batteryPercent);
       };
 
@@ -1732,45 +1632,29 @@ export class WearableSyncService {
         finish(null);
       }, BATTERY_REQUEST_TIMEOUT_MS);
 
-      subscription = device.monitorCharacteristicForService(
-        WEARABLE_SERVICE_UUID,
-        CMD_FROM_STRAP_UUID,
-        (error, value) => {
-          if (error) {
-            finish(null);
-            return;
-          }
+      unsubscribePackets = this.connectionManager.addPacketConsumer(({ parsed }) => {
+        if (!this.liveUpdatesHandle) {
+          this.recordLiveEvent(parsed, onLiveEvent);
+        }
+        if (parsed.type === 'battery') {
+          finish(parsed.battery.percent);
+        }
+      });
 
-          if (!value?.value) {
-            return;
-          }
-
-          const frames = assembler.push(base64ToBytes(value.value));
-          for (const frame of frames) {
-            const parsed = parseNotification(frame);
-            this.recordLiveEvent(parsed, onLiveEvent);
-            if (parsed.type === 'battery') {
-              finish(parsed.battery.percent);
-              return;
-            }
-          }
-        },
-      );
-
-      void this.sendCommand(device, getBatteryLevelPacket()).catch(() => {
+      void this.sendCommand(getBatteryLevelPacket()).catch(() => {
         finish(null);
       });
     });
   }
 
-  private async refreshBatteryPercent(device: Device, deviceId: string, onLiveEvent?: LiveEventRecorder): Promise<number | null> {
-    const batteryPercent = await this.requestBatteryPercent(device, onLiveEvent);
+  private async refreshBatteryPercent(deviceId: string, deviceName: string | null, onLiveEvent?: LiveEventRecorder): Promise<number | null> {
+    const batteryPercent = await this.requestBatteryPercent(onLiveEvent);
 
     if (batteryPercent === null) {
       return null;
     }
 
-    void notifyForWearableBatteryLevelAsync(this.db, deviceId, resolveScanDeviceName(device), batteryPercent).catch(() => {});
+    void notifyForWearableBatteryLevelAsync(this.db, deviceId, deviceName, batteryPercent).catch(() => {});
 
     await this.db.runAsync(
       'UPDATE device_state SET battery_percent = ?, last_seen_at = ? WHERE id = ?',
@@ -1782,52 +1666,33 @@ export class WearableSyncService {
     return batteryPercent;
   }
 
-  private async ensurePoweredOn() {
-    const current = await this.manager.state();
-    if (current === 'PoweredOn') {
-      return;
-    }
-
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        subscription.remove();
-        reject(new Error('Bluetooth did not power on in time.'));
-      }, 8000);
-
-      const subscription = this.manager.onStateChange((state) => {
-        if (state === 'PoweredOn') {
-          clearTimeout(timer);
-          subscription.remove();
-          resolve();
-        }
-      }, true);
-    });
-  }
-
   private async runDeviceCommand(
     onProgress: ((progress: SyncProgress) => void) | undefined,
     workingMessage: string,
-    task: (device: Device) => Promise<void>,
+    task: () => Promise<void>,
     onLiveEvent?: LiveEventRecorder,
   ) {
-    await this.stopLiveUpdates();
     const selected = await this.getDeviceState();
     if (!selected.id) {
       throw new Error('Select a wearable before sending a device command.');
     }
 
-    await this.ensurePoweredOn();
     onProgress?.({ status: 'connecting', message: `Connecting to ${selected.name ?? 'wearable'}...` });
 
-    let device: Device | null = null;
     let resolvedDeviceId = selected.id;
     let resolvedDeviceName = selected.name;
+    let lease: Awaited<ReturnType<WearableConnectionManager['acquireConnection']>> | null = null;
 
     try {
-      ({ device, resolvedDeviceId, resolvedDeviceName } = await this.connectSelectedWearable(selected, onProgress));
+      lease = await this.connectionManager.acquireConnection(selected, onProgress, {
+        allowDiscoveryScan: true,
+        allowRescan: true,
+      });
+      resolvedDeviceId = lease.resolvedDeviceId;
+      resolvedDeviceName = lease.resolvedDeviceName;
       onProgress?.({ status: 'updating', message: workingMessage });
-      await task(device);
-      const batteryPercent = await this.refreshBatteryPercent(device, resolvedDeviceId, onLiveEvent);
+      await task();
+      const batteryPercent = await this.refreshBatteryPercent(resolvedDeviceId, resolvedDeviceName, onLiveEvent);
 
       await this.persistDeviceState({
         id: resolvedDeviceId,
@@ -1846,222 +1711,7 @@ export class WearableSyncService {
       onProgress?.({ status: 'error', message });
       throw error;
     } finally {
-      if (device) {
-        try {
-          await device.cancelConnection();
-        } catch {}
-      }
+      await lease?.release({ disconnectIfIdle: true });
     }
-  }
-
-  private async connectWithRetry(
-    deviceId: string,
-    deviceName: string,
-    options?: {
-      avoidDisconnectOnFirstAttempt?: boolean;
-    },
-  ) {
-    let lastError: unknown = null;
-
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
-      try {
-        if (!(options?.avoidDisconnectOnFirstAttempt && attempt === 1)) {
-          await this.manager.cancelDeviceConnection(deviceId).catch(() => {});
-        }
-        return await this.manager.connectToDevice(deviceId, { timeout: CONNECT_TIMEOUT_MS });
-      } catch (error) {
-        lastError = error;
-        if (attempt < 2) {
-          await delay(400);
-        }
-      }
-    }
-
-    const message = lastError instanceof Error ? lastError.message : 'Unknown Bluetooth error.';
-    throw new Error(`Unable to connect to ${deviceName}. ${message}`);
-  }
-
-  private async findKnownConnectionCandidate(
-    selected: DeviceState,
-  ) {
-    const selectedId = selected.id;
-    if (!selectedId) {
-      throw new Error('No wearable selected.');
-    }
-
-    this.manager.stopDeviceScan();
-
-    const restored = getRestoredWearableDevice(selectedId);
-    if (restored && this.matchesSelectedDevice(restored, selected)) {
-      return restored;
-    }
-
-    const knownById = await this.manager.devices([selectedId]).catch(() => []);
-    if (knownById[0]) {
-      return knownById[0];
-    }
-
-    const connected = await this.manager.connectedDevices([WEARABLE_SERVICE_UUID]).catch(() => []);
-    const connectedMatch = connected.find((device) => this.matchesSelectedDevice(device, selected));
-    if (connectedMatch) {
-      return connectedMatch;
-    }
-
-    return null;
-  }
-
-  private async findConnectionCandidate(
-    selected: DeviceState,
-    options: {
-      allowDiscoveryScan: boolean;
-    },
-    onProgress?: (progress: SyncProgress) => void,
-  ) {
-    const known = await this.findKnownConnectionCandidate(selected);
-    if (known) {
-      return known;
-    }
-
-    if (!options.allowDiscoveryScan) {
-      return null;
-    }
-
-    onProgress?.({
-      status: 'connecting',
-      message: `Re-discovering ${selected.name ?? 'wearable'} before connecting...`,
-    });
-
-    const scanned = await this.scanForMatchingDevice(selected);
-    if (scanned) {
-      return scanned;
-    }
-
-    throw new Error(
-      `Could not find ${selected.name ?? 'the selected wearable'} nearby. Scan again and keep the wearable awake.`,
-    );
-  }
-
-  private async scanForMatchingDevice(selected: DeviceState) {
-    return new Promise<Device | null>((resolve, reject) => {
-      let fallbackMatch: Device | null = null;
-
-      const finish = (device: Device | null) => {
-        clearTimeout(timeout);
-        this.manager.stopDeviceScan();
-        resolve(device);
-      };
-
-      const timeout = setTimeout(() => {
-        finish(fallbackMatch);
-      }, CONNECT_SCAN_TIMEOUT_MS);
-
-      this.manager.startDeviceScan([WEARABLE_SERVICE_UUID], null, (error, device) => {
-        if (error) {
-          clearTimeout(timeout);
-          this.manager.stopDeviceScan();
-          reject(error);
-          return;
-        }
-
-        if (!device) {
-          return;
-        }
-
-        if (device.id === selected.id) {
-          finish(device);
-          return;
-        }
-
-        if (this.matchesSelectedDevice(device, selected)) {
-          if (!fallbackMatch || (device.rssi ?? -999) > (fallbackMatch.rssi ?? -999)) {
-            fallbackMatch = device;
-          }
-        }
-      });
-    });
-  }
-
-  private matchesSelectedDevice(device: Device, selected: DeviceState) {
-    if (selected.id && device.id === selected.id) {
-      return true;
-    }
-
-    const candidateName = resolveScanDeviceName(device);
-    return Boolean(selected.name && candidateName === selected.name);
-  }
-
-  private async getConnectedCandidate(candidate: Device | null) {
-    if (!candidate) {
-      return null;
-    }
-
-    try {
-      return (await candidate.isConnected()) ? candidate : null;
-    } catch {
-      return null;
-    }
-  }
-
-  private async connectSelectedWearable(
-    selected: DeviceState,
-    onProgress?: (progress: SyncProgress) => void,
-    options?: {
-      allowDiscoveryScan?: boolean;
-      allowRescan?: boolean;
-    },
-  ) {
-    const allowDiscoveryScan = options?.allowDiscoveryScan ?? true;
-    const allowRescan = options?.allowRescan ?? true;
-    let candidate = await this.findConnectionCandidate(selected, { allowDiscoveryScan }, onProgress);
-    let resolvedDeviceId = candidate?.id ?? selected.id!;
-    let resolvedDeviceName = (candidate ? resolveScanDeviceName(candidate) : null) ?? selected.name;
-    let device = await this.getConnectedCandidate(candidate);
-
-    if (!device) {
-      try {
-        device = await this.connectWithRetry(resolvedDeviceId, resolvedDeviceName ?? 'wearable', {
-          avoidDisconnectOnFirstAttempt: candidate != null,
-        });
-      } catch (error) {
-        if (!allowRescan) {
-          throw error;
-        }
-
-        onProgress?.({
-          status: 'connecting',
-          message: `Direct connect failed. Re-scanning for ${resolvedDeviceName ?? 'wearable'}...`,
-        });
-
-        const rescanned = await this.scanForMatchingDevice({
-          ...selected,
-          id: resolvedDeviceId,
-          name: resolvedDeviceName,
-        });
-
-        if (!rescanned) {
-          throw error;
-        }
-
-        candidate = rescanned;
-        resolvedDeviceId = rescanned.id;
-        resolvedDeviceName = resolveScanDeviceName(rescanned) ?? resolvedDeviceName;
-        device = await this.getConnectedCandidate(rescanned);
-
-        if (!device) {
-          device = await this.connectWithRetry(rescanned.id, resolvedDeviceName ?? 'wearable', {
-            avoidDisconnectOnFirstAttempt: true,
-          });
-        }
-      }
-    }
-
-    device = await device.discoverAllServicesAndCharacteristics();
-    resolvedDeviceName = resolveScanDeviceName(device) ?? resolvedDeviceName;
-
-    return {
-      device,
-      resolvedDeviceId,
-      resolvedDeviceName,
-    };
   }
 }
