@@ -1,9 +1,6 @@
 import * as Notifications from 'expo-notifications';
 
-import { NOTIFICATION_ROUTE_KEY } from '@/services/notifications/notificationRouting';
-
 const MISSING_DEVICE_DATA_REMINDER_CHANNEL_ID = 'missing-device-data-reminders';
-const MISSING_DEVICE_DATA_REMINDER_ROUTE = '/settings';
 const REMINDER_ID_PREFIX = 'missing-device-data-reminder';
 
 const REMINDER_DELAYS = [
@@ -65,9 +62,6 @@ export async function scheduleMissingDeviceDataReminderNotificationsAsync(option
         content: {
           title: 'Sync your wearable',
           body: `We may be missing ${deviceName} data. It has been about ${reminder.label} since the last sync. Open Unstrap to sync your device.`,
-          data: {
-            [NOTIFICATION_ROUTE_KEY]: MISSING_DEVICE_DATA_REMINDER_ROUTE,
-          },
           sound: false,
         },
         trigger: {

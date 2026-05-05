@@ -15,14 +15,12 @@ import {
   type DetectedReviewNotificationResult,
 } from '@/services/notifications/detectedReviewNotifications';
 import { scheduleMissingDeviceDataReminderNotificationsAsync } from '@/services/notifications/missingDeviceDataReminders';
-import { NOTIFICATION_ROUTE_KEY } from '@/services/notifications/notificationRouting';
 
 export const BACKGROUND_DEVICE_SYNC_TASK_NAME = 'unstrap-background-device-sync-task';
 export const BACKGROUND_DEVICE_SYNC_INTERVAL_MINUTES = 15;
 export const BACKGROUND_DEVICE_SYNC_TIME_BUDGET_MS = 4 * 60 * 1000;
 
 const BACKGROUND_DEVICE_SYNC_NOTIFICATION_CHANNEL_ID = 'background-device-sync';
-const BACKGROUND_DEVICE_SYNC_ROUTE = '/settings';
 const LEGACY_SIMPLE_LOG_BACKGROUND_TASK_NAME = 'unstrap-simple-log-background-task';
 const EMPTY_DETECTION_NOTIFICATION_RESULT: DetectedReviewNotificationResult = {
   activityReadyCount: 0,
@@ -108,9 +106,6 @@ async function scheduleBackgroundDeviceSyncNotificationAsync(content: {
     content: {
       title: content.title,
       body: content.body,
-      data: {
-        [NOTIFICATION_ROUTE_KEY]: BACKGROUND_DEVICE_SYNC_ROUTE,
-      },
       sound: false,
     },
     trigger: {

@@ -3,13 +3,11 @@ import * as Notifications from 'expo-notifications';
 
 import { EventNumber } from '@/services/ble/constants';
 import type { DeviceEventPacket } from '@/services/ble/codec';
-import { NOTIFICATION_ROUTE_KEY } from '@/services/notifications/notificationRouting';
 import { formatSqliteDateTime } from '@/utils/dateTime';
 
 const WEARABLE_NOTIFICATION_CHANNEL_ID = 'wearable-events';
 const WEARABLE_EVENT_NOTIFICATION_KIND = 'wearable-event';
 const WEARABLE_BATTERY_NOTIFICATION_KIND = 'wearable-battery-threshold';
-const WEARABLE_NOTIFICATION_ROUTE = '/live-events';
 
 const BATTERY_THRESHOLDS = [
   {
@@ -69,9 +67,6 @@ async function scheduleWearableNotificationAsync(content: WearableNotificationCo
     content: {
       title: content.title,
       body: content.body,
-      data: {
-        [NOTIFICATION_ROUTE_KEY]: WEARABLE_NOTIFICATION_ROUTE,
-      },
       sound: false,
     },
     trigger: {

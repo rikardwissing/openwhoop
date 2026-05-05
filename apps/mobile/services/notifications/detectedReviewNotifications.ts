@@ -1,7 +1,6 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 import * as Notifications from 'expo-notifications';
 
-import { NOTIFICATION_ROUTE_KEY } from '@/services/notifications/notificationRouting';
 import { formatClock, formatSqliteDateTime, minutesBetween, parseSqliteDateTime } from '@/utils/dateTime';
 
 const DETECTED_REVIEW_NOTIFICATION_CHANNEL_ID = 'detected-review';
@@ -52,7 +51,6 @@ async function ensureDetectedReviewNotificationChannelAsync() {
 
 async function scheduleDetectedReviewNotificationAsync(content: {
   body: string;
-  route: string;
   title: string;
 }) {
   await ensureDetectedReviewNotificationChannelAsync();
@@ -61,9 +59,6 @@ async function scheduleDetectedReviewNotificationAsync(content: {
     content: {
       title: content.title,
       body: content.body,
-      data: {
-        [NOTIFICATION_ROUTE_KEY]: content.route,
-      },
       sound: false,
     },
     trigger: {
@@ -276,7 +271,6 @@ export async function notifyForNewDetectedReviewItemsAsync(
     await scheduleDetectedReviewNotificationAsync({
       title: newActivityRows.length === 1 ? 'Activity ready for review' : 'Activities ready for review',
       body: activityNotificationBody(newActivityRows),
-      route: '/history',
     });
   }
 
@@ -284,7 +278,6 @@ export async function notifyForNewDetectedReviewItemsAsync(
     await scheduleDetectedReviewNotificationAsync({
       title: newCompleteSleepRows.length === 1 ? 'Sleep ready for review' : 'Sleeps ready for review',
       body: sleepReadyNotificationBody(newCompleteSleepRows),
-      route: '/sleep',
     });
   }
 
@@ -292,7 +285,6 @@ export async function notifyForNewDetectedReviewItemsAsync(
     await scheduleDetectedReviewNotificationAsync({
       title: 'Sleep detected',
       body: sleepStartedNotificationBody(newInProgressSleepRows),
-      route: '/sleep',
     });
   }
 

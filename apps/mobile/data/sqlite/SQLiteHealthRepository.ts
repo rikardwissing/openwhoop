@@ -481,6 +481,20 @@ interface SleepStageSummary {
   inBedEnd: Date;
 }
 
+interface EnrichedSleepCycle {
+  sleep: SleepCycleRecord;
+  stageRecords: SleepStageRecord[];
+  summary: SleepStageSummary;
+}
+
+interface EnrichedSleepCycleBundle {
+  bySleepId: Map<string, EnrichedSleepCycle>;
+  completeSleeps: SleepCycleRecord[];
+  cycles: EnrichedSleepCycle[];
+  sleeps: SleepCycleRecord[];
+  summariesBySleepId: Map<string, SleepStageSummary>;
+}
+
 interface DeviceStateRow {
   id: string;
   name: string | null;
@@ -2145,7 +2159,7 @@ async function recomputeManualSleepArtifactsFromFeatureBuckets(
   });
 }
 
-function scheduleManualSleepArtifactRefresh(
+async function refreshManualSleepArtifacts(
   db: SQLiteDatabase,
   options: {
     id: string;
@@ -2154,20 +2168,11 @@ function scheduleManualSleepArtifactRefresh(
     end: Date;
   },
 ) {
-  const run = () => {
-    void recomputeManualSleepArtifactsFromFeatureBuckets(db, options).catch((error) => {
-      logMobilePerfError('sleep.manual.recomputeArtifacts', error, {
-        sleepId: options.sleepId,
-      });
+  await recomputeManualSleepArtifactsFromFeatureBuckets(db, options).catch((error) => {
+    logMobilePerfError('sleep.manual.recomputeArtifacts', error, {
+      sleepId: options.sleepId,
     });
-  };
-
-  if (typeof setTimeout === 'function') {
-    setTimeout(run, 0);
-    return;
-  }
-
-  run();
+  });
 }
 
 function filterRowsForSleepEnd(rows: readonly HeartRateRecord[], sleepEnd: Date) {
@@ -3143,24 +3148,59 @@ function rescoreSleepCyclesWithSummaries(
   );
 }
 
-async function loadHeartMarkerSleepDetails(
+function buildEnrichedSleepCycleBundle(
+  sleepCycles: readonly SleepCycleRecord[],
+  stageRecords: readonly SleepStageRecord[],
+  naps: readonly ActivityRecord[],
+): EnrichedSleepCycleBundle {
+  const stageRecordsBySleepId = groupSleepStageRecordsBySleepId(stageRecords);
+  const summariesBySleepId = buildSleepStageSummaryMap(sleepCycles, stageRecords);
+  const sleeps = rescoreSleepCyclesWithSummaries(sleepCycles, summariesBySleepId, naps);
+  const cycles = sleeps.map((sleep): EnrichedSleepCycle => ({
+    sleep,
+    stageRecords: stageRecordsBySleepId.get(sleep.sleepId) ?? [],
+    summary:
+      summariesBySleepId.get(sleep.sleepId) ??
+      summarizeSleepStages([], sleep.start, sleep.inBedEnd ?? sleep.end),
+  }));
+
+  return {
+    bySleepId: new Map(cycles.map((cycle) => [cycle.sleep.sleepId, cycle])),
+    completeSleeps: completeSleepCycles(sleeps),
+    cycles,
+    sleeps,
+    summariesBySleepId,
+  };
+}
+
+async function loadEnrichedSleepCycleBundle(
   db: SQLiteDatabase,
   sleepCycles: readonly SleepCycleRecord[],
-): Promise<Map<string, HeartIntradayMarkerDetails>> {
-  const sleepIds = [...new Set(sleepCycles.map((sleep) => sleep.sleepId))];
-  if (sleepIds.length === 0) {
-    return new Map();
-  }
+) {
+  const [stageRecords, scoreNapActivities] = await Promise.all([
+    loadSleepStageRecordsForIds(db, sleepCycles.map((sleep) => sleep.sleepId)),
+    loadNapActivitiesForSleepScoreRange(db, sleepCycles),
+  ]);
 
-  const stageRecords = await loadSleepStageRecordsForIds(db, sleepIds);
-  const summariesBySleepId = buildSleepStageSummaryMap(sleepCycles, stageRecords);
+  return buildEnrichedSleepCycleBundle(sleepCycles, stageRecords, scoreNapActivities);
+}
 
+function fallbackEnrichedSleepCycle(sleep: SleepCycleRecord): EnrichedSleepCycle {
+  return {
+    sleep,
+    stageRecords: [],
+    summary: summarizeSleepStages([], sleep.start, sleep.inBedEnd ?? sleep.end),
+  };
+}
+
+function buildHeartMarkerSleepDetailsFromEnriched(
+  cycles: readonly EnrichedSleepCycle[],
+): Map<string, HeartIntradayMarkerDetails> {
   return new Map(
-    sleepCycles.map((sleep) => {
-      const summary = summariesBySleepId.get(sleep.sleepId) ?? null;
-
-      return [sleep.sleepId, buildHeartIntradaySleepDetails(sleep, summary)] as const;
-    }),
+    cycles.map((cycle) => [
+      cycle.sleep.sleepId,
+      buildHeartIntradaySleepDetails(cycle.sleep, cycle.summary),
+    ] as const),
   );
 }
 
@@ -3819,9 +3859,13 @@ function buildHeartIntradayMarkers(
   sleepCycles: readonly SleepCycleRecord[],
   activities: readonly ActivityRecord[],
   sleepDetailsBySleepId: ReadonlyMap<string, HeartIntradayMarkerDetails> = new Map(),
+  sleepSummariesBySleepId: ReadonlyMap<string, SleepStageSummary> = new Map(),
 ): HeartIntradayMarker[] {
   const sleepMarkers = sleepCycles.flatMap((sleep) => {
-    const range = buildHeartIntradayMarkerRange(windowStart, windowEnd, sleep.start, sleep.end);
+    const summary = sleepSummariesBySleepId.get(sleep.sleepId);
+    const sleepStart = summary?.start ?? sleep.start;
+    const sleepEnd = summary?.end ?? sleep.end;
+    const range = buildHeartIntradayMarkerRange(windowStart, windowEnd, sleepStart, sleepEnd);
     if (!range) {
       return [];
     }
@@ -5297,13 +5341,9 @@ export async function resolveNextWearableAlarmDateFromDatabase(
   await expirePastOneOffSleepAlarmFromDatabase(db, now);
 
   const sleepCycles = await loadRecentSleepCyclesForDashboard(db, 15);
-  const [stageRecords, scoreNapActivities] = await Promise.all([
-    loadSleepStageRecordsForIds(db, sleepCycles.map((sleep) => sleep.sleepId)),
-    loadNapActivitiesForSleepScoreRange(db, sleepCycles),
-  ]);
-  const sleepSummaries = buildSleepStageSummaryMap(sleepCycles, stageRecords);
-  const rescoredSleepCycles = rescoreSleepCyclesWithSummaries(sleepCycles, sleepSummaries, scoreNapActivities);
-  const completeRescoredSleepCycles = completeSleepCycles(rescoredSleepCycles);
+  const enrichedSleep = await loadEnrichedSleepCycleBundle(db, sleepCycles);
+  const rescoredSleepCycles = enrichedSleep.sleeps;
+  const completeRescoredSleepCycles = enrichedSleep.completeSleeps;
   const preferences = await loadSleepPreferences(db, completeRescoredSleepCycles);
   const latestCompleteSleep = completeRescoredSleepCycles.at(-1) ?? null;
   const napActivities = latestCompleteSleep
@@ -7040,7 +7080,8 @@ async function loadLatestDashboardHeartCard(
     heartWindow.intradayStart,
     heartWindow.latestHeartDate,
   );
-  const heartMarkerSleepDetails = await loadHeartMarkerSleepDetails(db, sleepCycles);
+  const enrichedSleep = await loadEnrichedSleepCycleBundle(db, sleepCycles);
+  const heartMarkerSleepDetails = buildHeartMarkerSleepDetailsFromEnriched(enrichedSleep.cycles);
 
   return {
     heartWindow,
@@ -7056,9 +7097,10 @@ async function loadLatestDashboardHeartCard(
     heartCardMarkers: buildHeartIntradayMarkers(
       heartWindow.intradayStart,
       heartWindow.latestHeartDate,
-      sleepCycles,
+      enrichedSleep.sleeps,
       heartMarkerActivities,
       heartMarkerSleepDetails,
+      enrichedSleep.summariesBySleepId,
     ),
   };
 }
@@ -7080,39 +7122,53 @@ async function loadLatestSleepStagesForDashboard(db: SQLiteDatabase, latestSleep
   );
 }
 
-function buildDashboardSleepCard(latestSleep: SleepCycleRecord | null, stageRecords: SleepStageRecord[]): SleepCardData {
-  if (!latestSleep) {
-    return {
-      score: null,
-      durationMinutes: null,
-      timeInBedMinutes: null,
-      stages: [],
-      startLabel: '--',
-      middleLabel: '--',
-      endLabel: '--',
-      completionStatus: 'complete',
-      isInProgress: false,
-      isEstimated: true,
-      missingReason: NO_SLEEP_REASON,
-    };
+function buildEmptyDashboardSleepCard(): SleepCardData {
+  return {
+    score: null,
+    durationMinutes: null,
+    timeInBedMinutes: null,
+    stages: [],
+    startLabel: '--',
+    middleLabel: '--',
+    endLabel: '--',
+    completionStatus: 'complete',
+    isInProgress: false,
+    isEstimated: true,
+    missingReason: NO_SLEEP_REASON,
+  };
+}
+
+function buildDashboardSleepCardFromEnriched(enriched: EnrichedSleepCycle | null): SleepCardData {
+  if (!enriched) {
+    return buildEmptyDashboardSleepCard();
   }
 
-  const summary = summarizeSleepStages(stageRecords, latestSleep.start, latestSleep.end);
-
   return {
-    score: latestSleep.score,
-    durationMinutes: summary.timeAsleepMinutes,
-    timeInBedMinutes: summary.timeInBedMinutes,
-    stages: summary.stages,
-    startAt: formatSqliteDateTime(summary.start),
-    startLabel: formatClock(summary.start),
-    middleLabel: axisLabelForMidpoint(summary.start, summary.end),
-    endLabel: formatClock(summary.end),
-    completionStatus: latestSleep.completionStatus,
-    isInProgress: latestSleep.isInProgress,
-    isEstimated: stageRecords.some((stage) => stage.isEstimated),
-    missingReason: stageRecords.length === 0 ? LIMITED_SENSOR_REASON : null,
+    score: enriched.sleep.score,
+    durationMinutes: enriched.summary.timeAsleepMinutes,
+    timeInBedMinutes: enriched.summary.timeInBedMinutes,
+    stages: enriched.summary.stages,
+    startAt: formatSqliteDateTime(enriched.summary.start),
+    startLabel: formatClock(enriched.summary.start),
+    middleLabel: axisLabelForMidpoint(enriched.summary.start, enriched.summary.end),
+    endLabel: formatClock(enriched.summary.end),
+    completionStatus: enriched.sleep.completionStatus,
+    isInProgress: enriched.sleep.isInProgress,
+    isEstimated: enriched.stageRecords.some((stage) => stage.isEstimated),
+    missingReason: enriched.stageRecords.length === 0 ? LIMITED_SENSOR_REASON : null,
   };
+}
+
+function buildDashboardSleepCard(latestSleep: SleepCycleRecord | null, stageRecords: SleepStageRecord[]): SleepCardData {
+  return buildDashboardSleepCardFromEnriched(
+    latestSleep
+      ? {
+          sleep: latestSleep,
+          stageRecords,
+          summary: summarizeSleepStages(stageRecords, latestSleep.start, latestSleep.end),
+        }
+      : null,
+  );
 }
 
 async function buildTodayOverview(db: SQLiteDatabase): Promise<TodayOverview> {
@@ -7136,16 +7192,12 @@ async function buildTodayOverview(db: SQLiteDatabase): Promise<TodayOverview> {
   }
 
   const rawLatestSleep = sleepCycles.at(-1) ?? null;
-  const [allSleepStageRecords, scoreNapActivities] = await Promise.all([
-    loadSleepStageRecordsForIds(db, sleepCycles.map((sleep) => sleep.sleepId)),
-    loadNapActivitiesForSleepScoreRange(db, sleepCycles),
-  ]);
-  const sleepSummaryById = buildSleepStageSummaryMap(sleepCycles, allSleepStageRecords);
-  const rescoredSleepCycles = rescoreSleepCyclesWithSummaries(sleepCycles, sleepSummaryById, scoreNapActivities);
-  const latestSleep = rawLatestSleep
-    ? rescoredSleepCycles.find((sleep) => sleep.sleepId === rawLatestSleep.sleepId) ?? rawLatestSleep
+  const enrichedSleep = await loadEnrichedSleepCycleBundle(db, sleepCycles);
+  const rescoredSleepCycles = enrichedSleep.sleeps;
+  const latestSleepEntry = rawLatestSleep
+    ? enrichedSleep.bySleepId.get(rawLatestSleep.sleepId) ?? fallbackEnrichedSleepCycle(rawLatestSleep)
     : null;
-  const completeRescoredSleepCycles = completeSleepCycles(rescoredSleepCycles);
+  const completeRescoredSleepCycles = enrichedSleep.completeSleeps;
   const latestCompleteSleep = completeRescoredSleepCycles.at(-1) ?? null;
   const [sleepPreferences, napActivities] = await Promise.all([
     loadSleepPreferences(db, completeRescoredSleepCycles),
@@ -7167,14 +7219,9 @@ async function buildTodayOverview(db: SQLiteDatabase): Promise<TodayOverview> {
   const selectedDayKey = dateKey(latestHeartDate);
   const selectedDayStart = startOfDayFromDayKey(selectedDayKey);
   const selectedDayEnd = endOfDashboardDayWindow(selectedDayKey, true, latestHeartDate);
-  const [selectedDayHeartRows, selectedSleepFeatureRows, stageRecords] = await Promise.all([
+  const [selectedDayHeartRows, selectedSleepFeatureRows] = await Promise.all([
     loadHeartMetricRowsForDay(db, selectedDayKey),
     latestCompleteSleep ? ensureSleepFeatureBucketsForRange(db, latestCompleteSleep.start, latestCompleteSleep.end) : Promise.resolve([]),
-    Promise.resolve(
-      latestSleep
-        ? allSleepStageRecords.filter((stage) => stage.sleepId === latestSleep.sleepId)
-        : [],
-    ),
   ]);
 
   const dailyMinima = heartDayStats.map((stat) => stat.minBpm);
@@ -7182,7 +7229,7 @@ async function buildTodayOverview(db: SQLiteDatabase): Promise<TodayOverview> {
   const maxHr = personalizeMaxHrFromObservedPeak(heartState.observed_peak_bpm, restingHr);
   const recovery = estimateRecoveryScoreFromSleeps(latestCompleteSleep, completeRescoredSleepCycles, heartState.latest_stress);
   const tonightPlan = buildSleepPlan(sleepPreferences, rescoredSleepCycles, napActivities);
-  const sleepCard = buildDashboardSleepCard(latestSleep, stageRecords);
+  const sleepCard = buildDashboardSleepCardFromEnriched(latestSleepEntry);
   const dayStatsByDay = new Map(heartDayStats.map((stat) => [stat.day, stat]));
   const todayStrain = dayStatsByDay.get(selectedDayKey)?.strainScore ?? null;
   const strainSeries = buildCumulativeStrainSeries(
@@ -7411,13 +7458,15 @@ export class SQLiteHealthRepository implements HealthRepository {
           rows: rawWindow.rawRowCount,
         });
 
-        const heartMarkerSleepDetails = await loadHeartMarkerSleepDetails(this.db, sleepCycles);
+        const enrichedSleep = await loadEnrichedSleepCycleBundle(this.db, sleepCycles);
+        const heartMarkerSleepDetails = buildHeartMarkerSleepDetailsFromEnriched(enrichedSleep.cycles);
         const intradayMarkers = buildHeartIntradayMarkers(
           intradayWindowStart,
           latestHeartDate,
-          sleepCycles,
+          enrichedSleep.sleeps,
           await this.loadActivitiesOverlapping(intradayWindowStart, latestHeartDate),
           heartMarkerSleepDetails,
+          enrichedSleep.summariesBySleepId,
         );
         const sanitizedDailyMinimaRows = dailyMinimaRows.map((row) => ({
           day: row.day,
@@ -7426,7 +7475,7 @@ export class SQLiteHealthRepository implements HealthRepository {
         const dailyMinima = sanitizedDailyMinimaRows
           .map((row) => row.min_bpm)
           .filter((value): value is number => value !== null);
-        const restingHr = personalizeRestingHr(completeSleepCycles(sleepCycles), dailyMinima);
+        const restingHr = personalizeRestingHr(enrichedSleep.completeSleeps, dailyMinima);
 
         const snapshot = {
           restingHr,
@@ -7653,7 +7702,7 @@ export class SQLiteHealthRepository implements HealthRepository {
         await insertSleepStageRecords(tx, stages);
       });
 
-      scheduleManualSleepArtifactRefresh(this.db, {
+      await refreshManualSleepArtifacts(this.db, {
         id: sleep.id,
         sleepId,
         start,
@@ -7785,7 +7834,7 @@ export class SQLiteHealthRepository implements HealthRepository {
         await insertSleepStageRecords(tx, stages);
       });
 
-      scheduleManualSleepArtifactRefresh(this.db, {
+      await refreshManualSleepArtifacts(this.db, {
         id: sleep.id,
         sleepId: nextSleepId,
         start,
@@ -8135,16 +8184,12 @@ export class SQLiteHealthRepository implements HealthRepository {
       loadLatestHeartRowBefore(this.db, nextDayFromDayKey(selectedDayKey)),
       loadLatestHeartTimeForDay(this.db, selectedDayKey),
     ]);
-    const [allSleepStageRecords, scoreNapActivities] = await Promise.all([
-      this.loadSleepStagesForIds(sleepCycles.map((sleep) => sleep.sleepId)),
-      loadNapActivitiesForSleepScoreRange(this.db, sleepCycles),
-    ]);
-    const sleepSummaryById = buildSleepStageSummaryMap(sleepCycles, allSleepStageRecords);
-    const rescoredSleepCycles = rescoreSleepCyclesWithSummaries(sleepCycles, sleepSummaryById, scoreNapActivities);
-    const selectedSleep = selectedSleepRaw
-      ? rescoredSleepCycles.find((sleep) => sleep.sleepId === selectedSleepRaw.sleepId) ?? selectedSleepRaw
+    const enrichedSleep = await loadEnrichedSleepCycleBundle(this.db, sleepCycles);
+    const selectedSleepEntry = selectedSleepRaw
+      ? enrichedSleep.bySleepId.get(selectedSleepRaw.sleepId) ?? fallbackEnrichedSleepCycle(selectedSleepRaw)
       : null;
-    const completeRescoredSleepCycles = completeSleepCycles(rescoredSleepCycles);
+    const selectedSleep = selectedSleepEntry?.sleep ?? null;
+    const completeRescoredSleepCycles = enrichedSleep.completeSleeps;
     const selectedCompleteSleep =
       selectedSleep && isCompleteSleepCycle(selectedSleep)
         ? selectedSleep
@@ -8161,14 +8206,9 @@ export class SQLiteHealthRepository implements HealthRepository {
       selectedDayLatestHeartDate,
     );
 
-    const [selectedDayHeartRows, selectedSleepFeatureRows, stageRecords, heartDayBucketRows] = await Promise.all([
+    const [selectedDayHeartRows, selectedSleepFeatureRows, heartDayBucketRows] = await Promise.all([
       loadHeartMetricRowsForDay(this.db, selectedDayKey),
       selectedCompleteSleep ? ensureSleepFeatureBucketsForRange(this.db, selectedCompleteSleep.start, selectedCompleteSleep.end) : Promise.resolve([]),
-      Promise.resolve(
-        selectedSleep
-          ? allSleepStageRecords.filter((stage) => stage.sleepId === selectedSleep.sleepId)
-          : [],
-      ),
       loadHeartBucketRowsBetweenRange(this.db, selectedDayStart, selectedDayEnd),
     ]);
     const [heartMarkerActivities, supplement] = await Promise.all([
@@ -8205,16 +8245,15 @@ export class SQLiteHealthRepository implements HealthRepository {
         ? new Map([
             [
               selectedSleep.sleepId,
-              buildHeartIntradaySleepDetails(
-                selectedSleep,
-                sleepSummaryById.get(selectedSleep.sleepId) ??
-                  summarizeSleepStages(stageRecords, selectedSleep.start, selectedSleep.inBedEnd ?? selectedSleep.end),
-              ),
+              buildHeartIntradaySleepDetails(selectedSleep, selectedSleepEntry?.summary ?? null),
             ],
           ])
         : undefined,
+      selectedSleepEntry
+        ? new Map([[selectedSleepEntry.sleep.sleepId, selectedSleepEntry.summary]])
+        : undefined,
     );
-    const sleepCard = buildDashboardSleepCard(selectedSleep, stageRecords);
+    const sleepCard = buildDashboardSleepCardFromEnriched(selectedSleepEntry);
     const dayStatsByDay = new Map(heartDayStats.map((stat) => [stat.day, stat]));
     const selectedStrain = dayStatsByDay.get(selectedDayKey)?.strainScore ?? null;
     const strainSeries = buildCumulativeStrainSeries(
@@ -8371,20 +8410,17 @@ export class SQLiteHealthRepository implements HealthRepository {
         await this.ensurePrepared();
 
         const sleepCycles = await this.loadRecentSleepCycles(Math.max(rangeDays(range), 15));
-        const [stageRecords, scoreNapActivities] = await Promise.all([
-          this.loadSleepStagesForIds(sleepCycles.map((sleep) => sleep.sleepId)),
-          loadNapActivitiesForSleepScoreRange(this.db, sleepCycles),
-        ]);
-        const sleepSummaries = buildSleepStageSummaryMap(sleepCycles, stageRecords);
-        const rescoredSleepCycles = rescoreSleepCyclesWithSummaries(sleepCycles, sleepSummaries, scoreNapActivities);
-        const completeRescoredSleepCycles = completeSleepCycles(rescoredSleepCycles);
+        const enrichedSleep = await loadEnrichedSleepCycleBundle(this.db, sleepCycles);
+        const rescoredSleepCycles = enrichedSleep.sleeps;
+        const completeRescoredSleepCycles = enrichedSleep.completeSleeps;
         const preferences = await loadSleepPreferences(this.db, completeRescoredSleepCycles);
         const latestSleepForPlan = completeRescoredSleepCycles.at(-1) ?? null;
         const napActivities = latestSleepForPlan ? await this.loadNapActivitiesSince(latestSleepForPlan.end) : [];
         const sleepPlan = buildSleepPlan(preferences, rescoredSleepCycles, napActivities);
-        const sessions = rescoredSleepCycles.slice(-rangeDays(range)).reverse();
+        const sessions = enrichedSleep.cycles.slice(-rangeDays(range)).reverse();
         const completeSessionsForStats = completeRescoredSleepCycles.slice(-rangeDays(range));
-        const latestSleep = sessions[0] ?? null;
+        const latestSleepEntry = sessions[0] ?? null;
+        const latestSleep = latestSleepEntry?.sleep ?? null;
 
         if (!latestSleep) {
           logMobilePerf('repository.getSleepHistory.empty', startedAt, {
@@ -8422,9 +8458,9 @@ export class SQLiteHealthRepository implements HealthRepository {
           ? clamp(100 - stdDev(wakeValues, wakeMean) / Math.max(1, wakeMean) * 100, 0, 100)
           : null;
 
-        const mappedSessions: SleepSession[] = sessions.map((session) => {
-          const summary = sleepSummaries.get(session.sleepId) ?? summarizeSleepStages([], session.start, session.end);
-
+        const mappedSessions: SleepSession[] = sessions.map((cycle) => {
+          const session = cycle.sleep;
+          const summary = cycle.summary;
           return {
             id: session.id,
             startAt: formatSqliteDateTime(session.start),
@@ -8449,7 +8485,7 @@ export class SQLiteHealthRepository implements HealthRepository {
                 : Math.round((bedtimeConsistency + wakeConsistency) / 2),
             stages: summary.stages,
             isEstimated: true,
-            missingReason: summary.stages.length === 0 ? LIMITED_SENSOR_REASON : null,
+            missingReason: cycle.stageRecords.length === 0 ? LIMITED_SENSOR_REASON : null,
             minBpm: session.minBpm,
             maxBpm: session.maxBpm,
             avgHrv: session.avgHrv,
@@ -8459,7 +8495,7 @@ export class SQLiteHealthRepository implements HealthRepository {
         const sleepScoreByDay = new Map(trendSleepCycles.map((session) => [dateKey(session.end), session.score]));
         const sleepDurationByDay = new Map(
           trendSleepCycles.map((session) => {
-            const summary = sleepSummaries.get(session.sleepId);
+            const summary = enrichedSleep.bySleepId.get(session.sleepId)?.summary;
             return [dateKey(session.end), summary?.timeAsleepMinutes ?? session.asleepMinutes ?? minutesBetween(session.start, session.end)] as const;
           }),
         );
@@ -8530,14 +8566,16 @@ export class SQLiteHealthRepository implements HealthRepository {
         const intradayStart = new Date(latestHeartDate.getTime() - 24 * 3600000);
         const intraday = await loadIntradayHeartWindow(this.db, formatSqliteDateTime(latestHeartDate));
         const intradayWindowStart = intraday.intradayStart ?? intradayStart;
-        const completeSleepCyclesForMetrics = completeSleepCycles(sleepCycles);
-        const heartMarkerSleepDetails = await loadHeartMarkerSleepDetails(this.db, sleepCycles);
+        const enrichedSleep = await loadEnrichedSleepCycleBundle(this.db, sleepCycles);
+        const completeSleepCyclesForMetrics = enrichedSleep.completeSleeps;
+        const heartMarkerSleepDetails = buildHeartMarkerSleepDetailsFromEnriched(enrichedSleep.cycles);
         const intradayMarkers = buildHeartIntradayMarkers(
           intradayWindowStart,
           latestHeartDate,
-          sleepCycles,
+          enrichedSleep.sleeps,
           await this.loadActivitiesOverlapping(intradayWindowStart, latestHeartDate),
           heartMarkerSleepDetails,
+          enrichedSleep.summariesBySleepId,
         );
         const sanitizedDailyMinimaRows = dailyMinimaRows.map((row) => ({
           day: row.day,
@@ -8663,16 +8701,18 @@ export class SQLiteHealthRepository implements HealthRepository {
         await ensureWellnessDayStatsReady(this.db);
 
         const baselineStartedAt = Date.now();
-        const [recentSleepCycles, recentActivities, dailyMinimaRows, heartState] = await Promise.all([
+        const [rawRecentSleepCycles, recentActivities, dailyMinimaRows, heartState] = await Promise.all([
           this.loadRecentSleepCycles(rangeDays(range)),
           this.loadRecentActivities(5),
           this.loadDailyHeartMinima(),
           loadLatestHeartState(this.db),
         ]);
+        const enrichedSleep = await loadEnrichedSleepCycleBundle(this.db, rawRecentSleepCycles);
+        const recentSleepCycles = enrichedSleep.sleeps;
         const latestHeartDate = heartState.latest_heart_time
           ? parseSqliteDateTime(heartState.latest_heart_time)
           : null;
-        const completeRecentSleepCycles = completeSleepCycles(recentSleepCycles);
+        const completeRecentSleepCycles = enrichedSleep.completeSleeps;
         logMobilePerf('repository.getWellnessData.loadBaseline', baselineStartedAt, {
           range,
           heartDays: dailyMinimaRows.length,

@@ -2,7 +2,6 @@ import * as Notifications from 'expo-notifications';
 
 import { brand } from '@/constants/brand';
 import { syncNotificationPermissionFromSystem } from '@/services/notifications/notificationPermissions';
-import { NOTIFICATION_ROUTE_KEY } from '@/services/notifications/notificationRouting';
 import type { NotificationPermissionState } from '@/types/device';
 import type { SleepPlan } from '@/types/health';
 import { nextUpcomingClockDate, normalizeClockMinutes } from '@/utils/sleepPlan';
@@ -68,9 +67,6 @@ export async function syncSleepPreparationReminder(
     content: {
       title: 'Prepare for bed',
       body: `${brand.appName} says it is time to start winding down. Your optimal bedtime is around ${plan.optimalBedtime}.`,
-      data: {
-        [NOTIFICATION_ROUTE_KEY]: '/sleep',
-      },
       sound: false,
     },
     trigger: {

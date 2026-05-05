@@ -107,15 +107,12 @@ export function TodayScreen() {
       return;
     }
 
-    setHeartCardState((current) => {
-      const fallbackSnapshot = current.cardData && current.dayKey === heartDayKey ? current.cardData : null;
-
-      return {
-        dayKey: heartDayKey,
-        isRefreshing: fallbackSnapshot !== null,
-        cardData: fallbackSnapshot,
-        status: fallbackSnapshot ? 'ready' : 'loading',
-      };
+    setHeartTimelineWindow(null);
+    setHeartCardState({
+      dayKey: heartDayKey,
+      isRefreshing: false,
+      cardData: null,
+      status: 'loading',
     });
   }, [heartDayKey, heartVersion]);
 
@@ -130,15 +127,12 @@ export function TodayScreen() {
 
     const loadStartedAt = Date.now();
 
-    setHeartCardState((current) => {
-      const fallbackSnapshot = current.cardData && current.dayKey === heartDayKey ? current.cardData : null;
-
-      return {
-        dayKey: heartDayKey,
-        isRefreshing: fallbackSnapshot !== null,
-        cardData: fallbackSnapshot,
-        status: fallbackSnapshot ? 'ready' : 'loading',
-      };
+    setHeartTimelineWindow(null);
+    setHeartCardState({
+      dayKey: heartDayKey,
+      isRefreshing: false,
+      cardData: null,
+      status: 'loading',
     });
 
     void repository
