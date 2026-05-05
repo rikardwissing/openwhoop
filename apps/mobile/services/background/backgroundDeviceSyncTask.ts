@@ -14,6 +14,7 @@ import {
   notifyForNewDetectedReviewItemsAsync,
   type DetectedReviewNotificationResult,
 } from '@/services/notifications/detectedReviewNotifications';
+import { scheduleMissingDeviceDataReminderNotificationsAsync } from '@/services/notifications/missingDeviceDataReminders';
 import { NOTIFICATION_ROUTE_KEY } from '@/services/notifications/notificationRouting';
 
 export const BACKGROUND_DEVICE_SYNC_TASK_NAME = 'unstrap-background-device-sync-task';
@@ -230,6 +231,13 @@ async function executeBackgroundDeviceSyncAsync(options: {
             : 'Background sync completed',
       body: completedBody,
     });
+
+    if (status === 'completed' || status === 'paused') {
+      await scheduleMissingDeviceDataReminderNotificationsAsync({
+        deviceName,
+        syncedAt: new Date(),
+      }).catch(() => null);
+    }
 
     return {
       detectionNotifications,
