@@ -1,6 +1,8 @@
 import * as Notifications from 'expo-notifications';
 
 import { brand } from '@/constants/brand';
+import { openAppDatabaseAsync } from '@/db/appDatabase';
+import { recordAppIntentEvent } from '@/services/appIntentEvents';
 import { syncNotificationPermissionFromSystem } from '@/services/notifications/notificationPermissions';
 import type { NotificationPermissionState } from '@/types/device';
 import type { SleepPlan } from '@/types/health';
@@ -74,6 +76,7 @@ export async function syncSleepPreparationReminder(
       date: triggerAt,
     },
   });
+  await recordBedtimeStartAppIntentEvent(plan, triggerAt).catch(() => {});
 
   return {
     scheduled: true,
@@ -81,4 +84,24 @@ export async function syncSleepPreparationReminder(
     reason: 'scheduled',
     triggerAt,
   };
+}
+
+async function recordBedtimeStartAppIntentEvent(plan: SleepPlan, triggerAt: Date) {
+  const db = await openAppDatabaseAsync();
+
+  try {
+    await recordAppIntentEvent(db, {
+      kind: 'bedtime_start',
+      entityId: triggerAt.toISOString(),
+      occurredAt: triggerAt,
+      payload: {
+        optimalBedtime: plan.optimalBedtime,
+        optimalBedtimeMinutes: plan.optimalBedtimeMinutes,
+        sleepNeedMinutes: plan.sleepNeedMinutes,
+        targetWakeTime: plan.targetWakeTime,
+      },
+    });
+  } finally {
+    await db.closeAsync().catch(() => {});
+  }
 }

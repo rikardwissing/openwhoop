@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, '..');
-const DERIVED_DATA_SCHEMA_VERSION = 7;
+const DERIVED_DATA_SCHEMA_VERSION = 11;
 
 const GRAVITY_STILL_THRESHOLD = 0.01;
 const GRAVITY_WINDOW_MINUTES = 15;
@@ -15,6 +15,10 @@ const MAX_SLEEP_PAUSE_MINUTES = 60;
 const ACTIVITY_CHANGE_THRESHOLD_MINUTES = 15;
 const STRESS_WINDOW = 120;
 const SPO2_WINDOW = 30;
+const SPO2_CALIBRATION_INTERCEPT = 110;
+const SPO2_CALIBRATION_SLOPE = 17;
+const MIN_PLAUSIBLE_SPO2_RATIO = 0.65;
+const MAX_PLAUSIBLE_SPO2_RATIO = 1.25;
 const BASE_SLEEP_NEED_MINUTES = 8 * 60;
 const MAX_SLEEP_DEBT_MINUTES = 150;
 
@@ -534,8 +538,12 @@ function calculateSpo2Score(window) {
     return null;
   }
 
-  const ratio = (acRed / meanRed) / (acIr / meanIr);
-  return clamp(110 - 25 * ratio, 70, 100);
+  const ratio = (acIr / meanIr) / (acRed / meanRed);
+  if (!Number.isFinite(ratio) || ratio < MIN_PLAUSIBLE_SPO2_RATIO || ratio > MAX_PLAUSIBLE_SPO2_RATIO) {
+    return null;
+  }
+
+  return clamp(SPO2_CALIBRATION_INTERCEPT - SPO2_CALIBRATION_SLOPE * ratio, 70, 100);
 }
 
 function calculateSkinTempValue(row) {

@@ -1,3 +1,4 @@
+import { Platform } from 'react-native';
 import { BleManager, type Device, type Subscription } from 'react-native-ble-plx';
 
 import {
@@ -19,7 +20,10 @@ const COMMAND_WRITE_DELAY_MS = 120;
 const LIVE_HEALTH_CHECK_INTERVAL_MS = 10_000;
 const LIVE_PACKET_STALE_MS = 30_000;
 const LIVE_PROBE_RESPONSE_GRACE_MS = 8_000;
-const LIVE_UPDATES_RECONNECT_DELAY_MS = 3_000;
+const LIVE_CONNECT_ERROR_BACKOFF_MS = 5_000;
+const LIVE_CONNECT_TIMEOUT_MS = 30_000;
+const LIVE_DISCOVERY_TIMEOUT_MS = 12_000;
+const BLE_POWERED_ON_TIMEOUT_MS = 8_000;
 
 function delay(ms: number) {
   return new Promise((resolve) => {
@@ -48,6 +52,12 @@ interface AcquireConnectionOptions {
   requireExistingConnection?: boolean;
 }
 
+interface ConnectedWearable {
+  device: Device;
+  resolvedDeviceId: string;
+  resolvedDeviceName: string | null;
+}
+
 interface LiveConnectionCallbacks {
   onConnected?: (lease: WearableConnectionLease) => Promise<void> | void;
   onDisconnected?: () => Promise<void> | void;
@@ -71,10 +81,14 @@ export class WearableConnectionManager {
   private device: Device | null = null;
   private disposed = false;
   private lastPacketAt: number | null = null;
+  private liveConnectCancelStep: (() => void) | null = null;
+  private liveConnectDeviceId: string | null = null;
+  private liveConnectPromise: Promise<void> | null = null;
+  private liveConnectToken = 0;
   private liveHealthTimer: ReturnType<typeof setInterval> | null = null;
   private liveLease: WearableConnectionLease | null = null;
   private liveProbeStartedAt: number | null = null;
-  private liveReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private liveReconnectSuspendedCount = 0;
   private liveSession: LiveConnectionSession | null = null;
   private packetConsumers = new Set<WearablePacketConsumer>();
   private resolvedDeviceId: string | null = null;
@@ -85,45 +99,51 @@ export class WearableConnectionManager {
 
   async dispose() {
     this.disposed = true;
-    this.clearLiveReconnect();
     this.stopLiveHealthWatch();
+    this.cancelLiveConnect();
     this.removeMonitors();
     await this.disconnectCurrentDevice().catch(() => {});
     this.manager.destroy();
   }
 
   async scan(): Promise<WearableScanResult[]> {
-    await this.ensurePoweredOn();
+    const resumeLiveReconnect = await this.suspendLiveReconnectForBoundedOperation();
 
-    const found = new Map<string, WearableScanResult>();
+    try {
+      await this.ensurePoweredOn();
 
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.manager.stopDeviceScan();
-        resolve(
-          [...found.values()].sort((left, right) => (right.rssi ?? -999) - (left.rssi ?? -999)),
-        );
-      }, 5000);
+      const found = new Map<string, WearableScanResult>();
 
-      this.manager.startDeviceScan([WEARABLE_SERVICE_UUID], null, (error, device) => {
-        if (error) {
-          clearTimeout(timeout);
+      return await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
           this.manager.stopDeviceScan();
-          reject(error);
-          return;
-        }
+          resolve(
+            [...found.values()].sort((left, right) => (right.rssi ?? -999) - (left.rssi ?? -999)),
+          );
+        }, 5000);
 
-        if (!device) {
-          return;
-        }
+        this.manager.startDeviceScan([WEARABLE_SERVICE_UUID], null, (error, device) => {
+          if (error) {
+            clearTimeout(timeout);
+            this.manager.stopDeviceScan();
+            reject(error);
+            return;
+          }
 
-        found.set(device.id, {
-          id: device.id,
-          name: resolveScanDeviceName(device),
-          rssi: device.rssi ?? null,
+          if (!device) {
+            return;
+          }
+
+          found.set(device.id, {
+            id: device.id,
+            name: resolveScanDeviceName(device),
+            rssi: device.rssi ?? null,
+          });
         });
       });
-    });
+    } finally {
+      resumeLiveReconnect();
+    }
   }
 
   addPacketConsumer(consumer: WearablePacketConsumer) {
@@ -147,7 +167,7 @@ export class WearableConnectionManager {
     };
     this.liveSession = session;
 
-    await this.connectLiveSession(session);
+    this.startLiveConnectionIntent(session);
 
     return {
       stop: async () => {
@@ -159,7 +179,7 @@ export class WearableConnectionManager {
         if (this.liveSession === session) {
           this.liveSession = null;
         }
-        this.clearLiveReconnect();
+        this.cancelLiveConnect();
         this.stopLiveHealthWatch();
 
         const lease = this.liveLease;
@@ -174,73 +194,65 @@ export class WearableConnectionManager {
     onProgress?: (progress: SyncProgress) => void,
     options?: AcquireConnectionOptions,
   ): Promise<WearableConnectionLease> {
-    const connection = await this.withConnectionQueue(async () => {
-      this.assertNotDisposed();
-      await this.ensurePoweredOn();
+    const resumeLiveReconnect = options?.requireExistingConnection
+      ? null
+      : await this.suspendLiveReconnectForBoundedOperation();
 
-      if (options?.requireExistingConnection) {
+    try {
+      const connection = await this.withConnectionQueue(async () => {
+        this.assertNotDisposed();
+        await this.ensurePoweredOn();
+
+        if (options?.requireExistingConnection) {
+          const existing = await this.getConnectedCandidate(this.device);
+          if (!existing || !this.matchesSelectedDevice(existing, selected)) {
+            throw new Error('Live wearable connection is not active.');
+          }
+
+          const device = this.subscriptions.length > 0
+            ? existing
+            : await existing.discoverAllServicesAndCharacteristics();
+          this.device = device;
+          this.resolvedDeviceId = device.id;
+          this.resolvedDeviceName = resolveScanDeviceName(device) ?? selected.name;
+          this.installMonitors();
+          return {
+            device,
+            resolvedDeviceId: this.resolvedDeviceId,
+            resolvedDeviceName: this.resolvedDeviceName,
+          };
+        }
+
         const existing = await this.getConnectedCandidate(this.device);
-        if (!existing || !this.matchesSelectedDevice(existing, selected)) {
-          throw new Error('Live wearable connection is not active.');
+        if (existing && this.matchesSelectedDevice(existing, selected)) {
+          const device = this.subscriptions.length > 0
+            ? existing
+            : await existing.discoverAllServicesAndCharacteristics();
+          this.device = device;
+          this.resolvedDeviceId = device.id;
+          this.resolvedDeviceName = resolveScanDeviceName(device) ?? this.resolvedDeviceName ?? selected.name;
+          this.installMonitors();
+          return {
+            device,
+            resolvedDeviceId: this.resolvedDeviceId,
+            resolvedDeviceName: this.resolvedDeviceName,
+          };
         }
 
-        const device = this.subscriptions.length > 0
-          ? existing
-          : await existing.discoverAllServicesAndCharacteristics();
-        this.device = device;
-        this.resolvedDeviceId = device.id;
-        this.resolvedDeviceName = resolveScanDeviceName(device) ?? selected.name;
+        await this.disconnectCurrentDevice().catch(() => {});
+        const connected = await this.connectSelectedWearable(selected, onProgress, options);
+        this.device = connected.device;
+        this.resolvedDeviceId = connected.resolvedDeviceId;
+        this.resolvedDeviceName = connected.resolvedDeviceName;
         this.installMonitors();
-        return {
-          device,
-          resolvedDeviceId: this.resolvedDeviceId,
-          resolvedDeviceName: this.resolvedDeviceName,
-        };
-      }
+        return connected;
+      });
 
-      const existing = await this.getConnectedCandidate(this.device);
-      if (existing && this.matchesSelectedDevice(existing, selected)) {
-        const device = this.subscriptions.length > 0
-          ? existing
-          : await existing.discoverAllServicesAndCharacteristics();
-        this.device = device;
-        this.resolvedDeviceId = device.id;
-        this.resolvedDeviceName = resolveScanDeviceName(device) ?? this.resolvedDeviceName ?? selected.name;
-        this.installMonitors();
-        return {
-          device,
-          resolvedDeviceId: this.resolvedDeviceId,
-          resolvedDeviceName: this.resolvedDeviceName,
-        };
-      }
-
-      await this.disconnectCurrentDevice().catch(() => {});
-      const connected = await this.connectSelectedWearable(selected, onProgress, options);
-      this.device = connected.device;
-      this.resolvedDeviceId = connected.resolvedDeviceId;
-      this.resolvedDeviceName = connected.resolvedDeviceName;
-      this.installMonitors();
-      return connected;
-    });
-
-    let released = false;
-    this.activeLeases += 1;
-
-    return {
-      ...connection,
-      release: async (releaseOptions) => {
-        if (released) {
-          return;
-        }
-
-        released = true;
-        this.activeLeases = Math.max(0, this.activeLeases - 1);
-
-        if (releaseOptions?.disconnectIfIdle) {
-          await this.disconnectIfIdle();
-        }
-      },
-    };
+      return this.createConnectionLease(connection, resumeLiveReconnect ?? undefined);
+    } catch (error) {
+      resumeLiveReconnect?.();
+      throw error;
+    }
   }
 
   async sendCommand(bytes: Uint8Array) {
@@ -269,7 +281,7 @@ export class WearableConnectionManager {
   }
 
   async disconnect() {
-    this.clearLiveReconnect();
+    this.cancelLiveConnect();
     this.stopLiveHealthWatch();
     this.liveSession = null;
     this.liveLease = null;
@@ -283,7 +295,7 @@ export class WearableConnectionManager {
       session.stopped = true;
     }
     this.liveSession = null;
-    this.clearLiveReconnect();
+    this.cancelLiveConnect();
     this.stopLiveHealthWatch();
 
     const lease = this.liveLease;
@@ -291,66 +303,146 @@ export class WearableConnectionManager {
     await lease?.release({ disconnectIfIdle: true });
   }
 
-  private async connectLiveSession(session: LiveConnectionSession) {
-    if (this.disposed || session.stopped || this.liveSession !== session) {
+  private startLiveConnectionIntent(session: LiveConnectionSession | null = this.liveSession) {
+    if (
+      !session ||
+      this.disposed ||
+      session.stopped ||
+      this.liveSession !== session ||
+      this.liveReconnectSuspendedCount > 0 ||
+      this.liveConnectPromise
+    ) {
       return;
     }
 
-    try {
-      const lease = await this.acquireConnection(session.selected, undefined, {
-        allowDiscoveryScan: true,
-        allowRescan: true,
-      });
+    const token = this.liveConnectToken + 1;
+    this.liveConnectToken = token;
 
-      if (this.disposed || session.stopped || this.liveSession !== session) {
-        await lease.release({ disconnectIfIdle: true });
-        return;
-      }
-
-      const previousLease = this.liveLease;
-      this.liveLease = lease;
-
-      try {
-        await session.callbacks.onConnected?.(lease);
-      } catch (error) {
-        if (this.liveLease === lease) {
-          this.liveLease = null;
+    const promise = this.runLiveConnectionIntent(session, token)
+      .catch((error) => {
+        if (this.isLiveConnectionAttemptActive(session, token)) {
+          void session.callbacks.onError?.(error);
         }
-        await lease.release({ disconnectIfIdle: false });
-        await this.disconnectCurrentDevice().catch(() => {});
-        throw error;
-      }
+      })
+      .finally(() => {
+        if (this.liveConnectToken === token) {
+          this.liveConnectPromise = null;
+          this.liveConnectDeviceId = null;
+          this.liveConnectCancelStep = null;
+        }
+      });
+    this.liveConnectPromise = promise;
+    void promise;
+  }
 
-      await previousLease?.release({ disconnectIfIdle: false });
-      this.startLiveHealthWatch(session);
-    } catch (error) {
-      if (session.stopped || this.liveSession !== session) {
+  private async runLiveConnectionIntent(session: LiveConnectionSession, token: number) {
+    while (this.isLiveConnectionAttemptActive(session, token)) {
+      try {
+        const existingLiveDevice = await this.getConnectedCandidate(this.liveLease?.device ?? null);
+        if (existingLiveDevice && this.matchesSelectedDevice(existingLiveDevice, session.selected)) {
+          return;
+        }
+
+        const connection = await this.connectLiveSelectedWearable(session, token);
+        if (!this.isLiveConnectionAttemptActive(session, token)) {
+          await this.disconnectStaleLiveDevice(connection.device);
+          return;
+        }
+
+        const previousLease = this.liveLease;
+        const lease = this.createConnectionLease(connection);
+        this.liveLease = lease;
+
+        try {
+          await session.callbacks.onConnected?.(lease);
+        } catch (error) {
+          if (this.liveLease === lease) {
+            this.liveLease = null;
+          }
+          await lease.release({ disconnectIfIdle: false });
+          await this.disconnectCurrentDevice().catch(() => {});
+          throw error;
+        }
+
+        await previousLease?.release({ disconnectIfIdle: false });
+        this.startLiveHealthWatch(session);
         return;
+      } catch (error) {
+        if (!this.isLiveConnectionAttemptActive(session, token)) {
+          return;
+        }
+
+        await session.callbacks.onError?.(error);
+        if (this.isUnrecoverableBluetoothError(error)) {
+          return;
+        }
+
+        await this.waitForLiveRetryWindow(session, token);
       }
-
-      await session.callbacks.onError?.(error);
-      this.scheduleLiveReconnect(session);
     }
   }
 
-  private scheduleLiveReconnect(session: LiveConnectionSession) {
-    if (this.disposed || session.stopped || this.liveSession !== session || this.liveReconnectTimer) {
-      return;
+  private async connectLiveSelectedWearable(
+    session: LiveConnectionSession,
+    token: number,
+  ): Promise<ConnectedWearable> {
+    const selected = session.selected;
+    if (!selected.id) {
+      throw new Error('No wearable selected.');
     }
 
-    this.liveReconnectTimer = setTimeout(() => {
-      this.liveReconnectTimer = null;
-      void this.connectLiveSession(session);
-    }, LIVE_UPDATES_RECONNECT_DELAY_MS);
-  }
-
-  private clearLiveReconnect() {
-    if (!this.liveReconnectTimer) {
-      return;
+    const poweredOn = await this.ensurePoweredOn({
+      liveSession: session,
+      liveToken: token,
+      timeoutMs: null,
+    });
+    if (!poweredOn || !this.isLiveConnectionAttemptActive(session, token)) {
+      throw new Error('Live wearable connection was cancelled.');
     }
 
-    clearTimeout(this.liveReconnectTimer);
-    this.liveReconnectTimer = null;
+    const existing = await this.getConnectedCandidate(this.device);
+    if (existing && this.matchesSelectedDevice(existing, selected)) {
+      const device = this.subscriptions.length > 0
+        ? existing
+        : await this.discoverLiveDeviceServices(existing);
+      this.device = device;
+      this.resolvedDeviceId = device.id;
+      this.resolvedDeviceName = resolveScanDeviceName(device) ?? this.resolvedDeviceName ?? selected.name;
+      this.installMonitors();
+      return {
+        device,
+        resolvedDeviceId: this.resolvedDeviceId,
+        resolvedDeviceName: this.resolvedDeviceName,
+      };
+    }
+
+    const candidate = await this.findKnownConnectionCandidate(selected);
+    let resolvedDeviceId = candidate?.id ?? selected.id;
+    let resolvedDeviceName = (candidate ? resolveScanDeviceName(candidate) : null) ?? selected.name;
+    let device = await this.getConnectedCandidate(candidate);
+
+    if (!device) {
+      device = await this.connectLiveDevice(resolvedDeviceId, token);
+    }
+
+    if (!this.isLiveConnectionAttemptActive(session, token)) {
+      await this.disconnectStaleLiveDevice(device);
+      throw new Error('Live wearable connection was cancelled.');
+    }
+
+    device = await this.discoverLiveDeviceServices(device);
+    resolvedDeviceName = resolveScanDeviceName(device) ?? resolvedDeviceName;
+
+    this.device = device;
+    this.resolvedDeviceId = resolvedDeviceId;
+    this.resolvedDeviceName = resolvedDeviceName;
+    this.installMonitors();
+
+    return {
+      device,
+      resolvedDeviceId,
+      resolvedDeviceName,
+    };
   }
 
   private startLiveHealthWatch(session: LiveConnectionSession) {
@@ -374,8 +466,7 @@ export class WearableConnectionManager {
     if (
       this.disposed ||
       session.stopped ||
-      this.liveSession !== session ||
-      this.liveReconnectTimer
+      this.liveSession !== session
     ) {
       return;
     }
@@ -474,7 +565,7 @@ export class WearableConnectionManager {
 
     void session.callbacks.onDisconnected?.();
     void session.callbacks.onError?.(error);
-    this.scheduleLiveReconnect(session);
+    this.startLiveConnectionIntent(session);
   }
 
   private removeMonitors() {
@@ -484,6 +575,189 @@ export class WearableConnectionManager {
         subscription?.remove();
       } catch {}
     }
+  }
+
+  private createConnectionLease(
+    connection: ConnectedWearable,
+    onRelease?: () => void,
+  ): WearableConnectionLease {
+    let released = false;
+    this.activeLeases += 1;
+
+    return {
+      ...connection,
+      release: async (releaseOptions) => {
+        if (released) {
+          return;
+        }
+
+        released = true;
+        this.activeLeases = Math.max(0, this.activeLeases - 1);
+
+        try {
+          if (releaseOptions?.disconnectIfIdle) {
+            await this.disconnectIfIdle();
+          }
+        } finally {
+          onRelease?.();
+        }
+      },
+    };
+  }
+
+  private async suspendLiveReconnectForBoundedOperation() {
+    if (!this.liveSession) {
+      return () => {};
+    }
+
+    this.liveReconnectSuspendedCount += 1;
+    this.cancelLiveConnect();
+
+    let resumed = false;
+    return () => {
+      if (resumed) {
+        return;
+      }
+
+      resumed = true;
+      this.liveReconnectSuspendedCount = Math.max(0, this.liveReconnectSuspendedCount - 1);
+      if (this.liveReconnectSuspendedCount === 0) {
+        this.startLiveConnectionIntent();
+      }
+    };
+  }
+
+  private cancelLiveConnect() {
+    const cancel = this.liveConnectCancelStep;
+    const deviceId = this.liveConnectDeviceId;
+    if (!this.liveConnectPromise && !cancel && !deviceId) {
+      return;
+    }
+
+    this.liveConnectToken += 1;
+    this.liveConnectPromise = null;
+    this.liveConnectCancelStep = null;
+    this.liveConnectDeviceId = null;
+
+    if (cancel) {
+      cancel();
+      return;
+    }
+
+    if (deviceId) {
+      void this.manager.cancelDeviceConnection(deviceId).catch(() => {});
+    }
+  }
+
+  private setLiveConnectCancelStep(token: number, cancel: () => void) {
+    if (this.liveConnectToken !== token) {
+      cancel();
+      return () => {};
+    }
+
+    this.liveConnectCancelStep = cancel;
+    return () => {
+      if (this.liveConnectToken === token && this.liveConnectCancelStep === cancel) {
+        this.liveConnectCancelStep = null;
+      }
+    };
+  }
+
+  private async connectLiveDevice(deviceId: string, token: number) {
+    this.liveConnectDeviceId = deviceId;
+    const clearCancelStep = this.setLiveConnectCancelStep(token, () => {
+      void this.manager.cancelDeviceConnection(deviceId).catch(() => {});
+    });
+
+    try {
+      return await this.manager.connectToDevice(
+        deviceId,
+        Platform.OS === 'android'
+          ? { autoConnect: true, timeout: LIVE_CONNECT_TIMEOUT_MS }
+          : { timeout: LIVE_CONNECT_TIMEOUT_MS },
+      );
+    } finally {
+      clearCancelStep();
+      if (this.liveConnectToken === token && this.liveConnectDeviceId === deviceId) {
+        this.liveConnectDeviceId = null;
+      }
+    }
+  }
+
+  private async discoverLiveDeviceServices(device: Device) {
+    return this.withLiveOperationTimeout(
+      device.discoverAllServicesAndCharacteristics(),
+      LIVE_DISCOVERY_TIMEOUT_MS,
+      'Timed out discovering live wearable services.',
+      () => {
+        void device.cancelConnection().catch(() => {});
+      },
+    );
+  }
+
+  private async withLiveOperationTimeout<T>(
+    operation: Promise<T>,
+    timeoutMs: number,
+    message: string,
+    onTimeout?: () => void,
+  ): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    try {
+      return await Promise.race([
+        operation,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            onTimeout?.();
+            reject(new Error(message));
+          }, timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) {
+        clearTimeout(timer);
+      }
+    }
+  }
+
+  private isLiveConnectionAttemptActive(session: LiveConnectionSession, token: number) {
+    return (
+      !this.disposed &&
+      !session.stopped &&
+      this.liveSession === session &&
+      this.liveConnectToken === token &&
+      this.liveReconnectSuspendedCount === 0
+    );
+  }
+
+  private async waitForLiveRetryWindow(session: LiveConnectionSession, token: number) {
+    if (!this.isLiveConnectionAttemptActive(session, token)) {
+      return;
+    }
+
+    const state = await this.manager.state().catch(() => null);
+    if (state && state !== 'PoweredOn') {
+      await this.ensurePoweredOn({
+        liveSession: session,
+        liveToken: token,
+        timeoutMs: null,
+      });
+      return;
+    }
+
+    await new Promise<void>((resolve) => {
+      let clearCancelStep: (() => void) | null = null;
+      const finish = () => {
+        clearCancelStep?.();
+        resolve();
+      };
+
+      const timeout = setTimeout(finish, LIVE_CONNECT_ERROR_BACKOFF_MS);
+      clearCancelStep = this.setLiveConnectCancelStep(token, () => {
+        clearTimeout(timeout);
+        finish();
+      });
+    });
   }
 
   private async disconnectIfIdle() {
@@ -508,26 +782,104 @@ export class WearableConnectionManager {
     }
   }
 
-  private async ensurePoweredOn() {
-    const current = await this.manager.state();
-    if (current === 'PoweredOn') {
+  private async disconnectStaleLiveDevice(device: Device) {
+    if (this.device?.id === device.id) {
       return;
     }
 
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        subscription.remove();
-        reject(new Error('Bluetooth did not power on in time.'));
-      }, 8000);
+    await device.cancelConnection().catch(() => {});
+  }
 
-      const subscription = this.manager.onStateChange((state) => {
-        if (state === 'PoweredOn') {
+  private async ensurePoweredOn(options?: {
+    liveSession?: LiveConnectionSession;
+    liveToken?: number;
+    timeoutMs?: number | null;
+  }) {
+    const current = await this.manager.state();
+    if (current === 'PoweredOn') {
+      return true;
+    }
+
+    if (this.isUnrecoverableBluetoothState(current)) {
+      throw new Error(`Bluetooth is ${current}.`);
+    }
+
+    return await new Promise<boolean>((resolve, reject) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      let clearCancelStep: (() => void) | null = null;
+      let subscription: Subscription | null = null;
+
+      const finish = (value: boolean, error?: Error) => {
+        if (settled) {
+          return;
+        }
+
+        settled = true;
+        if (timer) {
           clearTimeout(timer);
-          subscription.remove();
-          resolve();
+        }
+        clearCancelStep?.();
+        subscription?.remove();
+
+        if (error) {
+          reject(error);
+        } else {
+          resolve(value);
+        }
+      };
+
+      const isLiveAttemptActive = () => (
+        options?.liveSession && options?.liveToken != null
+          ? this.isLiveConnectionAttemptActive(options.liveSession, options.liveToken)
+          : true
+      );
+
+      if (!isLiveAttemptActive()) {
+        finish(false);
+        return;
+      }
+
+      subscription = this.manager.onStateChange((state) => {
+        if (!isLiveAttemptActive()) {
+          finish(false);
+          return;
+        }
+
+        if (state === 'PoweredOn') {
+          finish(true);
+          return;
+        }
+
+        if (this.isUnrecoverableBluetoothState(state)) {
+          finish(false, new Error(`Bluetooth is ${state}.`));
         }
       }, true);
+
+      if (options?.liveToken != null) {
+        clearCancelStep = this.setLiveConnectCancelStep(options.liveToken, () => {
+          finish(false);
+        });
+      }
+
+      const timeoutMs = options?.timeoutMs === undefined ? BLE_POWERED_ON_TIMEOUT_MS : options.timeoutMs;
+      if (timeoutMs !== null) {
+        timer = setTimeout(() => {
+          finish(false, new Error('Bluetooth did not power on in time.'));
+        }, timeoutMs);
+      }
     });
+  }
+
+  private isUnrecoverableBluetoothState(state: string) {
+    return state === 'Unauthorized' || state === 'Unsupported';
+  }
+
+  private isUnrecoverableBluetoothError(error: unknown) {
+    return error instanceof Error && (
+      error.message.includes('Bluetooth is Unauthorized') ||
+      error.message.includes('Bluetooth is Unsupported')
+    );
   }
 
   private async connectWithRetry(

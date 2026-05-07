@@ -1,12 +1,28 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 
-import { rewriteHeartRateTable } from '@/db/schema';
+import {
+  estimateDerivedDataRefreshChunkCount,
+  refreshDerivedData,
+  type DerivedDataRefreshProgress,
+} from '@/data/sqlite/SQLiteHealthRepository';
+import {
+  DERIVED_DATA_SCHEMA_VERSION,
+  rewriteHeartRateTable,
+  type RewriteHeartRateTableProgress,
+} from '@/db/schema';
 
 const VACUUM_FREE_BYTES_THRESHOLD = 16 * 1024 * 1024;
+const HEART_RATE_REWRITE_PROGRESS_UNITS = 4;
+const DERIVED_DATA_REFRESH_FIXED_PROGRESS_UNITS = 3;
 
 interface SqliteCountRow {
   count?: number;
   [key: string]: number | null | undefined;
+}
+
+interface HeartTimeBoundsRow {
+  min_time: string | null;
+  max_time: string | null;
 }
 
 export interface DatabaseMaintenanceInspection {
@@ -33,6 +49,9 @@ export interface DatabaseMaintenanceResult {
 export interface StartupMigrationInspection {
   heartRateNeedsRewrite: boolean;
   pendingSensorDataBackfillRows: number;
+  derivedDataNeedsRefresh: boolean;
+  derivedRefreshChunkCount: number;
+  estimatedTotalUnits: number;
   needsMigration: boolean;
 }
 
@@ -40,12 +59,16 @@ export interface StartupMigrationResult {
   ran: boolean;
   rewroteHeartRateSchema: boolean;
   backfilledSensorDataRows: number;
+  refreshedDerivedData: boolean;
 }
 
 export interface StartupMigrationProgress {
-  stage: 'heart_rate_rewrite' | 'sensor_data_backfill' | 'complete';
+  stage: 'heart_rate_rewrite' | 'sensor_data_backfill' | 'derived_data_refresh' | 'complete';
   completedUnits: number;
   totalUnits: number;
+  stageCompletedUnits: number;
+  stageTotalUnits: number;
+  stageLabel?: string;
   backfilledSensorDataRows: number;
   totalSensorDataRows: number;
 }
@@ -98,6 +121,44 @@ async function heartRateColumnNames(db: SQLiteDatabase) {
   return new Set(columns.map((column) => column.name));
 }
 
+async function countHeartRows(db: SQLiteDatabase) {
+  const row = await db.getFirstAsync<SqliteCountRow>(
+    `
+      SELECT COUNT(*) AS count
+      FROM heart_rate
+    `,
+  );
+
+  return row?.count ?? 0;
+}
+
+async function loadHeartTimeBounds(db: SQLiteDatabase) {
+  return db.getFirstAsync<HeartTimeBoundsRow>(
+    `
+      SELECT MIN(time) AS min_time, MAX(time) AS max_time
+      FROM heart_rate
+    `,
+  );
+}
+
+async function derivedDataNeedsStartupRefresh(db: SQLiteDatabase) {
+  const heartCount = await countHeartRows(db);
+
+  if (heartCount === 0) {
+    return false;
+  }
+
+  const row = await db.getFirstAsync<{ derived_schema_version: number | null }>(
+    `
+      SELECT derived_schema_version
+      FROM derived_data_state
+      WHERE id = 1
+    `,
+  );
+
+  return row?.derived_schema_version !== DERIVED_DATA_SCHEMA_VERSION;
+}
+
 async function countPendingSensorDataBackfillRows(db: SQLiteDatabase) {
   const heartRateColumns = await heartRateColumnNames(db);
 
@@ -114,6 +175,89 @@ async function countPendingSensorDataBackfillRows(db: SQLiteDatabase) {
   );
 
   return row?.count ?? 0;
+}
+
+function estimateStartupMigrationTotalUnits(inspection: {
+  heartRateNeedsRewrite: boolean;
+  pendingSensorDataBackfillRows: number;
+  derivedDataNeedsRefresh: boolean;
+  derivedRefreshChunkCount: number;
+}) {
+  return Math.max(
+    inspection.pendingSensorDataBackfillRows +
+      (inspection.heartRateNeedsRewrite ? HEART_RATE_REWRITE_PROGRESS_UNITS : 0) +
+      (inspection.derivedDataNeedsRefresh
+        ? inspection.derivedRefreshChunkCount + DERIVED_DATA_REFRESH_FIXED_PROGRESS_UNITS
+        : 0),
+    1,
+  );
+}
+
+function stageTotalUnitsForInspection(
+  inspection: StartupMigrationInspection,
+  stage: StartupMigrationProgress['stage'],
+) {
+  if (stage === 'sensor_data_backfill') {
+    return inspection.pendingSensorDataBackfillRows;
+  }
+
+  if (stage === 'heart_rate_rewrite') {
+    return HEART_RATE_REWRITE_PROGRESS_UNITS;
+  }
+
+  if (stage === 'derived_data_refresh') {
+    return inspection.derivedRefreshChunkCount + DERIVED_DATA_REFRESH_FIXED_PROGRESS_UNITS;
+  }
+
+  return 0;
+}
+
+function initialStartupMigrationStage(
+  inspection: StartupMigrationInspection,
+): Exclude<StartupMigrationProgress['stage'], 'complete'> {
+  if (inspection.pendingSensorDataBackfillRows > 0) {
+    return 'sensor_data_backfill';
+  }
+
+  if (inspection.heartRateNeedsRewrite) {
+    return 'heart_rate_rewrite';
+  }
+
+  return 'derived_data_refresh';
+}
+
+function rewriteStageLabel(progress: RewriteHeartRateTableProgress) {
+  switch (progress.phase) {
+    case 'ensuring_columns':
+      return 'Checking heart table columns';
+    case 'creating_replacement_table':
+      return 'Preparing replacement heart table';
+    case 'copying_rows':
+      return 'Copying saved heart rows';
+    case 'swapping_tables':
+      return 'Switching to the migrated heart table';
+    case 'complete':
+      return 'Heart table rewrite finished';
+  }
+}
+
+function derivedRefreshStageLabel(progress: DerivedDataRefreshProgress) {
+  switch (progress.phase) {
+    case 'clearing':
+      return 'Clearing stale insights';
+    case 'refreshing_range':
+      if (progress.currentChunk && progress.totalChunks > 0) {
+        return `Rebuilding time window ${progress.currentChunk} of ${progress.totalChunks}`;
+      }
+
+      return 'Preparing derived data windows';
+    case 'persisting_sleep_feature_state':
+      return 'Saving rebuilt sleep features';
+    case 'persisting_state':
+      return 'Saving derived data state';
+    case 'complete':
+      return 'Derived data refresh finished';
+  }
 }
 
 function asNullableNumber(value: unknown) {
@@ -247,15 +391,34 @@ async function backfillHeartRateSensorColumns(
 }
 
 export async function inspectRequiredStartupMigration(db: SQLiteDatabase): Promise<StartupMigrationInspection> {
-  const [needsRewrite, pendingSensorDataBackfillRows] = await Promise.all([
+  const [needsRewrite, pendingSensorDataBackfillRows, derivedDataNeedsRefresh] = await Promise.all([
     heartRateNeedsRewrite(db),
     countPendingSensorDataBackfillRows(db),
+    derivedDataNeedsStartupRefresh(db),
   ]);
+
+  let derivedRefreshChunkCount = 0;
+  if (derivedDataNeedsRefresh) {
+    const bounds = await loadHeartTimeBounds(db);
+    if (bounds?.min_time && bounds.max_time) {
+      derivedRefreshChunkCount = estimateDerivedDataRefreshChunkCount(bounds.min_time, bounds.max_time);
+    }
+  }
+
+  const estimatedTotalUnits = estimateStartupMigrationTotalUnits({
+    heartRateNeedsRewrite: needsRewrite,
+    pendingSensorDataBackfillRows,
+    derivedDataNeedsRefresh,
+    derivedRefreshChunkCount,
+  });
 
   return {
     heartRateNeedsRewrite: needsRewrite,
     pendingSensorDataBackfillRows,
-    needsMigration: needsRewrite || pendingSensorDataBackfillRows > 0,
+    derivedDataNeedsRefresh,
+    derivedRefreshChunkCount,
+    estimatedTotalUnits,
+    needsMigration: needsRewrite || pendingSensorDataBackfillRows > 0 || derivedDataNeedsRefresh,
   };
 }
 
@@ -265,47 +428,94 @@ export async function runRequiredStartupMigration(
 ): Promise<StartupMigrationResult> {
   const inspection = await inspectRequiredStartupMigration(db);
   let rewroteHeartRateSchema = false;
-  const totalUnits = (inspection.heartRateNeedsRewrite ? 1 : 0) + inspection.pendingSensorDataBackfillRows;
+  let refreshedDerivedData = false;
+  const totalUnits = inspection.estimatedTotalUnits;
+  let completedUnits = 0;
+  let currentBackfilledSensorDataRows = 0;
+
+  const emitProgress = ({
+    stage,
+    stageCompletedUnits,
+    stageLabel,
+    stageTotalUnits,
+  }: {
+    stage: StartupMigrationProgress['stage'];
+    stageCompletedUnits: number;
+    stageLabel?: string;
+    stageTotalUnits: number;
+  }) => {
+    options?.onProgress?.({
+      stage,
+      completedUnits: completedUnits + stageCompletedUnits,
+      totalUnits,
+      stageCompletedUnits,
+      stageTotalUnits,
+      stageLabel,
+      backfilledSensorDataRows: currentBackfilledSensorDataRows,
+      totalSensorDataRows: inspection.pendingSensorDataBackfillRows,
+    });
+  };
 
   if (totalUnits > 0) {
-    options?.onProgress?.({
-      stage: inspection.pendingSensorDataBackfillRows > 0 ? 'sensor_data_backfill' : 'heart_rate_rewrite',
-      completedUnits: 0,
-      totalUnits,
-      backfilledSensorDataRows: 0,
-      totalSensorDataRows: inspection.pendingSensorDataBackfillRows,
+    const initialStage = initialStartupMigrationStage(inspection);
+    emitProgress({
+      stage: initialStage,
+      stageCompletedUnits: 0,
+      stageTotalUnits: stageTotalUnitsForInspection(inspection, initialStage),
+      stageLabel:
+        initialStage === 'heart_rate_rewrite'
+          ? 'Checking heart table columns'
+          : initialStage === 'derived_data_refresh'
+            ? 'Clearing stale insights'
+            : undefined,
     });
   }
 
   const backfilledSensorDataRows = await backfillHeartRateSensorColumns(db, {
     onProgress: (completedRows, totalRows) => {
-      if (totalUnits === 0) {
+      currentBackfilledSensorDataRows = completedRows;
+      if (totalUnits === 0 || totalRows === 0) {
         return;
       }
 
-      options?.onProgress?.({
-        stage: completedRows >= totalRows && !inspection.heartRateNeedsRewrite ? 'complete' : 'sensor_data_backfill',
-        completedUnits: completedRows,
-        totalUnits,
-        backfilledSensorDataRows: completedRows,
-        totalSensorDataRows: totalRows,
+      emitProgress({
+        stage: 'sensor_data_backfill',
+        stageCompletedUnits: completedRows,
+        stageTotalUnits: totalRows,
       });
     },
   });
+  currentBackfilledSensorDataRows = backfilledSensorDataRows;
+  completedUnits += backfilledSensorDataRows;
 
   if (inspection.heartRateNeedsRewrite) {
-    if (totalUnits > 0) {
-      options?.onProgress?.({
-        stage: 'heart_rate_rewrite',
-        completedUnits: backfilledSensorDataRows,
-        totalUnits,
-        backfilledSensorDataRows,
-        totalSensorDataRows: inspection.pendingSensorDataBackfillRows,
-      });
-    }
-
-    await rewriteHeartRateTable(db);
+    await rewriteHeartRateTable(db, {
+      onProgress: (progress) => {
+        emitProgress({
+          stage: 'heart_rate_rewrite',
+          stageCompletedUnits: progress.completedUnits,
+          stageTotalUnits: progress.totalUnits,
+          stageLabel: rewriteStageLabel(progress),
+        });
+      },
+    });
+    completedUnits += HEART_RATE_REWRITE_PROGRESS_UNITS;
     rewroteHeartRateSchema = true;
+  }
+
+  if (inspection.derivedDataNeedsRefresh) {
+    await refreshDerivedData(db, {
+      onProgress: (progress) => {
+        emitProgress({
+          stage: 'derived_data_refresh',
+          stageCompletedUnits: progress.completedUnits,
+          stageTotalUnits: progress.totalUnits,
+          stageLabel: derivedRefreshStageLabel(progress),
+        });
+      },
+    });
+    completedUnits += inspection.derivedRefreshChunkCount + DERIVED_DATA_REFRESH_FIXED_PROGRESS_UNITS;
+    refreshedDerivedData = true;
   }
 
   if (totalUnits > 0) {
@@ -313,15 +523,19 @@ export async function runRequiredStartupMigration(
       stage: 'complete',
       completedUnits: totalUnits,
       totalUnits,
+      stageCompletedUnits: 0,
+      stageTotalUnits: 0,
+      stageLabel: 'Migration finished',
       backfilledSensorDataRows,
       totalSensorDataRows: inspection.pendingSensorDataBackfillRows,
     });
   }
 
   return {
-    ran: rewroteHeartRateSchema || backfilledSensorDataRows > 0,
+    ran: rewroteHeartRateSchema || backfilledSensorDataRows > 0 || refreshedDerivedData,
     rewroteHeartRateSchema,
     backfilledSensorDataRows,
+    refreshedDerivedData,
   };
 }
 

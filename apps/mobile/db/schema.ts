@@ -1,7 +1,18 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 
 export const APP_DATABASE_NAME = 'btwearable.db';
-export const DERIVED_DATA_SCHEMA_VERSION = 8;
+export const DERIVED_DATA_SCHEMA_VERSION = 11;
+const REWRITE_HEART_RATE_TABLE_PROGRESS_UNITS = 4;
+
+export interface RewriteHeartRateTableProgress {
+  phase: 'ensuring_columns' | 'creating_replacement_table' | 'copying_rows' | 'swapping_tables' | 'complete';
+  completedUnits: number;
+  totalUnits: number;
+}
+
+interface RewriteHeartRateTableOptions {
+  onProgress?: (progress: RewriteHeartRateTableProgress) => void;
+}
 
 const HEART_RATE_TABLE_COLUMNS_SQL = `
   id INTEGER PRIMARY KEY NOT NULL,
@@ -99,7 +110,15 @@ async function ensureHeartRateOptionalColumns(db: SQLiteDatabase) {
   }
 }
 
-export async function rewriteHeartRateTable(db: SQLiteDatabase) {
+export async function rewriteHeartRateTable(
+  db: SQLiteDatabase,
+  options?: RewriteHeartRateTableOptions,
+) {
+  options?.onProgress?.({
+    phase: 'ensuring_columns',
+    completedUnits: 0,
+    totalUnits: REWRITE_HEART_RATE_TABLE_PROGRESS_UNITS,
+  });
   await ensureHeartRateOptionalColumns(db);
 
   await db.execAsync('PRAGMA foreign_keys = OFF;');
@@ -107,20 +126,39 @@ export async function rewriteHeartRateTable(db: SQLiteDatabase) {
   try {
     await db.execAsync(`
       BEGIN IMMEDIATE;
-
       DROP TABLE IF EXISTS heart_rate_next;
-
-      ${buildCreateHeartRateTableSql('heart_rate_next')}
-
+    `);
+    options?.onProgress?.({
+      phase: 'creating_replacement_table',
+      completedUnits: 1,
+      totalUnits: REWRITE_HEART_RATE_TABLE_PROGRESS_UNITS,
+    });
+    await db.execAsync(buildCreateHeartRateTableSql('heart_rate_next'));
+    options?.onProgress?.({
+      phase: 'copying_rows',
+      completedUnits: 2,
+      totalUnits: REWRITE_HEART_RATE_TABLE_PROGRESS_UNITS,
+    });
+    await db.execAsync(`
       INSERT INTO heart_rate_next (${HEART_RATE_TABLE_SELECT_COLUMNS})
       SELECT ${HEART_RATE_TABLE_SELECT_COLUMNS}
       FROM heart_rate;
-
+    `);
+    options?.onProgress?.({
+      phase: 'swapping_tables',
+      completedUnits: 3,
+      totalUnits: REWRITE_HEART_RATE_TABLE_PROGRESS_UNITS,
+    });
+    await db.execAsync(`
       DROP TABLE heart_rate;
       ALTER TABLE heart_rate_next RENAME TO heart_rate;
-
       COMMIT;
     `);
+    options?.onProgress?.({
+      phase: 'complete',
+      completedUnits: REWRITE_HEART_RATE_TABLE_PROGRESS_UNITS,
+      totalUnits: REWRITE_HEART_RATE_TABLE_PROGRESS_UNITS,
+    });
   } catch (error) {
     try {
       await db.execAsync('ROLLBACK; DROP TABLE IF EXISTS heart_rate_next;');
@@ -331,7 +369,9 @@ export async function initializeDatabase(db: SQLiteDatabase) {
       spo2_count INTEGER NOT NULL,
       avg_spo2 REAL,
       skin_temp_count INTEGER NOT NULL,
-      avg_skin_temp REAL
+      avg_skin_temp REAL,
+      respiratory_rate_count INTEGER NOT NULL DEFAULT 0,
+      avg_respiratory_rate REAL
     );
 
     CREATE TABLE IF NOT EXISTS background_sync_state (
@@ -393,6 +433,27 @@ export async function initializeDatabase(db: SQLiteDatabase) {
       entity_id TEXT NOT NULL,
       delivered_at TEXT NOT NULL,
       PRIMARY KEY (device_id, kind, entity_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS app_intent_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+      kind TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      occurred_at TEXT NOT NULL,
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      handled_at TEXT,
+      created_at TEXT NOT NULL,
+      UNIQUE (kind, entity_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_app_intent_events_lookup
+      ON app_intent_events(kind, occurred_at, handled_at);
+
+    CREATE TABLE IF NOT EXISTS apple_health_export_state (
+      metric_key TEXT PRIMARY KEY NOT NULL,
+      last_exported_at TEXT,
+      exported_count INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS sleep_stage_segments (
@@ -588,9 +649,22 @@ export async function initializeDatabase(db: SQLiteDatabase) {
       spo2_count INTEGER NOT NULL,
       avg_spo2 REAL,
       skin_temp_count INTEGER NOT NULL,
-      avg_skin_temp REAL
+      avg_skin_temp REAL,
+      respiratory_rate_count INTEGER NOT NULL DEFAULT 0,
+      avg_respiratory_rate REAL
     );
   `);
+
+  const wellnessDayStatColumns = await db.getAllAsync<{ name: string }>('PRAGMA table_info(wellness_day_stats)');
+  const wellnessDayStatColumnNames = new Set(wellnessDayStatColumns.map((column) => column.name));
+
+  if (!wellnessDayStatColumnNames.has('respiratory_rate_count')) {
+    await db.execAsync('ALTER TABLE wellness_day_stats ADD COLUMN respiratory_rate_count INTEGER NOT NULL DEFAULT 0;');
+  }
+
+  if (!wellnessDayStatColumnNames.has('avg_respiratory_rate')) {
+    await db.execAsync('ALTER TABLE wellness_day_stats ADD COLUMN avg_respiratory_rate REAL;');
+  }
 
   await db.execAsync(`
     CREATE TABLE IF NOT EXISTS performance_diagnostic_runs (

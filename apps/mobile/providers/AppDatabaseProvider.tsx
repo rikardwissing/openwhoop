@@ -79,12 +79,17 @@ function AppDatabaseStatusScreen({
 
 function buildMigrationProgressState(
   inspection: StartupMigrationInspection,
-  progress?: Pick<StartupMigrationProgress, 'stage' | 'completedUnits' | 'backfilledSensorDataRows' | 'totalSensorDataRows'>,
+  progress?: Pick<
+    StartupMigrationProgress,
+    | 'stage'
+    | 'completedUnits'
+    | 'totalUnits'
+    | 'stageLabel'
+    | 'backfilledSensorDataRows'
+    | 'totalSensorDataRows'
+  >,
 ) {
-  const totalUnits = Math.max(
-    (inspection.heartRateNeedsRewrite ? 1 : 0) + inspection.pendingSensorDataBackfillRows,
-    1,
-  );
+  const totalUnits = progress?.totalUnits ?? inspection.estimatedTotalUnits;
   const totalSensorDataRows = progress?.totalSensorDataRows ?? inspection.pendingSensorDataBackfillRows;
   const completedUnits = progress?.completedUnits ?? 0;
   const backfilledSensorDataRows = progress?.backfilledSensorDataRows ?? 0;
@@ -94,13 +99,27 @@ function buildMigrationProgressState(
       ? 'sensor_data_backfill'
       : inspection.heartRateNeedsRewrite
         ? 'heart_rate_rewrite'
-        : 'complete');
+        : inspection.derivedDataNeedsRefresh
+          ? 'derived_data_refresh'
+          : 'complete');
+  const currentStep = totalUnits > 0 ? Math.min(completedUnits + 1, totalUnits) : 0;
+  const overallLabel = totalUnits > 0 ? `Step ${currentStep} of ${totalUnits}` : 'Preparing migration';
 
   if (currentStage === 'heart_rate_rewrite') {
     return {
       message: 'Rewriting saved heart data to the new storage format before the app starts.',
       progress: {
-        label: `Step ${Math.min(completedUnits + 1, totalUnits)} of ${totalUnits}`,
+        label: progress?.stageLabel ? `${overallLabel} - ${progress.stageLabel}` : overallLabel,
+        value: totalUnits > 0 ? completedUnits / totalUnits : 0,
+      },
+    };
+  }
+
+  if (currentStage === 'derived_data_refresh') {
+    return {
+      message: 'Rebuilding local health insights so saved data matches the current app version. This can take a few minutes for large histories.',
+      progress: {
+        label: progress?.stageLabel ? `${overallLabel} - ${progress.stageLabel}` : overallLabel,
         value: totalUnits > 0 ? completedUnits / totalUnits : 0,
       },
     };
@@ -112,6 +131,16 @@ function buildMigrationProgressState(
       progress: {
         label: `${backfilledSensorDataRows} / ${totalSensorDataRows} samples updated`,
         value: totalUnits > 0 ? completedUnits / totalUnits : 0,
+      },
+    };
+  }
+
+  if (currentStage === 'complete') {
+    return {
+      message: 'Finalizing your migrated local data before the app starts.',
+      progress: {
+        label: totalUnits > 0 ? `${totalUnits} / ${totalUnits} steps completed` : 'Migration finished',
+        value: 1,
       },
     };
   }

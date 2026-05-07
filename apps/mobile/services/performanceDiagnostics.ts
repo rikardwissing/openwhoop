@@ -169,6 +169,7 @@ function summarizeWellnessData(data: WellnessData) {
     activities: data.activities.length,
     stressPoints: data.stress.series.length,
     spo2Points: data.spo2.series.length,
+    respiratoryRatePoints: data.respiratoryRate.series.length,
     recoveryPoints: data.recoveryIndex.series.length,
   } satisfies Record<string, PerformanceDiagnosticValue>;
 }

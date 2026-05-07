@@ -82,6 +82,13 @@ import {
   roundClockMinutes,
   type AlarmSettingsInput,
 } from '@/utils/sleepPlan';
+import {
+  MAX_PLAUSIBLE_RESPIRATORY_RATE,
+  MAX_PLAUSIBLE_RESPIRATORY_RATE_RAW,
+  MIN_PLAUSIBLE_RESPIRATORY_RATE,
+  MIN_PLAUSIBLE_RESPIRATORY_RATE_RAW,
+  RESPIRATORY_RATE_RAW_VALUE_DIVISOR,
+} from '@/utils/respiratoryRate';
 
 const NO_HISTORY_REASON = 'No local history yet. Sync the wearable from Settings to unlock this view.';
 const NO_SLEEP_REASON = 'No overnight sleep has been detected yet. Leave the wearable on long enough for a full sleep window.';
@@ -106,6 +113,10 @@ const MAX_TRANSIENT_AWAKE_STAGE_MINUTES = 1;
 const MAX_FRAGMENTED_SUMMARY_STAGE_MINUTES = 2;
 const STRESS_WINDOW = 120;
 const SPO2_WINDOW = 30;
+const SPO2_CALIBRATION_INTERCEPT = 110;
+const SPO2_CALIBRATION_SLOPE = 17;
+const MIN_PLAUSIBLE_SPO2_RATIO = 0.65;
+const MAX_PLAUSIBLE_SPO2_RATIO = 1.25;
 const DEFAULT_TARGET_WAKE_MINUTES = 7 * 60 + 30;
 const RECENT_WAKE_INFERENCE_DAYS = 7;
 const DASHBOARD_HEART_BUCKET_MINUTES = 5;
@@ -136,6 +147,14 @@ const MIN_SLEEP_CONSISTENCY_NIGHTS = 3;
 const TEMPERATURE_BASELINE_WINDOW_NIGHTS = 14;
 const MIN_TEMPERATURE_BASELINE_NIGHTS = 3;
 const TEMPERATURE_BASELINE_NEUTRAL_DELTA = 0.15;
+const RESPIRATORY_RATE_SQL_VALUE = `
+  CASE
+    WHEN resp_rate_raw BETWEEN ${MIN_PLAUSIBLE_RESPIRATORY_RATE_RAW} AND ${MAX_PLAUSIBLE_RESPIRATORY_RATE_RAW}
+      AND CAST(resp_rate_raw / ${RESPIRATORY_RATE_RAW_VALUE_DIVISOR} AS INTEGER) BETWEEN ${MIN_PLAUSIBLE_RESPIRATORY_RATE} AND ${MAX_PLAUSIBLE_RESPIRATORY_RATE}
+    THEN CAST(resp_rate_raw / ${RESPIRATORY_RATE_RAW_VALUE_DIVISOR} AS INTEGER)
+    ELSE NULL
+  END
+`;
 
 const SHOULD_LOG_MOBILE_PERF =
   typeof __DEV__ !== 'undefined' &&
@@ -253,6 +272,7 @@ interface WellnessMetricDayAggregateRow {
   day: string;
   avg_stress: number | null;
   avg_spo2: number | null;
+  avg_respiratory_rate: number | null;
   avg_skin_temp: number | null;
 }
 
@@ -263,6 +283,9 @@ interface WellnessMetricSummaryRow {
   spo2_count: number;
   avg_spo2: number | null;
   latest_spo2: number | null;
+  respiratory_rate_count: number;
+  avg_respiratory_rate: number | null;
+  latest_respiratory_rate: number | null;
   skin_temp_count: number;
   avg_skin_temp: number | null;
   latest_skin_temp: number | null;
@@ -274,6 +297,8 @@ interface WellnessDayStatRow {
   avg_stress: number | null;
   spo2_count: number;
   avg_spo2: number | null;
+  respiratory_rate_count: number;
+  avg_respiratory_rate: number | null;
   skin_temp_count: number;
   avg_skin_temp: number | null;
 }
@@ -550,6 +575,25 @@ interface LatestHeartRow {
 interface HeartTimeBoundsRow {
   min_time: string | null;
   max_time: string | null;
+}
+
+export interface DerivedDataRefreshProgress {
+  phase:
+    | 'clearing'
+    | 'refreshing_range'
+    | 'persisting_sleep_feature_state'
+    | 'persisting_state'
+    | 'complete';
+  completedUnits: number;
+  totalUnits: number;
+  currentChunk?: number;
+  totalChunks: number;
+  fromTime?: string;
+  toTime?: string;
+}
+
+interface RefreshDerivedDataOptions {
+  onProgress?: (progress: DerivedDataRefreshProgress) => void;
 }
 
 interface NumberRow {
@@ -2658,8 +2702,12 @@ function calculateSpo2ScoreFromState(
     return null;
   }
 
-  const ratio = (acRed / meanRed) / (acIr / meanIr);
-  return clamp(110 - 25 * ratio, 70, 100);
+  const ratio = (acIr / meanIr) / (acRed / meanRed);
+  if (!Number.isFinite(ratio) || ratio < MIN_PLAUSIBLE_SPO2_RATIO || ratio > MAX_PLAUSIBLE_SPO2_RATIO) {
+    return null;
+  }
+
+  return clamp(SPO2_CALIBRATION_INTERCEPT - SPO2_CALIBRATION_SLOPE * ratio, 70, 100);
 }
 
 function calculateSpo2Score(window: HeartRateRecord[]): number | null {
@@ -4032,6 +4080,18 @@ async function loadHeartTimeBounds(db: SQLiteDatabase) {
       FROM heart_rate
     `,
   );
+}
+
+export function estimateDerivedDataRefreshChunkCount(fromTime: string, toTime: string) {
+  const normalized = normalizeTimeRange(fromTime, toTime);
+  const rangeStartMs = parseSqliteDateTime(normalized.fromTime).getTime();
+  const rangeEndMs = parseSqliteDateTime(normalized.toTime).getTime();
+
+  if (rangeEndMs <= rangeStartMs) {
+    return 1;
+  }
+
+  return Math.max(1, Math.ceil((rangeEndMs - rangeStartMs) / DERIVED_REFRESH_CHUNK_MS));
 }
 
 async function queryHeartRowsBetween(
@@ -5655,16 +5715,20 @@ async function replaceWellnessDayStatsRange(
             avg_stress,
             spo2_count,
             avg_spo2,
+            respiratory_rate_count,
+            avg_respiratory_rate,
             skin_temp_count,
             avg_skin_temp
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         `,
         stat.day,
         stat.stress_count,
         stat.avg_stress,
         stat.spo2_count,
         stat.avg_spo2,
+        stat.respiratory_rate_count,
+        stat.avg_respiratory_rate,
         stat.skin_temp_count,
         stat.avg_skin_temp,
       );
@@ -6197,6 +6261,8 @@ async function refreshWellnessDayStatsForRange(
           AVG(stress) AS avg_stress,
           COUNT(spo2) AS spo2_count,
           AVG(spo2) AS avg_spo2,
+          COUNT(${RESPIRATORY_RATE_SQL_VALUE}) AS respiratory_rate_count,
+          AVG(${RESPIRATORY_RATE_SQL_VALUE}) AS avg_respiratory_rate,
           COUNT(skin_temp) AS skin_temp_count,
           AVG(skin_temp) AS avg_skin_temp
         FROM heart_rate
@@ -6397,24 +6463,49 @@ async function refreshDerivedDataRangeChunked(
   db: SQLiteDatabase,
   fromTime: string,
   toTime: string,
+  options?: {
+    onProgress?: (progress: {
+      completedChunks: number;
+      totalChunks: number;
+      fromTime: string;
+      toTime: string;
+    }) => void;
+  },
 ) {
   const normalized = normalizeTimeRange(fromTime, toTime);
+  const totalChunks = estimateDerivedDataRefreshChunkCount(normalized.fromTime, normalized.toTime);
   const rangeStartMs = parseSqliteDateTime(normalized.fromTime).getTime();
   const rangeEndMs = parseSqliteDateTime(normalized.toTime).getTime();
 
   if (rangeEndMs <= rangeStartMs) {
     await refreshDerivedDataRange(db, normalized.fromTime, normalized.toTime);
+    options?.onProgress?.({
+      completedChunks: 1,
+      totalChunks,
+      fromTime: normalized.fromTime,
+      toTime: normalized.toTime,
+    });
     return;
   }
 
   let chunkStartMs = rangeStartMs;
+  let completedChunks = 0;
   while (chunkStartMs < rangeEndMs) {
     const chunkEndMs = Math.min(chunkStartMs + DERIVED_REFRESH_CHUNK_MS, rangeEndMs);
+    const chunkFromTime = formatSqliteDateTime(new Date(chunkStartMs));
+    const chunkToTime = formatSqliteDateTime(new Date(chunkEndMs));
     await refreshDerivedDataRange(
       db,
-      formatSqliteDateTime(new Date(chunkStartMs)),
-      formatSqliteDateTime(new Date(chunkEndMs)),
+      chunkFromTime,
+      chunkToTime,
     );
+    completedChunks += 1;
+    options?.onProgress?.({
+      completedChunks,
+      totalChunks,
+      fromTime: chunkFromTime,
+      toTime: chunkToTime,
+    });
 
     if (chunkEndMs >= rangeEndMs) {
       break;
@@ -6424,7 +6515,7 @@ async function refreshDerivedDataRangeChunked(
   }
 }
 
-export async function refreshDerivedData(db: SQLiteDatabase) {
+export async function refreshDerivedData(db: SQLiteDatabase, options?: RefreshDerivedDataOptions) {
   const refreshStartedAt = Date.now();
   const [heartCount, bounds] = await Promise.all([
     countHeartRows(db),
@@ -6460,6 +6551,16 @@ export async function refreshDerivedData(db: SQLiteDatabase) {
     return;
   }
 
+  const derivedRefreshChunkCount = estimateDerivedDataRefreshChunkCount(bounds.min_time, bounds.max_time);
+  const progressTotalUnits = derivedRefreshChunkCount + 3;
+
+  options?.onProgress?.({
+    phase: 'clearing',
+    completedUnits: 0,
+    totalUnits: progressTotalUnits,
+    totalChunks: derivedRefreshChunkCount,
+  });
+
   await withExclusiveTransaction(db, async (tx) => {
     await clearAllDerivedTables(tx);
     await tx.execAsync(`
@@ -6471,12 +6572,45 @@ export async function refreshDerivedData(db: SQLiteDatabase) {
     `);
   });
 
-  await refreshDerivedDataRangeChunked(db, bounds.min_time, bounds.max_time);
+  options?.onProgress?.({
+    phase: 'refreshing_range',
+    completedUnits: 1,
+    totalUnits: progressTotalUnits,
+    currentChunk: 0,
+    totalChunks: derivedRefreshChunkCount,
+  });
+
+  await refreshDerivedDataRangeChunked(db, bounds.min_time, bounds.max_time, {
+    onProgress: (progress) => {
+      options?.onProgress?.({
+        phase: 'refreshing_range',
+        completedUnits: 1 + progress.completedChunks,
+        totalUnits: progressTotalUnits,
+        currentChunk: progress.completedChunks,
+        totalChunks: progress.totalChunks,
+        fromTime: progress.fromTime,
+        toTime: progress.toTime,
+      });
+    },
+  });
+  options?.onProgress?.({
+    phase: 'persisting_sleep_feature_state',
+    completedUnits: 1 + derivedRefreshChunkCount,
+    totalUnits: progressTotalUnits,
+    totalChunks: derivedRefreshChunkCount,
+  });
   await persistSleepFeatureBucketStateRow(db, {
     bucket_seconds: SLEEP_FEATURE_BUCKET_SECONDS,
     source_row_count: heartCount,
     source_last_sample_time: bounds.max_time,
     refreshed_at: formatSqliteDateTime(new Date()),
+  });
+
+  options?.onProgress?.({
+    phase: 'persisting_state',
+    completedUnits: 2 + derivedRefreshChunkCount,
+    totalUnits: progressTotalUnits,
+    totalChunks: derivedRefreshChunkCount,
   });
 
   await persistDerivedDataStateRow(db, {
@@ -6489,6 +6623,12 @@ export async function refreshDerivedData(db: SQLiteDatabase) {
     last_processed_from_time: bounds.min_time,
     last_processed_to_time: bounds.max_time,
     last_error: null,
+  });
+  options?.onProgress?.({
+    phase: 'complete',
+    completedUnits: progressTotalUnits,
+    totalUnits: progressTotalUnits,
+    totalChunks: derivedRefreshChunkCount,
   });
   logMobilePerf('derived.full.total', refreshStartedAt, {
     rows: heartCount,
@@ -6894,14 +7034,15 @@ async function ensureWellnessDayStatsReady(db: SQLiteDatabase) {
   const next = (async () => {
     const ensureStartedAt = Date.now();
     await waitForAggregateMutations(db);
-    const [heartCount, existingDayStat] = await Promise.all([
+    const [heartCount, existingDayStats] = await Promise.all([
       countHeartRows(db),
       withAggregateReadLock(db, () =>
-        db.getFirstAsync<{ day: string }>(
+        db.getFirstAsync<{ stats_count: number; respiratory_rate_count: number | null }>(
           `
-            SELECT day
+            SELECT
+              COUNT(*) AS stats_count,
+              COALESCE(SUM(respiratory_rate_count), 0) AS respiratory_rate_count
             FROM wellness_day_stats
-            LIMIT 1
           `,
         ),
       ),
@@ -6914,7 +7055,22 @@ async function ensureWellnessDayStatsReady(db: SQLiteDatabase) {
       return;
     }
 
-    if (existingDayStat) {
+    const existingStatsCount = existingDayStats?.stats_count ?? 0;
+    const existingRespiratoryRateCount = existingDayStats?.respiratory_rate_count ?? 0;
+    const respiratoryRateSourceCount =
+      existingStatsCount > 0 && existingRespiratoryRateCount === 0
+        ? (await db.getFirstAsync<{ count: number }>(
+            `
+              SELECT COUNT(*) AS count
+              FROM heart_rate
+              WHERE resp_rate_raw BETWEEN ? AND ?
+            `,
+            MIN_PLAUSIBLE_RESPIRATORY_RATE_RAW,
+            MAX_PLAUSIBLE_RESPIRATORY_RATE_RAW,
+          ))?.count ?? 0
+        : 0;
+
+    if (existingStatsCount > 0 && (existingRespiratoryRateCount > 0 || respiratoryRateSourceCount === 0)) {
       logMobilePerf('wellness.ensureDayStats.hit', ensureStartedAt, {
         heartCount,
       });
@@ -7951,6 +8107,7 @@ export class SQLiteHealthRepository implements HealthRepository {
               day,
               avg_stress,
               avg_spo2,
+              avg_respiratory_rate,
               avg_skin_temp
             FROM wellness_day_stats
             WHERE day >= ?
@@ -7982,6 +8139,12 @@ export class SQLiteHealthRepository implements HealthRepository {
                 ELSE SUM(avg_spo2 * spo2_count) / SUM(spo2_count)
               END AS avg_spo2,
               (SELECT spo2 FROM heart_rate WHERE time >= ? AND spo2 IS NOT NULL ORDER BY time DESC LIMIT 1) AS latest_spo2,
+              COALESCE(SUM(respiratory_rate_count), 0) AS respiratory_rate_count,
+              CASE
+                WHEN COALESCE(SUM(respiratory_rate_count), 0) = 0 THEN NULL
+                ELSE SUM(avg_respiratory_rate * respiratory_rate_count) / SUM(respiratory_rate_count)
+              END AS avg_respiratory_rate,
+              (SELECT ${RESPIRATORY_RATE_SQL_VALUE} FROM heart_rate WHERE time >= ? AND resp_rate_raw BETWEEN ${MIN_PLAUSIBLE_RESPIRATORY_RATE_RAW} AND ${MAX_PLAUSIBLE_RESPIRATORY_RATE_RAW} ORDER BY time DESC LIMIT 1) AS latest_respiratory_rate,
               COALESCE(SUM(skin_temp_count), 0) AS skin_temp_count,
               CASE
                 WHEN COALESCE(SUM(skin_temp_count), 0) = 0 THEN NULL
@@ -7994,6 +8157,7 @@ export class SQLiteHealthRepository implements HealthRepository {
           startSql,
           startSql,
           startSql,
+          startSql,
           startDay,
         ),
       ),
@@ -8002,7 +8166,7 @@ export class SQLiteHealthRepository implements HealthRepository {
 
   private async loadRecentWellnessMetricValuesSince(
     start: Date,
-    metric: 'stress' | 'spo2' | 'skin_temp',
+    metric: 'stress' | 'spo2' | 'respiratory_rate' | 'skin_temp',
     limit: number,
     readKey: string,
   ) {
@@ -8024,6 +8188,15 @@ export class SQLiteHealthRepository implements HealthRepository {
               ORDER BY time DESC
               LIMIT ?
             `
+          : metric === 'respiratory_rate'
+            ? `
+                SELECT ${RESPIRATORY_RATE_SQL_VALUE} AS value
+                FROM heart_rate
+                WHERE time >= ?
+                  AND resp_rate_raw BETWEEN ${MIN_PLAUSIBLE_RESPIRATORY_RATE_RAW} AND ${MAX_PLAUSIBLE_RESPIRATORY_RATE_RAW}
+                ORDER BY time DESC
+                LIMIT ?
+              `
           : `
               SELECT skin_temp AS value
               FROM heart_rate
@@ -8739,6 +8912,7 @@ export class SQLiteHealthRepository implements HealthRepository {
           return {
             stress: emptyMetric('Stress', 'alert'),
             spo2: emptyMetric('SpO2', 'cyan'),
+            respiratoryRate: emptyMetric('Respiratory Rate', 'violet'),
             skinTemperature: emptyMetric('Skin Temperature', 'heart'),
             recoveryIndex: emptyMetric('Recovery Index', 'green'),
             activities: [],
@@ -8754,7 +8928,14 @@ export class SQLiteHealthRepository implements HealthRepository {
         const earliestRelevantDate = new Date(earliestRelevantTimestamp);
         const earliestRelevantSql = formatSqliteDateTime(earliestRelevantDate);
         const metricRowsStartedAt = Date.now();
-        const [metricDayAggregates, metricSummary, recentStressValues, recentSpo2Values, recentSkinTempValues] = await Promise.all([
+        const [
+          metricDayAggregates,
+          metricSummary,
+          recentStressValues,
+          recentSpo2Values,
+          recentRespiratoryRateValues,
+          recentSkinTempValues,
+        ] = await Promise.all([
           this.loadWellnessMetricDayAggregatesSince(
             earliestRelevantDate,
             `wellness:metric-days:${range}:${earliestRelevantSql}`,
@@ -8774,6 +8955,12 @@ export class SQLiteHealthRepository implements HealthRepository {
             'spo2',
             8,
             `wellness:metric-recent:spo2:${range}:${earliestRelevantSql}`,
+          ),
+          this.loadRecentWellnessMetricValuesSince(
+            earliestRelevantDate,
+            'respiratory_rate',
+            8,
+            `wellness:metric-recent:respiratory-rate:${range}:${earliestRelevantSql}`,
           ),
           this.loadRecentWellnessMetricValuesSince(
             earliestRelevantDate,
@@ -8822,6 +9009,7 @@ export class SQLiteHealthRepository implements HealthRepository {
             : buildFilledDailySeries(range, latestSleep.end, (day) => recoveryByDay.get(day) ?? null);
         const stressByDay = new Map(metricDayAggregates.map((row) => [row.day, row.avg_stress]));
         const spo2ByDay = new Map(metricDayAggregates.map((row) => [row.day, row.avg_spo2]));
+        const respiratoryRateByDay = new Map(metricDayAggregates.map((row) => [row.day, row.avg_respiratory_rate]));
         const skinTempByDay = new Map(metricDayAggregates.map((row) => [row.day, row.avg_skin_temp]));
 
         const activities = recentActivities.map((activity, index): ActivitySummary => {
@@ -8870,6 +9058,20 @@ export class SQLiteHealthRepository implements HealthRepository {
             count: metricSummary?.spo2_count ?? 0,
             recentValues: recentSpo2Values,
             valuesByDay: spo2ByDay,
+          }),
+          respiratoryRate: buildWellnessMetricSeries({
+            title: 'Respiratory Rate',
+            unit: 'br/min',
+            accent: 'violet',
+            detail: 'Breathing rate stayed inside your recent resting range.',
+            digits: 1,
+            endDate: latestHeartDate,
+            range,
+            latest: metricSummary?.latest_respiratory_rate ?? null,
+            average: metricSummary?.avg_respiratory_rate ?? null,
+            count: metricSummary?.respiratory_rate_count ?? 0,
+            recentValues: recentRespiratoryRateValues,
+            valuesByDay: respiratoryRateByDay,
           }),
           skinTemperature: buildWellnessMetricSeries({
             title: 'Skin Temperature',

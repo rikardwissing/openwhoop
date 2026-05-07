@@ -13,10 +13,15 @@ import {
   recordSyncImportSummary,
   releaseBackgroundSyncLock,
 } from '@/services/background/backgroundSyncState';
+import {
+  beginBackgroundExecutionAssertionAsync,
+  endBackgroundExecutionAssertionAsync,
+} from '@/services/background/backgroundExecutionAssertion';
 import { EventNumber } from '@/services/ble/constants';
 import { WearableConnectionManager, type LiveConnectionHandle } from '@/services/ble/WearableConnectionManager';
 import { disableAlarmPacket, enterHighFrequencySyncPacket, exitHighFrequencySyncPacket, getBatteryLevelPacket, getBodyLocationAndStatusPacket, getNamePacket, helloHarvardPacket, historyEndPacket, historyStartPacket, restartPacket, setAlarmPacket, setClockPacket, toggleR7DataCollectionPacket, toggleRealtimeHrPacket, type FramedPacket, type ParsedNotification, type SensorDataPacket, versionInfoPacket } from '@/services/ble/codec';
 import { HistorySyncWatchdog } from '@/services/ble/syncWatchdog';
+import { recordAppIntentEvent } from '@/services/appIntentEvents';
 import {
   notifyForWearableBatteryLevelAsync,
   notifyForWearableEventAsync,
@@ -54,6 +59,7 @@ const BACKGROUND_SYNC_CLEANUP_RESERVE_MS = 20_000;
 const HISTORY_WRITE_BATCH_SIZE = 250;
 const HISTORY_WRITE_MAX_RETRIES = 4;
 const HISTORY_WRITE_RETRY_DELAY_MS = 150;
+const LIVE_RECONNECT_BACKGROUND_ASSERTION_MAX_MS = 25_000;
 const HISTORY_INSERT_SQL = `
   INSERT INTO heart_rate (
     bpm,
@@ -659,6 +665,20 @@ export class WearableSyncService {
       parsed.event.event === EventNumber.StrapDrivenAlarmExecuted
     ) {
       await markOneOffSleepAlarmExecutedFromDatabase(this.db, new Date(parsed.event.unix));
+      await recordAppIntentEvent(this.db, {
+        kind: 'wearable_alarm',
+        entityId: `${parsed.event.event}:${parsed.event.unix}`,
+        occurredAt: new Date(parsed.event.unix),
+        payload: {
+          deviceId,
+          deviceName,
+          eventNumber: parsed.event.event,
+          source:
+            parsed.event.event === EventNumber.AppDrivenAlarmExecuted
+              ? 'app-driven'
+              : 'strap-driven',
+        },
+      });
     }
 
     await notifyForWearableEventAsync(this.db, deviceId, deviceName, parsed.event);
@@ -679,6 +699,47 @@ export class WearableSyncService {
     let closed = false;
     let resolvedDeviceId = selected.id;
     let resolvedDeviceName = selected.name;
+    let reconnectAssertionId: number | null = null;
+    let reconnectAssertionPending = false;
+    let reconnectAssertionTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const endLiveReconnectAssertion = async () => {
+      if (reconnectAssertionTimer) {
+        clearTimeout(reconnectAssertionTimer);
+        reconnectAssertionTimer = null;
+      }
+
+      const assertionId = reconnectAssertionId;
+      reconnectAssertionId = null;
+      reconnectAssertionPending = false;
+      await endBackgroundExecutionAssertionAsync(assertionId);
+    };
+
+    const beginLiveReconnectAssertion = async () => {
+      if (reconnectAssertionId !== null || reconnectAssertionPending) {
+        return;
+      }
+
+      reconnectAssertionPending = true;
+      const assertionId = await beginBackgroundExecutionAssertionAsync('LiveBleReconnect');
+      if (closed) {
+        reconnectAssertionPending = false;
+        await endBackgroundExecutionAssertionAsync(assertionId);
+        return;
+      }
+
+      reconnectAssertionId = assertionId;
+      reconnectAssertionPending = false;
+
+      if (assertionId !== null) {
+        reconnectAssertionTimer = setTimeout(() => {
+          const expiredAssertionId = reconnectAssertionId;
+          reconnectAssertionId = null;
+          reconnectAssertionTimer = null;
+          void endBackgroundExecutionAssertionAsync(expiredAssertionId);
+        }, LIVE_RECONNECT_BACKGROUND_ASSERTION_MAX_MS);
+      }
+    };
 
     const pushState = async (update: Partial<Pick<DeviceStateUpdate, 'batteryPercent' | 'chargingStatus' | 'bodyStatus'>>) => {
       if (closed) {
@@ -765,6 +826,7 @@ export class WearableSyncService {
     const cleanup = async () => {
       closed = true;
       unsubscribePackets();
+      await endLiveReconnectAssertion();
       await this.sendCommand(toggleRealtimeHrPacket(false)).catch(() => {});
       const handle = this.liveUpdatesHandle;
       this.liveUpdatesHandle = null;
@@ -782,6 +844,7 @@ export class WearableSyncService {
           return;
         }
 
+        await endLiveReconnectAssertion();
         resolvedDeviceId = lease.resolvedDeviceId;
         resolvedDeviceName = lease.resolvedDeviceName;
         await this.persistDeviceState({
@@ -796,6 +859,7 @@ export class WearableSyncService {
           return;
         }
 
+        await beginLiveReconnectAssertion();
         this.clearLiveHeartRate();
         onDeviceState(await this.getDeviceState());
       },
@@ -995,6 +1059,7 @@ export class WearableSyncService {
     let stoppedForTimeBudget = false;
     let stopReason: 'expiration' | 'time-budget' | null = null;
     let historyIntakeClosed = false;
+    let importedRowsFinalized = false;
     let unsubscribeSyncPackets: (() => void) | null = null;
     let resolveBatteryResponse: ((value: number | null) => void) | null = null;
     this.liveDeviceEventSideEffectsSuspendCount += 1;
@@ -1146,6 +1211,36 @@ export class WearableSyncService {
     const drainPendingHistoryRows = async () => {
       while (pendingHistoryRows.length > 0) {
         await flushPendingHistoryRows();
+      }
+    };
+
+    const finalizeImportedRows = async () => {
+      if (importedRowsFinalized) {
+        return;
+      }
+
+      await queueWrite(async () => {
+        await drainPendingHistoryRows();
+      });
+      await writeQueue;
+      importedRowsFinalized = true;
+
+      if (earliestImportedTime && latestImportedTime) {
+        try {
+          await refreshHeartAggregatesForRange(this.db, earliestImportedTime, latestImportedTime);
+        } catch (error) {
+          console.warn(
+            '[wearable-sync] Failed to refresh heart aggregates after imported rows',
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+
+        await markDerivedRefreshPending(this.db, earliestImportedTime, latestImportedTime).catch((error) => {
+          console.warn(
+            '[wearable-sync] Failed to mark derived refresh after imported rows',
+            error instanceof Error ? error.message : String(error),
+          );
+        });
       }
     };
 
@@ -1507,16 +1602,7 @@ export class WearableSyncService {
       historyIntakeClosed = true;
       closeHistorySubscriptions();
 
-      await queueWrite(async () => {
-        await drainPendingHistoryRows();
-      });
-      await writeQueue;
-      if (earliestImportedTime && latestImportedTime) {
-        try {
-          await refreshHeartAggregatesForRange(this.db, earliestImportedTime, latestImportedTime);
-        } catch {}
-        await markDerivedRefreshPending(this.db, earliestImportedTime, latestImportedTime);
-      }
+      await finalizeImportedRows();
 
       const completedAt = formatSqliteDateTime(new Date());
       await this.persistDeviceState({
@@ -1551,6 +1637,12 @@ export class WearableSyncService {
       };
     } catch (error) {
       const message = formatBleError(error);
+      await finalizeImportedRows().catch((finalizeError) => {
+        console.warn(
+          '[wearable-sync] Failed to finalize imported rows after sync error',
+          finalizeError instanceof Error ? finalizeError.message : String(finalizeError),
+        );
+      });
       await this.persistDeviceState({
         id: resolvedDeviceId,
         name: resolvedDeviceName,
@@ -1571,9 +1663,7 @@ export class WearableSyncService {
       throw error;
     } finally {
       failSync = null;
-      await queueWrite(async () => {
-        await drainPendingHistoryRows();
-      }).catch(() => {});
+      await finalizeImportedRows().catch(() => {});
       await commandQueue.catch(() => {});
 
       closeHistorySubscriptions();

@@ -10,6 +10,10 @@ import {
   type SyncRunOptions,
 } from '@/services/ble/WearableSyncService';
 import {
+  writeLocalMetricsToAppleHealthIfAuthorized,
+  type AppleHealthExportResult,
+} from '@/services/appleHealthExport';
+import {
   loadDetectedReviewNotificationSnapshot,
   notifyForNewDetectedReviewItemsAsync,
   type DetectedReviewNotificationResult,
@@ -29,6 +33,7 @@ const EMPTY_DETECTION_NOTIFICATION_RESULT: DetectedReviewNotificationResult = {
 };
 
 export interface BackgroundDeviceSyncManualRunResult {
+  appleHealthExport: AppleHealthExportResult | null;
   detectionNotifications: DetectedReviewNotificationResult;
   error: string | null;
   importedReadings: number;
@@ -57,6 +62,15 @@ function formatElapsedDuration(elapsedMs: number) {
   const seconds = totalSeconds % 60;
 
   return seconds === 0 ? `${minutes}m` : `${minutes}m ${seconds}s`;
+}
+
+function formatAppleHealthExportSuffix(result: AppleHealthExportResult | null) {
+  if (!result || result.status !== 'success' || result.totals.exported === 0) {
+    return '';
+  }
+
+  const count = result.totals.exported;
+  return ` Wrote ${count} Apple Health ${count === 1 ? 'sample' : 'samples'}.`;
 }
 
 function errorMessage(error: unknown) {
@@ -164,6 +178,7 @@ async function executeBackgroundDeviceSyncAsync(options: {
     const deviceState = await service.getDeviceState();
     if (!deviceState.id) {
       return {
+        appleHealthExport: null,
         detectionNotifications: EMPTY_DETECTION_NOTIFICATION_RESULT,
         error: null,
         importedReadings: 0,
@@ -193,6 +208,7 @@ async function executeBackgroundDeviceSyncAsync(options: {
 
     let processedDerivedRefresh = false;
     let detectionNotifications = EMPTY_DETECTION_NOTIFICATION_RESULT;
+    let appleHealthExport: AppleHealthExportResult | null = null;
     const shouldProcessDetectedReviewItems =
       outcome.status !== 'skipped' &&
       (!options.useExpirationListener || !pausedSafely);
@@ -205,9 +221,24 @@ async function executeBackgroundDeviceSyncAsync(options: {
         deviceState.id,
         previousDetectionSnapshot,
       ).catch(() => EMPTY_DETECTION_NOTIFICATION_RESULT);
+
+      const appleHealthExportDeadlineMs = options.useExpirationListener
+        ? runStartedAtMs + BACKGROUND_DEVICE_SYNC_TIME_BUDGET_MS
+        : undefined;
+
+      appleHealthExport = await writeLocalMetricsToAppleHealthIfAuthorized(db, {
+        deadlineMs: appleHealthExportDeadlineMs,
+      }).catch((error) => {
+        console.warn(
+          '[apple-health] Export after sync failed',
+          error instanceof Error ? error.message : String(error),
+        );
+        return null;
+      });
     }
 
     const elapsed = formatElapsedDuration(Date.now() - runStartedAtMs);
+    const appleHealthSuffix = formatAppleHealthExportSuffix(appleHealthExport);
     const completedBody =
       outcome.reason === 'expiration'
         ? `Paused safely after ${elapsed} because the system background window expired after importing ${readings}. Sync will continue later.`
@@ -215,7 +246,7 @@ async function executeBackgroundDeviceSyncAsync(options: {
           ? `Paused safely after ${elapsed} with ${readings} imported. Sync will continue in a later background window.`
           : outcome.status === 'skipped'
             ? 'Skipped because another sync is already running.'
-            : `Completed background sync in ${elapsed} with ${readings} imported.`;
+            : `Completed background sync in ${elapsed} with ${readings} imported.${appleHealthSuffix}`;
 
     await scheduleBackgroundDeviceSyncNotificationAsync({
       title:
@@ -235,6 +266,7 @@ async function executeBackgroundDeviceSyncAsync(options: {
     }
 
     return {
+      appleHealthExport,
       detectionNotifications,
       error: null,
       importedReadings: outcome.importedReadings,
@@ -251,6 +283,7 @@ async function executeBackgroundDeviceSyncAsync(options: {
     });
 
     return {
+      appleHealthExport: null,
       detectionNotifications: EMPTY_DETECTION_NOTIFICATION_RESULT,
       error: message,
       importedReadings: 0,

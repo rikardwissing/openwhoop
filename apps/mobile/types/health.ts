@@ -281,6 +281,7 @@ export interface HeartIntradayMarker {
 export interface WellnessData extends EstimatedValueMeta {
   stress: MetricSeries;
   spo2: MetricSeries;
+  respiratoryRate: MetricSeries;
   skinTemperature: MetricSeries;
   recoveryIndex: MetricSeries;
   activities: ActivitySummary[];

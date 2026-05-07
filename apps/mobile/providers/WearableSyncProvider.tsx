@@ -181,6 +181,7 @@ export const defaultWearableSyncContextValue: WearableSyncContextValue = {
   selectDevice: async () => {},
   forgetDevice: async () => {},
   runBackgroundSync: async () => ({
+    appleHealthExport: null,
     detectionNotifications: {
       activityReadyCount: 0,
       sleepReadyCount: 0,
@@ -297,8 +298,10 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
   const handledBatteryEventIdRef = useRef<string | null>(null);
   const batteryEventBackgroundSyncInFlightRef = useRef(false);
   const lastBatteryEventBackgroundSyncAtRef = useRef(0);
+  const previousAppStateRef = useRef<AppStateStatus>(AppState.currentState);
   const progressStatusRef = useRef(progress.status);
   const runBackgroundSyncRef = useRef<WearableSyncContextValue['runBackgroundSync'] | null>(null);
+  const [appBecameActiveCount, setAppBecameActiveCount] = useState(0);
 
   useEffect(() => {
     backgroundSyncStateRef.current = backgroundSyncState;
@@ -450,12 +453,17 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
         const nextState = await readBackgroundStateFresh();
         const previousState = backgroundSyncStateRef.current;
         setBackgroundSyncState(nextState);
+        const runFinishedChanged =
+          nextState.lastRunFinishedAt !== previousState.lastRunFinishedAt ||
+          nextState.lastSuccessAt !== previousState.lastSuccessAt;
+        const importedRowsDuringRun =
+          (nextState.lastImportedReadings ?? 0) > 0 &&
+          nextState.lastRunFinishedAt !== previousState.lastRunFinishedAt;
 
         if (
           options?.refreshHealth &&
-          nextState.lastResult === 'success' &&
-          (nextState.lastSuccessAt !== previousState.lastSuccessAt ||
-            nextState.lastRunFinishedAt !== previousState.lastRunFinishedAt)
+          runFinishedChanged &&
+          (nextState.lastResult === 'success' || importedRowsDuringRun)
         ) {
           refreshHealthData(['heart', 'dashboard', 'sleep', 'wellness', 'trends', 'derived']);
         }
@@ -463,6 +471,15 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
     },
     [readBackgroundStateFresh, refreshHealthData],
   );
+
+  const restartLiveUpdates = useCallback(async () => {
+    await service.startLiveUpdates(
+      (nextState) => {
+        setDeviceState(nextState);
+      },
+      appendLiveEventAndHandleSyncTrigger,
+    );
+  }, [appendLiveEventAndHandleSyncTrigger, service]);
 
   useEffect(() => {
     let cancelled = false;
@@ -489,7 +506,12 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextState) => {
+      const previousState = previousAppStateRef.current;
+      previousAppStateRef.current = nextState;
       setAppState(nextState);
+      if (previousState !== 'active' && nextState === 'active') {
+        setAppBecameActiveCount((count) => count + 1);
+      }
     });
 
     return () => {
@@ -503,7 +525,16 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
     }
 
     void refreshBackgroundState({ refreshHealth: true });
-  }, [appState, deviceState.id, refreshBackgroundState]);
+    if (
+      appBecameActiveCount > 0 &&
+      isReady &&
+      !batteryEventBackgroundSyncInFlightRef.current &&
+      progressStatusRef.current !== 'scanning' &&
+      !isBlockingSyncStatus(progressStatusRef.current)
+    ) {
+      void restartLiveUpdates().catch(() => {});
+    }
+  }, [appBecameActiveCount, appState, deviceState.id, isReady, refreshBackgroundState, restartLiveUpdates]);
 
   useEffect(() => {
     if (!isReady || !deviceState.id) {
@@ -540,15 +571,6 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
     };
   }, [appendLiveEventAndHandleSyncTrigger, deviceState.id, service]);
 
-  const restartLiveUpdates = useCallback(async () => {
-    await service.startLiveUpdates(
-      (nextState) => {
-        setDeviceState(nextState);
-      },
-      appendLiveEventAndHandleSyncTrigger,
-    );
-  }, [appendLiveEventAndHandleSyncTrigger, service]);
-
   const runBackgroundSync = useCallback(
     async (options?: WearableBackgroundSyncOptions) => {
       const showOverlay = options?.showOverlay ?? true;
@@ -578,7 +600,12 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
 
         setDeviceState(await service.getDeviceState());
         await refreshBackgroundState({
-          refreshHealth: result.status === 'completed' || result.status === 'paused',
+          refreshHealth:
+            result.status === 'completed' ||
+            result.status === 'paused' ||
+            result.status === 'failed' ||
+            result.importedReadings > 0 ||
+            result.processedDerivedRefresh,
         });
 
         if (

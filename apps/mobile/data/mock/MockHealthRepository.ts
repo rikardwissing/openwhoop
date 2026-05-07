@@ -197,6 +197,7 @@ const restingHrTrend = [53, 52, 51, 50, 50, 49, 49, 48, 48, 47, 48, 49, 48, 48];
 const hrvTrend = [71, 74, 69, 72, 77, 75, 78, 81, 76, 79, 74, 78, 84, 82];
 const stressTrend = [42, 39, 37, 34, 33, 32, 31, 31, 30, 29, 30, 29, 28, 29];
 const spo2Trend = [95, 96, 96, 97, 96, 97, 97, 96, 96, 97, 97, 96, 97, 97];
+const respiratoryRateTrend = [16.4, 16.1, 15.9, 16.2, 16.0, 15.8, 15.7, 15.9, 16.1, 15.8, 15.6, 15.7, 15.5, 15.6];
 const skinTemperatureTrend = [33.2, 33.1, 33.3, 33.4, 33.5, 33.6, 33.6, 33.4, 33.5, 33.6, 33.7, 33.7, 33.8, 33.8];
 const skinTemperatureDeviationTrend = [-0.2, -0.3, -0.2, -0.1, 0, 0.1, 0.1, -0.1, 0, 0.1, 0.2, 0.2, 0.3, 0.2];
 const recoveryTrendValues = [75, 77, 73, 71, 74, 72, 69, 70, 72, 68, 66, 65, 64, 64];
@@ -1232,6 +1233,33 @@ export class MockHealthRepository implements HealthRepository {
             detail: 'Overnight oxygen remained steady',
             accent: 'cyan',
             values: [95, 96, 96, 97, 96, 97, 97, 96, 96, 97, 97, 96, 97, 97],
+            labels: scoreLabels,
+          }).series,
+          range
+        ),
+      },
+      respiratoryRate: {
+        ...metricSeries({
+          title: 'Respiratory Rate',
+          latest: 15.6,
+          average: 15.9,
+          delta: -0.3,
+          unit: 'br/min',
+          detail: 'Breathing rate stayed inside your recent resting range',
+          accent: 'violet',
+          values: respiratoryRateTrend,
+          labels: scoreLabels,
+        }),
+        series: takeTail(
+          metricSeries({
+            title: 'Respiratory Rate',
+            latest: 15.6,
+            average: 15.9,
+            delta: -0.3,
+            unit: 'br/min',
+            detail: 'Breathing rate stayed inside your recent resting range',
+            accent: 'violet',
+            values: respiratoryRateTrend,
             labels: scoreLabels,
           }).series,
           range

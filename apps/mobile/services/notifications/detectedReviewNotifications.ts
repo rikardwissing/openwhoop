@@ -1,6 +1,7 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 import * as Notifications from 'expo-notifications';
 
+import { recordAppIntentEvent } from '@/services/appIntentEvents';
 import { formatClock, formatSqliteDateTime, minutesBetween, parseSqliteDateTime } from '@/utils/dateTime';
 
 const DETECTED_REVIEW_NOTIFICATION_CHANNEL_ID = 'detected-review';
@@ -17,6 +18,7 @@ interface ActivityReviewNotificationRow {
 interface SleepReviewNotificationRow {
   completion_status: string | null;
   end: string;
+  score: number | null;
   sleep_id: string;
   start: string;
 }
@@ -158,7 +160,7 @@ async function loadActivityReadyRows(db: SQLiteDatabase) {
 async function loadCompleteSleepRows(db: SQLiteDatabase) {
   return db.getAllAsync<SleepReviewNotificationRow>(
     `
-      SELECT sleep_id, start, end, completion_status
+      SELECT sleep_id, start, end, completion_status, score
       FROM sleep_cycles
       WHERE (source IS NULL OR source = 'detected')
         AND (review_state IS NULL OR review_state = 'none')
@@ -171,7 +173,7 @@ async function loadCompleteSleepRows(db: SQLiteDatabase) {
 async function loadInProgressSleepRows(db: SQLiteDatabase) {
   return db.getAllAsync<SleepReviewNotificationRow>(
     `
-      SELECT sleep_id, start, end, completion_status
+      SELECT sleep_id, start, end, completion_status, score
       FROM sleep_cycles
       WHERE (source IS NULL OR source = 'detected')
         AND (review_state IS NULL OR review_state = 'none')
@@ -227,45 +229,49 @@ export async function notifyForNewDetectedReviewItemsAsync(
   deviceId: string,
   previous: DetectedReviewNotificationSnapshot,
 ): Promise<DetectedReviewNotificationResult> {
-  if (!(await ensureDetectedReviewNotificationPermissionAsync())) {
-    return {
-      activityReadyCount: 0,
-      sleepReadyCount: 0,
-      sleepStartedCount: 0,
-    };
-  }
-
+  const notificationPermissionGranted = await ensureDetectedReviewNotificationPermissionAsync();
   const [activityRows, completeSleepRows, inProgressSleepRows] = await Promise.all([
     loadActivityReadyRows(db),
     loadCompleteSleepRows(db),
     loadInProgressSleepRows(db),
   ]);
-  const [newActivityRows, newCompleteSleepRows, newInProgressSleepRows] = await Promise.all([
-    reserveNewRows(
-      db,
-      deviceId,
-      DETECTED_ACTIVITY_READY_KIND,
-      activityRows,
-      previous.activityReadyEntities,
-      activityEntityId,
-    ),
-    reserveNewRows(
-      db,
-      deviceId,
-      DETECTED_SLEEP_READY_KIND,
-      completeSleepRows,
-      previous.sleepReadyEntities,
-      sleepReadyEntityId,
-    ),
-    reserveNewRows(
-      db,
-      deviceId,
-      DETECTED_SLEEP_STARTED_KIND,
-      inProgressSleepRows,
-      previous.sleepStartedEntities,
-      sleepStartedEntityId,
-    ),
-  ]);
+
+  const newCompleteSleepCandidateRows = completeSleepRows.filter((row) => !previous.sleepReadyEntities.has(sleepReadyEntityId(row)));
+  const newInProgressSleepCandidateRows = inProgressSleepRows.filter((row) => !previous.sleepStartedEntities.has(sleepStartedEntityId(row)));
+
+  await recordSleepAppIntentEvents(db, {
+    completeSleepRows: newCompleteSleepCandidateRows,
+    inProgressSleepRows: newInProgressSleepCandidateRows,
+  });
+
+  const [newActivityRows, newCompleteSleepRows, newInProgressSleepRows] = notificationPermissionGranted
+    ? await Promise.all([
+        reserveNewRows(
+          db,
+          deviceId,
+          DETECTED_ACTIVITY_READY_KIND,
+          activityRows,
+          previous.activityReadyEntities,
+          activityEntityId,
+        ),
+        reserveNewRows(
+          db,
+          deviceId,
+          DETECTED_SLEEP_READY_KIND,
+          completeSleepRows,
+          previous.sleepReadyEntities,
+          sleepReadyEntityId,
+        ),
+        reserveNewRows(
+          db,
+          deviceId,
+          DETECTED_SLEEP_STARTED_KIND,
+          inProgressSleepRows,
+          previous.sleepStartedEntities,
+          sleepStartedEntityId,
+        ),
+      ])
+    : [[], [], []] as const;
 
   if (newActivityRows.length > 0) {
     await scheduleDetectedReviewNotificationAsync({
@@ -292,5 +298,52 @@ export async function notifyForNewDetectedReviewItemsAsync(
     activityReadyCount: newActivityRows.length,
     sleepReadyCount: newCompleteSleepRows.length,
     sleepStartedCount: newInProgressSleepRows.length,
+  };
+}
+
+async function recordSleepAppIntentEvents(
+  db: SQLiteDatabase,
+  rows: {
+    completeSleepRows: readonly SleepReviewNotificationRow[];
+    inProgressSleepRows: readonly SleepReviewNotificationRow[];
+  },
+) {
+  for (const row of rows.inProgressSleepRows) {
+    await recordAppIntentEvent(db, {
+      kind: 'falling_asleep',
+      entityId: sleepStartedEntityId(row),
+      occurredAt: parseSqliteDateTime(row.start),
+      payload: sleepPayload(row),
+    });
+  }
+
+  for (const row of rows.completeSleepRows) {
+    const payload = sleepPayload(row);
+
+    await recordAppIntentEvent(db, {
+      kind: 'waking_up',
+      entityId: sleepReadyEntityId(row),
+      occurredAt: parseSqliteDateTime(row.end),
+      payload,
+    });
+
+    if (row.score !== null && row.score >= 100) {
+      await recordAppIntentEvent(db, {
+        kind: 'sleep_score_100',
+        entityId: sleepReadyEntityId(row),
+        occurredAt: parseSqliteDateTime(row.end),
+        payload,
+      });
+    }
+  }
+}
+
+function sleepPayload(row: SleepReviewNotificationRow) {
+  return {
+    completionStatus: row.completion_status ?? 'complete',
+    end: row.end,
+    score: row.score,
+    sleepId: row.sleep_id,
+    start: row.start,
   };
 }

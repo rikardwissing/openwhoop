@@ -15,7 +15,12 @@
     "ios": {
       "bundleIdentifier": "com.rikardwissing.btwearable",
       "infoPlist": {
-        "NSBluetoothAlwaysUsageDescription": "Unstrap uses Bluetooth to connect to your wearable and sync your data directly to this iPhone."
+        "NSBluetoothAlwaysUsageDescription": "Unstrap uses Bluetooth to connect to your wearable and sync your data directly to this iPhone.",
+        "NSHealthShareUsageDescription": "Unstrap checks Apple Health authorization so it can write local wearable metrics after you grant access.",
+        "NSHealthUpdateUsageDescription": "Unstrap writes sleep, heart rate, SDNN HRV, oxygen saturation, and respiratory rate samples from your wearable to Apple Health after you grant access."
+      },
+      "entitlements": {
+        "com.apple.developer.healthkit": true
       },
       "supportsTablet": false,
       "appleTeamId": "3XYXJPF4QV"
@@ -50,7 +55,16 @@
           "bluetoothAlwaysPermission": "Unstrap uses Bluetooth to connect to your wearable and sync your data directly to this iPhone."
         }
       ],
+      [
+        "@kingstinct/react-native-healthkit",
+        {
+          "NSHealthShareUsageDescription": "Unstrap checks Apple Health authorization so it can write local wearable metrics after you grant access.",
+          "NSHealthUpdateUsageDescription": "Unstrap writes sleep, heart rate, SDNN HRV, oxygen saturation, and respiratory rate samples from your wearable to Apple Health after you grant access.",
+          "background": false
+        }
+      ],
       "expo-sharing",
+      "./plugins/with-app-intents",
       "./plugins/with-local-notifications-only",
       "./plugins/with-force-close-reminder",
       "expo-background-task"

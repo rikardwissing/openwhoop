@@ -155,9 +155,17 @@ function formatSelectionValue(metric: MetricSeries, value: number | null, digits
   return metric.unit ? formatMetricNumber(value, metric.unit, digits) : formatMetricValue(value, digits);
 }
 
+function digitsForMetric(metric: MetricSeries) {
+  if (metric.unit === '°C' || metric.title === 'Respiratory Rate') {
+    return 1;
+  }
+
+  return 0;
+}
+
 function WellnessMetricCard({ metric }: { metric: MetricSeries }) {
   const accentColor = accentColorFor(metric);
-  const digits = metric.unit === '°C' ? 1 : 0;
+  const digits = digitsForMetric(metric);
 
   return (
     <GlassCard accentColor={accentColor} style={styles.metricCard}>
@@ -383,11 +391,12 @@ export function WellnessScreen() {
         <ErrorState message={derivedRefresh.data.lastError} variant="inline" />
       ) : null}
       <View>
-        <Text style={styles.subtitle}>Stress, oxygen, temperature, recovery, and recent activity trends.</Text>
+        <Text style={styles.subtitle}>Stress, oxygen, respiratory rate, temperature, recovery, and recent activity trends.</Text>
       </View>
 
       <WellnessMetricCard metric={data.stress} />
       <WellnessMetricCard metric={data.spo2} />
+      <WellnessMetricCard metric={data.respiratoryRate} />
       <WellnessMetricCard metric={data.skinTemperature} />
       <WellnessMetricCard metric={data.recoveryIndex} />
 

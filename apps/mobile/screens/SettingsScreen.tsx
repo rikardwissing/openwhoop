@@ -8,6 +8,7 @@ import {
   type PerformanceDiagnosticRun,
   type PerformanceDiagnosticStep,
 } from '@/services/performanceDiagnostics';
+import { writeLocalMetricsToAppleHealth } from '@/services/appleHealthExport';
 import { ScreenShell } from '@/components/layout/ScreenShell';
 import { SectionHeader } from '@/components/layout/SectionHeader';
 import { GlassCard } from '@/components/ui/GlassCard';
@@ -279,6 +280,13 @@ export function SettingsScreen() {
     status: 'idle',
     message: 'Create a portable local data snapshot and share it straight from the phone.',
   });
+  const [appleHealthExportState, setAppleHealthExportState] = useState<{
+    status: 'idle' | 'running' | 'success' | 'error' | 'unavailable' | 'permission_denied';
+    message: string;
+  }>({
+    status: 'idle',
+    message: 'Grant Apple Health write access and export queued local metrics. Future syncs keep Health updated automatically.',
+  });
   const [performanceSweepState, setPerformanceSweepState] = useState<{
     status: 'idle' | 'running' | 'success' | 'error';
     message: string;
@@ -368,6 +376,16 @@ export function SettingsScreen() {
     backgroundDeviceSyncBusy;
   const latestSyncImportSummary = backgroundSyncState.lastSyncImportSummary;
   const latestPerformanceRun = performanceRuns[0] ?? null;
+  const appleHealthExportDisabled =
+    !db ||
+    progress.status === 'scanning' ||
+    deviceBusy ||
+    maintenanceBusy ||
+    activityRescanBusy ||
+    exportState.status === 'running' ||
+    performanceSweepState.status === 'running' ||
+    clearDataState.status === 'running' ||
+    appleHealthExportState.status === 'running';
 
   async function refreshBackgroundDeviceSyncRegistrationState() {
     setBackgroundDeviceSyncRegistrationState({
@@ -535,6 +553,34 @@ export function SettingsScreen() {
       setExportState({
         status: 'error',
         message: error instanceof Error ? error.message : 'Unable to export the local database.',
+      });
+    }
+  }
+
+  async function handleExportAppleHealth() {
+    if (!db) {
+      setAppleHealthExportState({
+        status: 'error',
+        message: 'Apple Health export needs the local SQLite provider in this build.',
+      });
+      return;
+    }
+
+    setAppleHealthExportState({
+      status: 'running',
+      message: 'Requesting Apple Health access and writing local metrics...',
+    });
+
+    try {
+      const result = await writeLocalMetricsToAppleHealth(db);
+      setAppleHealthExportState({
+        status: result.status === 'success' ? 'success' : result.status,
+        message: result.message,
+      });
+    } catch (error) {
+      setAppleHealthExportState({
+        status: 'error',
+        message: error instanceof Error ? error.message : 'Unable to write local metrics to Apple Health.',
       });
     }
   }
@@ -832,6 +878,51 @@ export function SettingsScreen() {
       <GlassCard accentColor={colors.aqua}>
         <SectionHeader title="Local Sync Status" trailing={progress.status} />
         <Text style={styles.roadmapText}>{progress.message}</Text>
+      </GlassCard>
+
+      <GlassCard accentColor={colors.cyan}>
+        <SectionHeader
+          title="Apple Health"
+          trailing={
+            appleHealthExportState.status === 'success'
+              ? 'Synced'
+              : appleHealthExportState.status === 'running'
+                ? 'Writing'
+                : 'Optional'
+          }
+        />
+        <View style={styles.settingColumn}>
+          <View>
+            <Text style={styles.settingTitle}>Write local metrics</Text>
+            <Text style={styles.settingSubtitle}>
+              After permission is granted, foreground and background syncs export supported local wearable metrics without reading Apple Health data back into Unstrap.
+            </Text>
+          </View>
+
+          <View style={styles.buttonRow}>
+            <ActionButton
+              label={appleHealthExportState.status === 'running' ? 'Writing Health...' : 'Write to Apple Health'}
+              onPress={() => {
+                void handleExportAppleHealth();
+              }}
+              disabled={appleHealthExportDisabled}
+              tone="secondary"
+            />
+          </View>
+
+          <Text
+            style={[
+              styles.roadmapText,
+              appleHealthExportState.status === 'error' ||
+              appleHealthExportState.status === 'unavailable' ||
+              appleHealthExportState.status === 'permission_denied'
+                ? styles.errorText
+                : null,
+              appleHealthExportState.status === 'success' ? styles.successText : null,
+            ]}>
+            {db ? appleHealthExportState.message : 'Apple Health export is only available when local SQLite data is active.'}
+          </Text>
+        </View>
       </GlassCard>
 
       <GlassCard accentColor={colors.violet}>
