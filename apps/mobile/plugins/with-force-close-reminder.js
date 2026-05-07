@@ -22,7 +22,7 @@ private let keepAliveReminderRequests: [(identifier: String, delaySeconds: TimeI
     body: "If you fully close Unstrap, iPhone is less likely to keep your wearable insights syncing in the background."
   ),
   (
-    identifier: "btwearable-keep-open-reminder-1h",
+    identifier: "btwearable-keep-open-reminder-10m",
     delaySeconds: 10 * 60,
     title: "Unstrap is still closed",
     body: "Unstrap has been closed for 10 minutes. Reopen it to help keep your wearable insights syncing."

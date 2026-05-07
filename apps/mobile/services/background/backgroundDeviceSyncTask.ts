@@ -18,7 +18,10 @@ import {
   notifyForNewDetectedReviewItemsAsync,
   type DetectedReviewNotificationResult,
 } from '@/services/notifications/detectedReviewNotifications';
-import { scheduleMissingDeviceDataReminderNotificationsAsync } from '@/services/notifications/missingDeviceDataReminders';
+import {
+  cancelMissingDeviceDataReminderNotificationsAsync,
+  syncMissingDeviceDataReminderNotificationsAsync,
+} from '@/services/notifications/missingDeviceDataReminders';
 
 export const BACKGROUND_DEVICE_SYNC_TASK_NAME = 'unstrap-background-device-sync-task';
 export const BACKGROUND_DEVICE_SYNC_INTERVAL_MINUTES = 15;
@@ -177,6 +180,8 @@ async function executeBackgroundDeviceSyncAsync(options: {
 
     const deviceState = await service.getDeviceState();
     if (!deviceState.id) {
+      await cancelMissingDeviceDataReminderNotificationsAsync().catch(() => {});
+
       return {
         appleHealthExport: null,
         detectionNotifications: EMPTY_DETECTION_NOTIFICATION_RESULT,
@@ -259,9 +264,9 @@ async function executeBackgroundDeviceSyncAsync(options: {
     });
 
     if (status === 'completed' || status === 'paused') {
-      await scheduleMissingDeviceDataReminderNotificationsAsync({
+      await syncMissingDeviceDataReminderNotificationsAsync(db, {
+        dismissDelivered: outcome.importedReadings > 0,
         deviceName,
-        syncedAt: new Date(),
       }).catch(() => null);
     }
 

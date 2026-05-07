@@ -28,6 +28,10 @@ import {
 import { getBackgroundSyncState } from '@/services/background/backgroundSyncState';
 import { WearableSyncService } from '@/services/ble/WearableSyncService';
 import {
+  cancelMissingDeviceDataReminderNotificationsAsync,
+  syncMissingDeviceDataReminderNotificationsAsync,
+} from '@/services/notifications/missingDeviceDataReminders';
+import {
   isBlockingSyncStatus,
   type BackgroundSyncState,
   type DeviceState,
@@ -547,6 +551,24 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
   }, [deviceState.id, isReady]);
 
   useEffect(() => {
+    if (!isReady || deviceState.id) {
+      return;
+    }
+
+    void cancelMissingDeviceDataReminderNotificationsAsync().catch(() => {});
+  }, [deviceState.id, isReady]);
+
+  useEffect(() => {
+    if (!isReady || !deviceState.id) {
+      return;
+    }
+
+    void syncMissingDeviceDataReminderNotificationsAsync(db, {
+      deviceName: deviceState.name ?? 'wearable',
+    }).catch(() => {});
+  }, [db, deviceState.id, deviceState.name, isReady]);
+
+  useEffect(() => {
     let cancelled = false;
 
     if (!deviceState.id) {
@@ -717,6 +739,7 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
   const pairDevice = useCallback(
     async (device: WearableScanResult) => {
       await service.selectDevice(device);
+      await cancelMissingDeviceDataReminderNotificationsAsync().catch(() => {});
       resetLiveEvents();
       setScanResults([]);
       setProgress({
@@ -732,6 +755,7 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
   const selectDevice = useCallback(
     async (device: WearableScanResult) => {
       await service.selectDevice(device);
+      await cancelMissingDeviceDataReminderNotificationsAsync().catch(() => {});
       resetLiveEvents();
       setDeviceState(await service.getDeviceState());
       await refreshBackgroundState();
@@ -745,6 +769,7 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
 
   const forgetDevice = useCallback(async () => {
     await service.forgetDevice();
+    await cancelMissingDeviceDataReminderNotificationsAsync().catch(() => {});
     resetLiveEvents();
     setDeviceState(emptyDeviceState);
     await refreshBackgroundState();
