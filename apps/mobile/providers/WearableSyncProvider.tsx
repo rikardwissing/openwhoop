@@ -31,6 +31,7 @@ import {
   cancelMissingDeviceDataReminderNotificationsAsync,
   syncMissingDeviceDataReminderNotificationsAsync,
 } from '@/services/notifications/missingDeviceDataReminders';
+import { updateTonightWidgetPowerState } from '@/services/widgets/tonightWidget';
 import {
   isBlockingSyncStatus,
   type BackgroundSyncState,
@@ -306,10 +307,15 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
   const progressStatusRef = useRef(progress.status);
   const runBackgroundSyncRef = useRef<WearableSyncContextValue['runBackgroundSync'] | null>(null);
   const [appBecameActiveCount, setAppBecameActiveCount] = useState(0);
+  const latestDeviceStateRef = useRef<DeviceState>(emptyDeviceState);
 
   useEffect(() => {
     backgroundSyncStateRef.current = backgroundSyncState;
   }, [backgroundSyncState]);
+
+  useEffect(() => {
+    latestDeviceStateRef.current = deviceState;
+  }, [deviceState]);
 
   progressStatusRef.current = progress.status;
 
@@ -479,7 +485,20 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
   const restartLiveUpdates = useCallback(async () => {
     await service.startLiveUpdates(
       (nextState) => {
+        const previousState = latestDeviceStateRef.current;
         setDeviceState(nextState);
+        latestDeviceStateRef.current = nextState;
+
+        if (
+          nextState.id &&
+          (nextState.batteryPercent !== previousState.batteryPercent ||
+            nextState.chargingStatus !== previousState.chargingStatus)
+        ) {
+          void updateTonightWidgetPowerState({
+            batteryPercent: nextState.batteryPercent,
+            chargingStatus: nextState.chargingStatus,
+          });
+        }
       },
       appendLiveEventAndHandleSyncTrigger,
     );
@@ -580,7 +599,20 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
       .startLiveUpdates(
         (nextState) => {
           if (!cancelled) {
+            const previousState = latestDeviceStateRef.current;
             setDeviceState(nextState);
+            latestDeviceStateRef.current = nextState;
+
+            if (
+              nextState.id &&
+              (nextState.batteryPercent !== previousState.batteryPercent ||
+                nextState.chargingStatus !== previousState.chargingStatus)
+            ) {
+              void updateTonightWidgetPowerState({
+                batteryPercent: nextState.batteryPercent,
+                chargingStatus: nextState.chargingStatus,
+              });
+            }
           }
         },
         appendLiveEventAndHandleSyncTrigger,

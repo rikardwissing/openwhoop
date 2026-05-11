@@ -1,3 +1,4 @@
+import { requireNativeModule } from 'expo';
 import { Platform } from 'react-native';
 import type { SQLiteDatabase } from 'expo-sqlite';
 
@@ -10,10 +11,31 @@ import TonightWidget from '@/widgets/TonightWidget';
 import type { TonightWidgetProps } from '@/widgets/TonightWidget';
 
 const TIMELINE_WINDOW_MS = 30 * 60 * 60 * 1000;
-type TonightWidgetSnapshot = Pick<SleepHistoryData, 'sleepPlan' | 'headlineLabel' | 'headlineScore'>;
+type TonightWidgetSnapshot = Pick<SleepHistoryData, 'sleepPlan' | 'headlineLabel' | 'headlineScore'> & {
+  batteryPercent?: number | null;
+  chargingStatus?: 'charging' | 'not_charging' | null;
+};
+type ExpoWidgetsModule = {
+  reloadAllWidgets(): void;
+};
+
+let expoWidgetsModule: ExpoWidgetsModule | null = null;
+let lastKnownBatteryPercent: number | null = null;
+let lastSnapshot: TonightWidgetSnapshot | null = null;
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
+}
+
+function reloadAllWidgetSnapshots() {
+  if (Platform.OS !== 'ios') {
+    return;
+  }
+
+  try {
+    expoWidgetsModule ??= requireNativeModule<ExpoWidgetsModule>('ExpoWidgets');
+    expoWidgetsModule.reloadAllWidgets();
+  } catch {}
 }
 
 function formatCountdown(from: Date, to: Date) {
@@ -80,30 +102,56 @@ function buildSleepDebtLabel(plan: SleepPlan) {
 
 function buildSnapshotFromPlan(
   plan: SleepPlan,
-  options: { headlineLabel?: string; headlineScore?: number | null } = {},
+  options: {
+    batteryPercent?: number | null;
+    chargingStatus?: 'charging' | 'not_charging' | null;
+    headlineLabel?: string;
+    headlineScore?: number | null;
+  } = {},
 ): TonightWidgetSnapshot {
   const headlineScore = options.headlineScore ?? null;
 
   return {
+    batteryPercent: options.batteryPercent,
+    chargingStatus: options.chargingStatus,
     sleepPlan: plan,
     headlineLabel: options.headlineLabel ?? describeSleepScore(headlineScore),
     headlineScore,
   };
 }
 
+function formatBatteryLabel(batteryPercent: number | null | undefined) {
+  if (batteryPercent === null || batteryPercent === undefined) {
+    return '--%';
+  }
+
+  return `${Math.max(0, Math.min(100, Math.round(batteryPercent)))}%`;
+}
+
 export function buildTonightWidgetProps(snapshot: TonightWidgetSnapshot, now = new Date()): TonightWidgetProps {
   const plan = snapshot.sleepPlan;
+  const resolvedBatteryPercent = snapshot.batteryPercent ?? lastKnownBatteryPercent;
+
+  if (snapshot.batteryPercent !== undefined) {
+    lastKnownBatteryPercent = snapshot.batteryPercent;
+  }
+
   const { bedtimeDate, wakeDate } = resolveSleepWindow(plan, now);
   const sleepWindowMs = Math.max(1, wakeDate.getTime() - bedtimeDate.getTime());
   const isInsideSleepWindow = now.getTime() >= bedtimeDate.getTime() && now.getTime() < wakeDate.getTime();
+  const projectedFullSleepDate = new Date(now.getTime() + plan.sleepNeedMinutes * 60_000);
 
   return {
     alarmStatusLabel: buildAlarmLabel(plan, wakeDate),
     bedtimeLabel: formatClock(bedtimeDate),
+    bedtimePassed: isInsideSleepWindow,
     phaseLabel: buildPhaseLabel(plan, now, bedtimeDate, wakeDate),
     progress: isInsideSleepWindow
       ? clamp((now.getTime() - bedtimeDate.getTime()) / sleepWindowMs, 0, 1)
       : 0,
+    batteryCharging: snapshot.chargingStatus === 'charging',
+    batteryLabel: formatBatteryLabel(resolvedBatteryPercent),
+    projectedSleepLabel: formatClock(projectedFullSleepDate),
     score: snapshot.headlineScore,
     scoreLabel: snapshot.headlineLabel,
     sleepDebtLabel: buildSleepDebtLabel(plan),
@@ -150,6 +198,8 @@ export async function registerTonightWidgetLayout() {
   try {
     TonightWidget.reload();
   } catch {}
+
+  reloadAllWidgetSnapshots();
 }
 
 export async function updateTonightWidgetFromSleepHistory(snapshot: TonightWidgetSnapshot) {
@@ -157,20 +207,76 @@ export async function updateTonightWidgetFromSleepHistory(snapshot: TonightWidge
     return;
   }
 
+  lastSnapshot = {
+    ...snapshot,
+    batteryPercent: snapshot.batteryPercent ?? lastSnapshot?.batteryPercent,
+    chargingStatus: snapshot.chargingStatus ?? lastSnapshot?.chargingStatus,
+  };
+
   try {
-    TonightWidget.updateTimeline(buildTonightWidgetTimeline(snapshot));
+    TonightWidget.updateTimeline(buildTonightWidgetTimeline(lastSnapshot));
   } catch {}
+}
+
+export async function updateTonightWidgetPowerState(powerState: {
+  batteryPercent?: number | null;
+  chargingStatus?: 'charging' | 'not_charging' | null;
+}) {
+  if (Platform.OS !== 'ios') {
+    return;
+  }
+
+  if (powerState.batteryPercent !== undefined) {
+    lastKnownBatteryPercent = powerState.batteryPercent;
+  }
+
+  if (!lastSnapshot) {
+    return;
+  }
+
+  await updateTonightWidgetFromSleepHistory({
+    ...lastSnapshot,
+    batteryPercent: powerState.batteryPercent ?? lastSnapshot.batteryPercent,
+    chargingStatus: powerState.chargingStatus ?? lastSnapshot.chargingStatus,
+  });
 }
 
 export async function updateTonightWidgetFromSleepPlan(
   plan: SleepPlan,
-  options: { headlineLabel?: string; headlineScore?: number | null } = {},
+  options: {
+    batteryPercent?: number | null;
+    chargingStatus?: 'charging' | 'not_charging' | null;
+    headlineLabel?: string;
+    headlineScore?: number | null;
+  } = {},
 ) {
   await updateTonightWidgetFromSleepHistory(buildSnapshotFromPlan(plan, options));
+}
+
+async function loadLatestPowerState(db: SQLiteDatabase) {
+  const rows = await db.getAllAsync<{
+    battery_percent: number | null;
+    charging_status: 'charging' | 'not_charging' | null;
+  }>(
+    'SELECT battery_percent, charging_status FROM device_state ORDER BY last_seen_at DESC LIMIT 1',
+  );
+
+  return {
+    batteryPercent: rows[0]?.battery_percent ?? null,
+    chargingStatus: rows[0]?.charging_status ?? null,
+  };
 }
 
 export async function updateTonightWidgetFromDatabase(db: SQLiteDatabase) {
   const repository = new SQLiteHealthRepository(db);
   const sleep = await repository.getSleepHistory('14d');
-  await updateTonightWidgetFromSleepHistory(sleep);
+  const powerState = await loadLatestPowerState(db).catch(() => ({
+    batteryPercent: null,
+    chargingStatus: null,
+  }));
+  await updateTonightWidgetFromSleepHistory({
+    ...sleep,
+    batteryPercent: powerState.batteryPercent,
+    chargingStatus: powerState.chargingStatus,
+  });
 }

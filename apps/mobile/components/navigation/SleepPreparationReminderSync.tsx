@@ -1,12 +1,14 @@
 import { useEffect } from 'react';
 
 import { useHealthDataVersion, useHealthRepository } from '@/providers/HealthDataProvider';
+import { useWearableSyncState } from '@/providers/WearableSyncProvider';
 import { syncSleepPreparationReminder } from '@/services/notifications/sleepPreparationReminder';
 import { updateTonightWidgetFromSleepHistory } from '@/services/widgets/tonightWidget';
 
 export function SleepPreparationReminderSync() {
   const repository = useHealthRepository();
   const version = useHealthDataVersion('sleep');
+  const { deviceState } = useWearableSyncState();
 
   useEffect(() => {
     let cancelled = false;
@@ -22,7 +24,11 @@ export function SleepPreparationReminderSync() {
           syncSleepPreparationReminder(snapshot.sleepPlan, {
             requestPermission: false,
           }),
-          updateTonightWidgetFromSleepHistory(snapshot),
+          updateTonightWidgetFromSleepHistory({
+            ...snapshot,
+            batteryPercent: deviceState.batteryPercent,
+            chargingStatus: deviceState.chargingStatus,
+          }),
         ]);
       })
       .catch(() => {});
@@ -30,7 +36,7 @@ export function SleepPreparationReminderSync() {
     return () => {
       cancelled = true;
     };
-  }, [repository, version]);
+  }, [deviceState.batteryPercent, deviceState.chargingStatus, repository, version]);
 
   return null;
 }

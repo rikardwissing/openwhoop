@@ -73,7 +73,7 @@
         {
           "widgets": [
             {
-              "name": "TonightWidget",
+              "name": "SleepWidgetV2",
               "displayName": "Sleep",
               "description": "Shows your latest sleep score and tonight's bedtime and wake target.",
               "supportedFamilies": [

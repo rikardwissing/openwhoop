@@ -515,6 +515,8 @@ export function SleepScreen() {
   return (
     <ScreenShell headerIcon="sleep" headerTitle="Sleep">
       <TonightWidgetPlanSync
+        batteryPercent={deviceState.batteryPercent}
+        chargingStatus={deviceState.chargingStatus}
         headlineLabel={data.headlineLabel}
         headlineScore={data.headlineScore}
         sleepPlan={sleepPlan}
