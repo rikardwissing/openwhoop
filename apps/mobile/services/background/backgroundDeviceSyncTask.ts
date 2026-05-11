@@ -22,6 +22,7 @@ import {
   cancelMissingDeviceDataReminderNotificationsAsync,
   syncMissingDeviceDataReminderNotificationsAsync,
 } from '@/services/notifications/missingDeviceDataReminders';
+import { updateTonightWidgetFromDatabase } from '@/services/widgets/tonightWidget';
 
 export const BACKGROUND_DEVICE_SYNC_TASK_NAME = 'unstrap-background-device-sync-task';
 export const BACKGROUND_DEVICE_SYNC_INTERVAL_MINUTES = 15;
@@ -268,6 +269,7 @@ async function executeBackgroundDeviceSyncAsync(options: {
         dismissDelivered: outcome.importedReadings > 0,
         deviceName,
       }).catch(() => null);
+      await updateTonightWidgetFromDatabase(db).catch(() => null);
     }
 
     return {

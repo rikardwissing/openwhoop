@@ -12,6 +12,7 @@ import { GlowRing } from '@/components/ui/GlowRing';
 import { MetricCard } from '@/components/ui/MetricCard';
 import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
 import { SleepStageBreakdownChip } from '@/components/ui/SleepStageBreakdownChip';
+import { TonightWidgetPlanSync } from '@/components/widgets/TonightWidgetPlanSync';
 import { colors, sleepStageColors, typography } from '@/constants/theme';
 import { useDerivedRefreshState, useSleepHistory } from '@/hooks/useHealthData';
 import { useHealthRepository, useRefreshHealthData } from '@/providers/HealthDataProvider';
@@ -513,6 +514,11 @@ export function SleepScreen() {
 
   return (
     <ScreenShell headerIcon="sleep" headerTitle="Sleep">
+      <TonightWidgetPlanSync
+        headlineLabel={data.headlineLabel}
+        headlineScore={data.headlineScore}
+        sleepPlan={sleepPlan}
+      />
       {state.status === 'error' ? (
         <ErrorState message="Showing the last sleep snapshot while refresh catches up." variant="inline" />
       ) : null}

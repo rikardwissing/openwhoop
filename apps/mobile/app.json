@@ -2,7 +2,7 @@
   "expo": {
     "name": "Unstrap",
     "slug": "btwearable",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "orientation": "portrait",
     "icon": "./assets/images/app-icon.png",
     "scheme": "btwearable",
@@ -67,7 +67,26 @@
       "./plugins/with-app-intents",
       "./plugins/with-local-notifications-only",
       "./plugins/with-force-close-reminder",
-      "expo-background-task"
+      "expo-background-task",
+      [
+        "expo-widgets",
+        {
+          "widgets": [
+            {
+              "name": "TonightWidget",
+              "displayName": "Sleep",
+              "description": "Shows your latest sleep score and tonight's bedtime and wake target.",
+              "supportedFamilies": [
+                "systemSmall",
+                "systemMedium",
+                "accessoryCircular",
+                "accessoryRectangular",
+                "accessoryInline"
+              ]
+            }
+          ]
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true

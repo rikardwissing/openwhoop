@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 
 import { useHealthDataVersion, useHealthRepository } from '@/providers/HealthDataProvider';
 import { syncSleepPreparationReminder } from '@/services/notifications/sleepPreparationReminder';
+import { updateTonightWidgetFromSleepHistory } from '@/services/widgets/tonightWidget';
 
 export function SleepPreparationReminderSync() {
   const repository = useHealthRepository();
@@ -17,9 +18,12 @@ export function SleepPreparationReminderSync() {
           return;
         }
 
-        return syncSleepPreparationReminder(snapshot.sleepPlan, {
-          requestPermission: false,
-        });
+        return Promise.all([
+          syncSleepPreparationReminder(snapshot.sleepPlan, {
+            requestPermission: false,
+          }),
+          updateTonightWidgetFromSleepHistory(snapshot),
+        ]);
       })
       .catch(() => {});
 
