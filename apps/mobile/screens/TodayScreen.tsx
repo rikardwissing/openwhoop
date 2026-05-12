@@ -33,6 +33,7 @@ import {
 import { buildHeartCardDataFromWindow } from '@/utils/heartTimeline';
 import { logMobilePerf, logMobilePerfError } from '@/utils/mobilePerf';
 import { getRecoveryMetricTone, getSleepMetricTone, getStrainMetricTone } from '@/utils/metricTone';
+import { buildSleepWindDownStatus } from '@/utils/sleepPlan';
 
 const HEART_PREFETCH_RANGE = '7d';
 const HEART_ACTIVITY_REFRESH_SCOPES = ['dashboard', 'sleep', 'heart', 'wellness', 'trends'] as const;
@@ -272,6 +273,11 @@ export function TodayScreen() {
     : deviceState.id
       ? 'Pull to sync wearable data'
       : 'Pull to refresh today';
+  const windDownStatus = data.day.isToday ? buildSleepWindDownStatus(data.tonightPlan) : null;
+  const useWindDownGreeting =
+    windDownStatus?.phase === 'wind_down' || windDownStatus?.phase === 'bedtime';
+  const useWindDownDetail =
+    windDownStatus?.phase === 'preview' || windDownStatus?.phase === 'wind_down' || windDownStatus?.phase === 'bedtime';
 
   return (
     <ScreenShell
@@ -290,8 +296,8 @@ export function TodayScreen() {
       ) : null}
 
       <View>
-        <Text style={styles.greeting}>{data.greeting}</Text>
-        <Text style={styles.date}>{data.dateLabel}</Text>
+        <Text style={styles.greeting}>{useWindDownGreeting ? windDownStatus?.greeting ?? data.greeting : data.greeting}</Text>
+        <Text style={styles.date}>{useWindDownDetail ? windDownStatus?.detail : data.dateLabel}</Text>
       </View>
 
       <View style={styles.heroRow}>

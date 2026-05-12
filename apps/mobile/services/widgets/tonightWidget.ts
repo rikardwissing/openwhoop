@@ -4,9 +4,9 @@ import type { SQLiteDatabase } from 'expo-sqlite';
 
 import { SQLiteHealthRepository } from '@/data/sqlite/SQLiteHealthRepository';
 import type { SleepHistoryData, SleepPlan } from '@/types/health';
-import { formatClock, parseSqliteDateTime } from '@/utils/dateTime';
+import { formatClock } from '@/utils/dateTime';
 import { describeSleepScore, formatShortDuration } from '@/utils/formatters';
-import { nextUpcomingClockDate } from '@/utils/sleepPlan';
+import { buildSleepPlanGreeting, buildSleepWindDownStatus, resolveSleepPlanWindow } from '@/utils/sleepPlan';
 import TonightWidget from '@/widgets/TonightWidget';
 import type { TonightWidgetProps } from '@/widgets/TonightWidget';
 
@@ -39,46 +39,6 @@ function reloadAllWidgetSnapshots() {
     expoWidgetsModule ??= requireNativeModule<ExpoWidgetsModule>('ExpoWidgets');
     expoWidgetsModule.reloadAllWidgets();
   } catch {}
-}
-
-function formatCountdown(from: Date, to: Date) {
-  const minutes = Math.max(0, Math.ceil((to.getTime() - from.getTime()) / 60_000));
-
-  if (minutes <= 1) {
-    return 'now';
-  }
-
-  return formatShortDuration(minutes);
-}
-
-function parseFutureDate(value: string | null, now: Date) {
-  if (!value) {
-    return null;
-  }
-
-  const date = parseSqliteDateTime(value);
-  return Number.isFinite(date.getTime()) && date.getTime() > now.getTime() ? date : null;
-}
-
-function resolveWakeDate(plan: SleepPlan, now: Date) {
-  return parseFutureDate(plan.nextAlarmAt, now) ?? nextUpcomingClockDate(plan.targetWakeMinutes, now);
-}
-
-function resolveSleepWindow(plan: SleepPlan, now: Date) {
-  const wakeDate = resolveWakeDate(plan, now);
-  const bedtimeDate = new Date(wakeDate.getTime() - plan.sleepNeedMinutes * 60_000);
-
-  return { bedtimeDate, wakeDate };
-}
-
-function buildPhaseLabel(plan: SleepPlan, now: Date, bedtimeDate: Date, wakeDate: Date) {
-  if (now.getTime() >= bedtimeDate.getTime() && now.getTime() < wakeDate.getTime()) {
-    return `Wake in ${formatCountdown(now, wakeDate)}`;
-  }
-
-  const minutesUntilBedtime = Math.ceil((bedtimeDate.getTime() - now.getTime()) / 60_000);
-  const prefix = minutesUntilBedtime <= 90 ? 'Wind down in' : 'Bed in';
-  return `${prefix} ${formatCountdown(now, bedtimeDate)}`;
 }
 
 function buildAlarmLabel(plan: SleepPlan, wakeDate: Date) {
@@ -142,17 +102,18 @@ export function buildTonightWidgetProps(snapshot: TonightWidgetSnapshot, now = n
     lastKnownBatteryPercent = snapshot.batteryPercent;
   }
 
-  const { bedtimeDate, wakeDate } = resolveSleepWindow(plan, now);
+  const { bedtimeDate, wakeDate } = resolveSleepPlanWindow(plan, now);
+  const windDownStatus = buildSleepWindDownStatus(plan, now);
   const sleepWindowMs = Math.max(1, wakeDate.getTime() - bedtimeDate.getTime());
-  const isInsideSleepWindow = now.getTime() >= bedtimeDate.getTime() && now.getTime() < wakeDate.getTime();
-  const bedtimePassed = !sleepInProgress && isInsideSleepWindow;
+  const bedtimePassed = !sleepInProgress && windDownStatus.isBedtimeStarted;
   const projectedFullSleepDate = new Date(now.getTime() + plan.sleepNeedMinutes * 60_000);
 
   return {
     alarmStatusLabel: buildAlarmLabel(plan, wakeDate),
     bedtimeLabel: sleepInProgress ? 'Now' : formatClock(bedtimeDate),
     bedtimePassed,
-    phaseLabel: sleepInProgress ? 'Sleep in progress' : buildPhaseLabel(plan, now, bedtimeDate, wakeDate),
+    greetingLabel: sleepInProgress ? 'Sleep in progress' : buildSleepPlanGreeting(plan, now),
+    phaseLabel: sleepInProgress ? 'Sleep in progress' : windDownStatus.phaseLabel,
     progress: bedtimePassed
       ? clamp((now.getTime() - bedtimeDate.getTime()) / sleepWindowMs, 0, 1)
       : 0,
@@ -169,9 +130,11 @@ export function buildTonightWidgetProps(snapshot: TonightWidgetSnapshot, now = n
 }
 
 function buildTimelineDates(plan: SleepPlan, now: Date) {
-  const { bedtimeDate, wakeDate } = resolveSleepWindow(plan, now);
+  const { bedtimeDate, previewStartDate, prepStartDate, wakeDate } = resolveSleepPlanWindow(plan, now);
   const candidates = [
     now,
+    previewStartDate,
+    prepStartDate,
     bedtimeDate,
     wakeDate,
     new Date(wakeDate.getTime() + 60_000),

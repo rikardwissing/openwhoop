@@ -1,8 +1,11 @@
-import type { AlarmScheduleKind, AlarmWakeMode } from '@/types/health';
+import type { AlarmScheduleKind, AlarmWakeMode, SleepPlan } from '@/types/health';
+import { formatClock, parseSqliteDateTime } from '@/utils/dateTime';
 
 export const BASE_SLEEP_NEED_MINUTES = 8 * 60;
 export const MAX_SLEEP_DEBT_MINUTES = 150;
 export const SLEEP_TARGET_STEP_MINUTES = 15;
+export const WIND_DOWN_PREP_MINUTES = 60;
+export const WIND_DOWN_PREVIEW_MINUTES = 90;
 export const ALARM_WEEKDAY_FULL_MASK = 0b1111111;
 export const ALARM_IMMEDIATE_RING_DELAY_MS = 60_000;
 
@@ -22,6 +25,23 @@ export interface AlarmResolutionInput extends AlarmSettingsInput {
   alarmOneOffAt: Date | null;
   inProgressSleepStart: Date | null;
   sleepNeedMinutes: number;
+}
+
+export type SleepWindDownPhase = 'before_preview' | 'preview' | 'wind_down' | 'bedtime';
+
+export interface SleepWindDownStatus {
+  bedtimeDate: Date;
+  detail: string;
+  greeting: string;
+  inlineLabel: string;
+  isBedtimeStarted: boolean;
+  isWindDownActive: boolean;
+  minutesUntilBedtime: number;
+  minutesUntilPrepStart: number;
+  phase: SleepWindDownPhase;
+  phaseLabel: string;
+  prepStartDate: Date;
+  wakeDate: Date;
 }
 
 export function normalizeClockMinutes(minutes: number) {
@@ -64,6 +84,156 @@ export function nextUpcomingClockDate(clockMinutes: number, from = new Date()) {
   }
 
   return next;
+}
+
+export function buildTimeOfDayGreeting(now = new Date()) {
+  const hour = now.getHours();
+
+  if (hour < 12) {
+    return 'Good morning';
+  }
+
+  if (hour < 18) {
+    return 'Good afternoon';
+  }
+
+  return 'Good evening';
+}
+
+function parseFutureDate(value: string | null, now: Date) {
+  if (!value) {
+    return null;
+  }
+
+  const date = parseSqliteDateTime(value);
+  return Number.isFinite(date.getTime()) && date.getTime() > now.getTime() ? date : null;
+}
+
+function formatCountdownMinutes(minutes: number) {
+  const safeMinutes = Math.max(0, Math.ceil(minutes));
+
+  if (safeMinutes <= 1) {
+    return 'now';
+  }
+
+  const hours = Math.floor(safeMinutes / 60);
+  const remainingMinutes = safeMinutes % 60;
+
+  if (hours === 0) {
+    return `${remainingMinutes}m`;
+  }
+
+  if (remainingMinutes === 0) {
+    return `${hours}h`;
+  }
+
+  return `${hours}h ${remainingMinutes}m`;
+}
+
+export function resolveSleepPlanWakeDate(plan: SleepPlan, now = new Date()) {
+  return parseFutureDate(plan.nextAlarmAt, now) ?? nextUpcomingClockDate(plan.targetWakeMinutes, now);
+}
+
+export function resolveSleepPlanWindow(plan: SleepPlan, now = new Date()) {
+  const wakeDate = resolveSleepPlanWakeDate(plan, now);
+  const bedtimeDate = new Date(wakeDate.getTime() - plan.sleepNeedMinutes * 60_000);
+  const prepStartDate = new Date(bedtimeDate.getTime() - WIND_DOWN_PREP_MINUTES * 60_000);
+  const previewStartDate = new Date(bedtimeDate.getTime() - WIND_DOWN_PREVIEW_MINUTES * 60_000);
+
+  return {
+    bedtimeDate,
+    previewStartDate,
+    prepStartDate,
+    wakeDate,
+  };
+}
+
+export function buildSleepWindDownStatus(plan: SleepPlan, now = new Date()): SleepWindDownStatus {
+  const { bedtimeDate, previewStartDate, prepStartDate, wakeDate } = resolveSleepPlanWindow(plan, now);
+  const minutesUntilBedtime = Math.ceil((bedtimeDate.getTime() - now.getTime()) / 60_000);
+  const minutesUntilPrepStart = Math.ceil((prepStartDate.getTime() - now.getTime()) / 60_000);
+  const minutesUntilWake = Math.ceil((wakeDate.getTime() - now.getTime()) / 60_000);
+  const phase: SleepWindDownPhase =
+    now.getTime() >= bedtimeDate.getTime() && now.getTime() < wakeDate.getTime()
+      ? 'bedtime'
+      : now.getTime() >= prepStartDate.getTime() && now.getTime() < bedtimeDate.getTime()
+        ? 'wind_down'
+        : now.getTime() >= previewStartDate.getTime() && now.getTime() < prepStartDate.getTime()
+          ? 'preview'
+          : 'before_preview';
+
+  if (phase === 'bedtime') {
+    return {
+      bedtimeDate,
+      detail: `Aim to be asleep until ${formatClock(wakeDate)}.`,
+      greeting: 'Bedtime has started',
+      inlineLabel: 'Bedtime',
+      isBedtimeStarted: true,
+      isWindDownActive: true,
+      minutesUntilBedtime,
+      minutesUntilPrepStart,
+      phase,
+      phaseLabel: `Wake in ${formatCountdownMinutes(minutesUntilWake)}`,
+      prepStartDate,
+      wakeDate,
+    };
+  }
+
+  if (phase === 'wind_down') {
+    return {
+      bedtimeDate,
+      detail: `Bedtime in ${formatCountdownMinutes(minutesUntilBedtime)}.`,
+      greeting: 'Time to wind down',
+      inlineLabel: 'Wind down',
+      isBedtimeStarted: false,
+      isWindDownActive: true,
+      minutesUntilBedtime,
+      minutesUntilPrepStart,
+      phase,
+      phaseLabel: `Bedtime in ${formatCountdownMinutes(minutesUntilBedtime)}`,
+      prepStartDate,
+      wakeDate,
+    };
+  }
+
+  if (phase === 'preview') {
+    return {
+      bedtimeDate,
+      detail: `Wind-down starts at ${formatClock(prepStartDate)}.`,
+      greeting: 'Wind-down soon',
+      inlineLabel: 'Wind-down soon',
+      isBedtimeStarted: false,
+      isWindDownActive: false,
+      minutesUntilBedtime,
+      minutesUntilPrepStart,
+      phase,
+      phaseLabel: `Wind-down starts ${formatClock(prepStartDate)}`,
+      prepStartDate,
+      wakeDate,
+    };
+  }
+
+  return {
+    bedtimeDate,
+    detail: `Wind-down starts at ${formatClock(prepStartDate)}.`,
+    greeting: "Tonight's plan",
+    inlineLabel: 'Tonight',
+    isBedtimeStarted: false,
+    isWindDownActive: false,
+    minutesUntilBedtime,
+    minutesUntilPrepStart,
+    phase,
+    phaseLabel: `Bed in ${formatCountdownMinutes(minutesUntilBedtime)}`,
+    prepStartDate,
+    wakeDate,
+  };
+}
+
+export function buildSleepPlanGreeting(plan: SleepPlan, now = new Date()) {
+  const windDownStatus = buildSleepWindDownStatus(plan, now);
+  return windDownStatus.phase === 'wind_down' || windDownStatus.phase === 'bedtime'
+    ? windDownStatus.greeting
+    : buildTimeOfDayGreeting(now);
 }
 
 export function normalizeAlarmWeekdayMask(mask: number | null | undefined) {

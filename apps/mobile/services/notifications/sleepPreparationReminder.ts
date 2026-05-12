@@ -1,14 +1,14 @@
 import * as Notifications from 'expo-notifications';
 
-import { brand } from '@/constants/brand';
 import { openAppDatabaseAsync } from '@/db/appDatabase';
 import { recordAppIntentEvent } from '@/services/appIntentEvents';
 import { syncNotificationPermissionFromSystem } from '@/services/notifications/notificationPermissions';
 import type { NotificationPermissionState } from '@/types/device';
 import type { SleepPlan } from '@/types/health';
-import { nextUpcomingClockDate, normalizeClockMinutes } from '@/utils/sleepPlan';
+import { nextUpcomingClockDate, normalizeClockMinutes, WIND_DOWN_PREP_MINUTES } from '@/utils/sleepPlan';
 
 export const SLEEP_PREPARATION_REMINDER_NOTIFICATION_ID = 'sleep-preparation-reminder';
+export const SLEEP_PREPARATION_REMINDER_NOTIFICATION_KIND = 'sleep-preparation-reminder';
 
 export type SleepPreparationReminderSyncResult =
   | {
@@ -61,14 +61,19 @@ export async function syncSleepPreparationReminder(
     };
   }
 
-  const reminderClockMinutes = normalizeClockMinutes(plan.optimalBedtimeMinutes - 60);
+  const reminderClockMinutes = normalizeClockMinutes(plan.optimalBedtimeMinutes - WIND_DOWN_PREP_MINUTES);
   const triggerAt = nextUpcomingClockDate(reminderClockMinutes, options?.now);
 
   await Notifications.scheduleNotificationAsync({
     identifier: SLEEP_PREPARATION_REMINDER_NOTIFICATION_ID,
     content: {
-      title: 'Prepare for bed',
-      body: `${brand.appName} says it is time to start winding down. Your optimal bedtime is around ${plan.optimalBedtime}.`,
+      title: 'Start winding down',
+      body: 'Bedtime is in one hour. Charge your wearable, dim lights, and protect the next hour for sleep.',
+      data: {
+        kind: SLEEP_PREPARATION_REMINDER_NOTIFICATION_KIND,
+        route: '/sleep',
+      },
+      interruptionLevel: 'timeSensitive',
       sound: false,
     },
     trigger: {

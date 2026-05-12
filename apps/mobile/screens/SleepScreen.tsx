@@ -30,6 +30,7 @@ import { addMinutes, formatClock, formatClockMinutes, parseSqliteDateTime } from
 import { getMetricToneColor, getSleepMetricTone } from '@/utils/metricTone';
 import {
   ALARM_WEEKDAY_FULL_MASK,
+  buildSleepWindDownStatus,
   calculateOptimalBedtimeMinutes,
   isAlarmWeekdaySelected,
   nextAlarmTargetDate,
@@ -320,6 +321,7 @@ export function SleepScreen() {
     alarmOneOffAt: oneOffAlarmAt ? oneOffAlarmAt.toISOString() : null,
     nextAlarmAt: nextWearableAlarmAt ? nextWearableAlarmAt.toISOString() : null,
   };
+  const windDownStatus = buildSleepWindDownStatus(sleepPlan);
   const derivedRefreshMessage =
     derivedRefresh.data?.status === 'pending' || derivedRefresh.data?.status === 'processing'
       ? derivedRefresh.data.isFirstSync
@@ -578,6 +580,13 @@ export function SleepScreen() {
 
       <GlassCard accentColor={colors.primary}>
         <SectionHeader title="Tonight's Plan" trailing={`Need ${formatDuration(data.sleepPlan.sleepNeedMinutes)}`} />
+        <View style={[
+          styles.windDownBanner,
+          windDownStatus.isWindDownActive ? styles.windDownBannerActive : null,
+        ]}>
+          <Text style={styles.windDownTitle}>{windDownStatus.greeting}</Text>
+          <Text style={styles.windDownDetail}>{windDownStatus.detail}</Text>
+        </View>
         <View style={styles.planGrid}>
           <View style={styles.planMetric}>
             <Text style={styles.planLabel}>Optimal bedtime</Text>
@@ -1011,6 +1020,32 @@ const styles = StyleSheet.create({
   },
   metricCard: {
     flex: 1,
+  },
+  windDownBanner: {
+    backgroundColor: colors.surfaceMuted,
+    borderColor: colors.border,
+    borderRadius: 16,
+    borderWidth: 1,
+    gap: 4,
+    marginBottom: 12,
+    marginTop: 4,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  windDownBannerActive: {
+    backgroundColor: 'rgba(255, 210, 107, 0.13)',
+    borderColor: 'rgba(255, 210, 107, 0.34)',
+  },
+  windDownTitle: {
+    color: colors.text,
+    fontFamily: typography.bodySemiBold,
+    fontSize: 14,
+  },
+  windDownDetail: {
+    color: colors.muted,
+    fontFamily: typography.body,
+    fontSize: 12,
+    lineHeight: 18,
   },
   planGrid: {
     flexDirection: 'row',

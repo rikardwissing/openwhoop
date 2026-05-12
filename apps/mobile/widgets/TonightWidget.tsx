@@ -19,6 +19,7 @@ export interface TonightWidgetProps {
   batteryLabel?: string;
   bedtimeLabel?: string;
   bedtimePassed?: boolean;
+  greetingLabel?: string;
   phaseLabel?: string;
   projectedSleepLabel?: string;
   progress?: number;
@@ -47,6 +48,7 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
     batteryLabel: '--%',
     bedtimeLabel: '--',
     bedtimePassed: false,
+    greetingLabel: 'Tonight plan',
     phaseLabel: 'Tonight plan',
     projectedSleepLabel: '--',
     progress: 0,
@@ -123,6 +125,11 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
   const wakeTitle = props.bedtimePassed ? '100% by' : 'Wake';
   const wakeValue = props.bedtimePassed ? props.projectedSleepLabel : props.wakeLabel;
   const lockscreenBedtimeValue = props.bedtimePassed ? `${bedtimeValue}!` : bedtimeValue;
+  const windDownActive = props.greetingLabel === 'Time to wind down';
+  const greetingColor = success;
+  const inlineLead = windDownActive ? 'Wind down' : props.bedtimePassed ? 'Bedtime' : scoreHeadline;
+  const smallBedtimeTitle = windDownActive ? 'Time to wind down' : bedtimeTitle;
+  const homeWidgetURL = 'btwearable://';
 
   function Metric({ label, value }: { label: string; value: string }) {
     return (
@@ -194,7 +201,7 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
     return (
       <ZStack
         alignment="center"
-        modifiers={[widgetURL('btwearable://sleep'), containerBackground(widgetBackground, 'widget')]}> 
+        modifiers={[widgetURL(homeWidgetURL), containerBackground(widgetBackground, 'widget')]}>
         <Gauge
           value={scoreValue}
           min={0}
@@ -217,9 +224,9 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
 
   if (environment.widgetFamily === 'accessoryInline') {
     return (
-      <ZStack modifiers={[widgetURL('btwearable://sleep'), containerBackground(widgetBackground, 'widget')]}> 
+      <ZStack modifiers={[widgetURL(homeWidgetURL), containerBackground(widgetBackground, 'widget')]}>
         <Text modifiers={[font({ size: 13, weight: 'semibold' }), lineLimit(1)]}>
-          {scoreHeadline} · Bed {lockscreenBedtimeValue} · {wakeTitle} {wakeValue}
+          {inlineLead} · Bed {lockscreenBedtimeValue} · {wakeTitle} {wakeValue}
         </Text>
       </ZStack>
     );
@@ -229,12 +236,15 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
     return (
       <ZStack
         alignment="topTrailing"
-        modifiers={[widgetURL('btwearable://sleep'), containerBackground(widgetBackground, 'widget')]}> 
+        modifiers={[widgetURL(homeWidgetURL), containerBackground(widgetBackground, 'widget')]}>
         <HStack alignment="center" spacing={8}>
           <ScoreRing size={46} scoreFontSize={21} />
 
-          <VStack alignment="leading" spacing={1}>
-            <Text modifiers={[font({ size: 13, weight: 'bold' }), foregroundStyle(bedtimeColor), lineLimit(1)]}>
+          <VStack alignment="leading" spacing={0}>
+            <Text modifiers={[font({ size: 11, weight: 'semibold' }), foregroundStyle(greetingColor), lineLimit(1)]}>
+              {props.greetingLabel}
+            </Text>
+            <Text modifiers={[font({ size: 12, weight: 'medium' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
               Bed {lockscreenBedtimeValue}
             </Text>
             <Text modifiers={[font({ size: 12, weight: 'medium' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
@@ -250,8 +260,11 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
     return (
       <ZStack
         alignment="topTrailing"
-        modifiers={[padding({ all: 4 }), widgetURL('btwearable://sleep'), containerBackground(widgetBackground, 'widget')]}> 
-        <VStack alignment="leading" spacing={8}>
+        modifiers={[padding({ all: 4 }), widgetURL(homeWidgetURL), containerBackground(widgetBackground, 'widget')]}>
+        <VStack alignment="leading" spacing={6}>
+          <Text modifiers={[font({ size: 12, weight: 'bold' }), foregroundStyle(greetingColor), lineLimit(1)]}>
+            {props.greetingLabel}
+          </Text>
           <HStack alignment="center" spacing={14}>
             <VStack alignment="center" spacing={4}>
               <ScoreRing size={88} />
@@ -300,14 +313,22 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
 
   return (
     <ZStack
-      alignment="topTrailing"
-      modifiers={[padding({ all: 4 }), widgetURL('btwearable://sleep'), containerBackground(widgetBackground, 'widget')]}> 
-      <VStack alignment="center" spacing={5} modifiers={[frame({ width: 158, height: 158 })]}>
+      alignment="top"
+      modifiers={[widgetURL(homeWidgetURL), containerBackground(widgetBackground, 'widget')]}>
+      <HStack
+        alignment="center"
+        spacing={0}
+        modifiers={[frame({ width: 134 }), padding({ top: 8 })]}>
+        <Spacer />
+        <BatteryBadge />
+      </HStack>
+
+      <VStack alignment="center" spacing={5} modifiers={[frame({ width: 134, height: 154 }), padding({ top: 8 })]}>
         <ScoreRing size={76} />
 
         <VStack alignment="center" spacing={1}>
           <Text modifiers={[font({ size: 10, weight: 'semibold' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-            {bedtimeTitle}
+            {smallBedtimeTitle}
           </Text>
           <Text
             modifiers={[
@@ -322,10 +343,6 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
             {wakeTitle} {wakeValue}
           </Text>
         </VStack>
-      </VStack>
-
-      <VStack alignment="trailing" spacing={0} modifiers={[padding({ top: 4, trailing: 10 })]}>
-        <BatteryBadge />
       </VStack>
     </ZStack>
   );

@@ -13,6 +13,7 @@ import { formatClock, parseSqliteDateTime } from '@/utils/dateTime';
 import { formatDuration } from '@/utils/formatters';
 import {
   ALARM_WEEKDAY_FULL_MASK,
+  buildSleepWindDownStatus,
   isAlarmWeekdaySelected,
   nextAlarmTargetDate,
   resolveNextWearableAlarmDate,
@@ -75,6 +76,7 @@ export function TonightPlanCard({
   };
   const nextDisplayedAlarmAt = plan.nextAlarmAt ? parseSqliteDateTime(plan.nextAlarmAt) : null;
   const alarmSummary = `${alarmScheduleSummary(plan)} · ${alarmWakeModeSummary(plan)}`;
+  const windDownStatus = buildSleepWindDownStatus(plan);
 
   useEffect(() => {
     setAlarmEnabled(plan.alarmEnabled);
@@ -168,6 +170,13 @@ export function TonightPlanCard({
   return (
     <GlassCard accentColor={colors.primary}>
       <SectionHeader title="Tonight" trailing={`Need ${formatDuration(plan.sleepNeedMinutes)}`} />
+      <View style={[
+        styles.windDownBanner,
+        windDownStatus.isWindDownActive ? styles.windDownBannerActive : null,
+      ]}>
+        <Text style={styles.windDownTitle}>{windDownStatus.greeting}</Text>
+        <Text style={styles.windDownDetail}>{windDownStatus.detail}</Text>
+      </View>
       <View style={styles.metricRow}>
         <View style={styles.metricBlock}>
           <Text style={styles.metricLabel}>Bedtime</Text>
@@ -222,6 +231,32 @@ export function TonightPlanCard({
 }
 
 const styles = StyleSheet.create({
+  windDownBanner: {
+    backgroundColor: colors.surfaceMuted,
+    borderColor: colors.border,
+    borderRadius: 16,
+    borderWidth: 1,
+    gap: 4,
+    marginBottom: 12,
+    marginTop: 4,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  windDownBannerActive: {
+    backgroundColor: 'rgba(255, 210, 107, 0.13)',
+    borderColor: 'rgba(255, 210, 107, 0.34)',
+  },
+  windDownTitle: {
+    color: colors.text,
+    fontFamily: typography.bodySemiBold,
+    fontSize: 14,
+  },
+  windDownDetail: {
+    color: colors.muted,
+    fontFamily: typography.body,
+    fontSize: 12,
+    lineHeight: 18,
+  },
   metricRow: {
     flexDirection: 'row',
     gap: 12,
