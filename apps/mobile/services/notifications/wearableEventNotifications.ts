@@ -104,6 +104,25 @@ async function markDeliveredNotification(
   await reserveDeliveredNotification(db, deviceId, kind, entityId);
 }
 
+async function forgetDeliveredNotification(
+  db: SQLiteDatabase,
+  deviceId: string,
+  kind: string,
+  entityId: string,
+) {
+  await db.runAsync(
+    `
+      DELETE FROM delivered_notifications
+      WHERE device_id = ?
+        AND kind = ?
+        AND entity_id = ?
+    `,
+    deviceId,
+    kind,
+    entityId,
+  );
+}
+
 function notificationForWearableEvent(
   event: DeviceEventPacket,
   deviceName: string | null | undefined,
@@ -152,15 +171,15 @@ function notificationForWearableEvent(
 }
 
 function batteryThresholdForPercent(batteryPercent: number): BatteryThreshold | null {
-  if (batteryPercent < 5) {
+  if (batteryPercent <= 5) {
     return BATTERY_THRESHOLDS[2];
   }
 
-  if (batteryPercent < 10) {
+  if (batteryPercent <= 10) {
     return BATTERY_THRESHOLDS[1];
   }
 
-  if (batteryPercent < 20) {
+  if (batteryPercent <= 20) {
     return BATTERY_THRESHOLDS[0];
   }
 
@@ -172,7 +191,7 @@ async function resetLowBatteryNotificationsIfRecovered(
   deviceId: string,
   batteryPercent: number,
 ) {
-  if (batteryPercent < 20) {
+  if (batteryPercent <= 20) {
     return;
   }
 
@@ -236,7 +255,18 @@ export async function notifyForWearableEventAsync(
     return false;
   }
 
-  await scheduleWearableNotificationAsync(content);
+  try {
+    await scheduleWearableNotificationAsync(content);
+  } catch (error) {
+    await forgetDeliveredNotification(
+      db,
+      deviceId,
+      WEARABLE_EVENT_NOTIFICATION_KIND,
+      entityId,
+    ).catch(() => {});
+    throw error;
+  }
+
   return true;
 }
 
@@ -265,11 +295,22 @@ export async function notifyForWearableBatteryLevelAsync(
     return false;
   }
 
+  try {
+    await scheduleWearableNotificationAsync({
+      title: threshold.title,
+      body: threshold.body(resolveNotificationDeviceName(deviceName), roundedBatteryPercent),
+    });
+  } catch (error) {
+    await forgetDeliveredNotification(
+      db,
+      deviceId,
+      WEARABLE_BATTERY_NOTIFICATION_KIND,
+      threshold.entityId,
+    ).catch(() => {});
+    throw error;
+  }
+
   await markImpliedBatteryThresholdsDelivered(db, deviceId, threshold);
-  await scheduleWearableNotificationAsync({
-    title: threshold.title,
-    body: threshold.body(resolveNotificationDeviceName(deviceName), roundedBatteryPercent),
-  });
 
   return true;
 }
