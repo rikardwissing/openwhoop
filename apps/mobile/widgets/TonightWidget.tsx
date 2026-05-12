@@ -119,7 +119,7 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
           : '#fff3f1';
   const bedtimeColor = props.bedtimePassed ? alert : primaryColor;
   const bedtimeTitle = props.bedtimePassed ? 'Past bedtime' : "Tonight's bedtime";
-  const bedtimeValue = props.bedtimeLabel;
+  const bedtimeValue = props.bedtimePassed ? 'Now' : props.bedtimeLabel;
   const wakeTitle = props.bedtimePassed ? '100% by' : 'Wake';
   const wakeValue = props.bedtimePassed ? props.projectedSleepLabel : props.wakeLabel;
   const lockscreenBedtimeValue = props.bedtimePassed ? `${bedtimeValue}!` : bedtimeValue;

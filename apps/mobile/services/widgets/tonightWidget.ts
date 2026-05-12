@@ -11,7 +11,10 @@ import TonightWidget from '@/widgets/TonightWidget';
 import type { TonightWidgetProps } from '@/widgets/TonightWidget';
 
 const TIMELINE_WINDOW_MS = 30 * 60 * 60 * 1000;
-type TonightWidgetSnapshot = Pick<SleepHistoryData, 'sleepPlan' | 'headlineLabel' | 'headlineScore'> & {
+type TonightWidgetSnapshot = Pick<
+  SleepHistoryData,
+  'sleepPlan' | 'headlineLabel' | 'headlineScore' | 'completionStatus' | 'isInProgress'
+> & {
   batteryPercent?: number | null;
   chargingStatus?: 'charging' | 'not_charging' | null;
 };
@@ -114,6 +117,8 @@ function buildSnapshotFromPlan(
   return {
     batteryPercent: options.batteryPercent,
     chargingStatus: options.chargingStatus,
+    completionStatus: 'complete',
+    isInProgress: false,
     sleepPlan: plan,
     headlineLabel: options.headlineLabel ?? describeSleepScore(headlineScore),
     headlineScore,
@@ -131,6 +136,7 @@ function formatBatteryLabel(batteryPercent: number | null | undefined) {
 export function buildTonightWidgetProps(snapshot: TonightWidgetSnapshot, now = new Date()): TonightWidgetProps {
   const plan = snapshot.sleepPlan;
   const resolvedBatteryPercent = snapshot.batteryPercent ?? lastKnownBatteryPercent;
+  const sleepInProgress = snapshot.isInProgress || snapshot.completionStatus === 'in_progress';
 
   if (snapshot.batteryPercent !== undefined) {
     lastKnownBatteryPercent = snapshot.batteryPercent;
@@ -139,14 +145,15 @@ export function buildTonightWidgetProps(snapshot: TonightWidgetSnapshot, now = n
   const { bedtimeDate, wakeDate } = resolveSleepWindow(plan, now);
   const sleepWindowMs = Math.max(1, wakeDate.getTime() - bedtimeDate.getTime());
   const isInsideSleepWindow = now.getTime() >= bedtimeDate.getTime() && now.getTime() < wakeDate.getTime();
+  const bedtimePassed = !sleepInProgress && isInsideSleepWindow;
   const projectedFullSleepDate = new Date(now.getTime() + plan.sleepNeedMinutes * 60_000);
 
   return {
     alarmStatusLabel: buildAlarmLabel(plan, wakeDate),
-    bedtimeLabel: formatClock(bedtimeDate),
-    bedtimePassed: isInsideSleepWindow,
-    phaseLabel: buildPhaseLabel(plan, now, bedtimeDate, wakeDate),
-    progress: isInsideSleepWindow
+    bedtimeLabel: sleepInProgress ? 'Now' : formatClock(bedtimeDate),
+    bedtimePassed,
+    phaseLabel: sleepInProgress ? 'Sleep in progress' : buildPhaseLabel(plan, now, bedtimeDate, wakeDate),
+    progress: bedtimePassed
       ? clamp((now.getTime() - bedtimeDate.getTime()) / sleepWindowMs, 0, 1)
       : 0,
     batteryCharging: snapshot.chargingStatus === 'charging',
