@@ -271,6 +271,7 @@ async function executeBackgroundDeviceSyncAsync(options: {
       }).catch(() => null);
       await updateTonightWidgetFromDatabase(db, {
         allowLiveActivityScheduling: false,
+        allowWindDownAppIconSync: true,
       }).catch(() => null);
     }
 

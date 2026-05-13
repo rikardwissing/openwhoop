@@ -1755,10 +1755,7 @@ function normalizeSleepPreferences(
   row: SleepPreferenceRow | null,
   fallbackTargetWakeMinutes: number,
 ): SleepPreferences {
-  const targetWakeMinutes = roundClockMinutes(
-    normalizeClockMinutes(row?.target_wake_minutes ?? fallbackTargetWakeMinutes),
-    SLEEP_TARGET_STEP_MINUTES,
-  );
+  const targetWakeMinutes = normalizeClockMinutes(row?.target_wake_minutes ?? fallbackTargetWakeMinutes);
 
   const preferences: SleepPreferences = {
     targetWakeMinutes,
@@ -8509,10 +8506,7 @@ export class SQLiteHealthRepository implements HealthRepository {
 
   async setTargetWakeMinutes(minutes: number): Promise<void> {
     await this.runRepositoryMutation(async () => {
-      const nextTargetWakeMinutes = roundClockMinutes(
-        normalizeClockMinutes(minutes),
-        SLEEP_TARGET_STEP_MINUTES,
-      );
+      const nextTargetWakeMinutes = normalizeClockMinutes(minutes);
       const current = await loadStoredSleepPreferences(this.db, nextTargetWakeMinutes);
       await persistSleepPreferences(this.db, {
         ...current,
@@ -8525,10 +8519,7 @@ export class SQLiteHealthRepository implements HealthRepository {
 
   async enableAlarm(settings: AlarmSettingsInput): Promise<void> {
     await this.runRepositoryMutation(async () => {
-      const nextTargetWakeMinutes = roundClockMinutes(
-        normalizeClockMinutes(settings.targetWakeMinutes),
-        SLEEP_TARGET_STEP_MINUTES,
-      );
+      const nextTargetWakeMinutes = normalizeClockMinutes(settings.targetWakeMinutes);
       const alarmScheduleKind = normalizeAlarmScheduleKind(settings.alarmScheduleKind);
       const alarmWeekdayMask = Math.trunc(settings.alarmWeekdayMask) & ALARM_WEEKDAY_FULL_MASK;
 
@@ -8561,10 +8552,7 @@ export class SQLiteHealthRepository implements HealthRepository {
 
   async disableAlarm(targetWakeMinutes: number): Promise<void> {
     await this.runRepositoryMutation(async () => {
-      const nextTargetWakeMinutes = roundClockMinutes(
-        normalizeClockMinutes(targetWakeMinutes),
-        SLEEP_TARGET_STEP_MINUTES,
-      );
+      const nextTargetWakeMinutes = normalizeClockMinutes(targetWakeMinutes);
       const current = await loadStoredSleepPreferences(this.db, nextTargetWakeMinutes);
       await persistSleepPreferences(this.db, {
         ...current,

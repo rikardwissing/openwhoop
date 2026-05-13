@@ -34,8 +34,8 @@ import {
   calculateOptimalBedtimeMinutes,
   isAlarmWeekdaySelected,
   nextAlarmTargetDate,
+  normalizeClockMinutes,
   resolveNextWearableAlarmDate,
-  roundClockMinutes,
 } from '@/utils/sleepPlan';
 
 const stageBreakdownOrder: SleepStage[] = ['deep', 'light', 'rem', 'awake'];
@@ -372,7 +372,7 @@ export function SleepScreen() {
     }
 
     setWakeTargetError(null);
-    const nextWakeMinutes = roundClockMinutes(
+    const nextWakeMinutes = normalizeClockMinutes(
       (targetWakeMinutesRef.current ?? data.sleepPlan.targetWakeMinutes) + deltaMinutes,
     );
     targetWakeMinutesRef.current = nextWakeMinutes;
@@ -614,7 +614,7 @@ export function SleepScreen() {
               accessibilityRole="button"
               disabled={savingAlarm}
               onPress={() => {
-                void adjustWakeTarget(-15);
+                void adjustWakeTarget(-1);
               }}
               style={({ pressed }) => [
                 styles.targetButton,
@@ -622,19 +622,19 @@ export function SleepScreen() {
                 pressed ? styles.targetButtonPressed : null,
               ]}>
               <Text style={styles.targetButtonLabel}>Earlier</Text>
-              <Text style={styles.targetButtonCaption}>-15 min</Text>
+              <Text style={styles.targetButtonCaption}>-1 min</Text>
             </Pressable>
 
             <View style={styles.targetValuePill}>
               <Text style={styles.targetValue}>{sleepPlan.targetWakeTime}</Text>
-              <Text style={styles.targetCaption}>{savingAlarm ? 'Saving...' : '15 minute steps'}</Text>
+              <Text style={styles.targetCaption}>{savingAlarm ? 'Saving...' : '1 minute steps'}</Text>
             </View>
 
             <Pressable
               accessibilityRole="button"
               disabled={savingAlarm}
               onPress={() => {
-                void adjustWakeTarget(15);
+                void adjustWakeTarget(1);
               }}
               style={({ pressed }) => [
                 styles.targetButton,
@@ -642,7 +642,7 @@ export function SleepScreen() {
                 pressed ? styles.targetButtonPressed : null,
               ]}>
               <Text style={styles.targetButtonLabel}>Later</Text>
-              <Text style={styles.targetButtonCaption}>+15 min</Text>
+              <Text style={styles.targetButtonCaption}>+1 min</Text>
             </Pressable>
           </View>
         </View>

@@ -30,6 +30,7 @@ type TonightWidgetSnapshot = Pick<
 export type SleepSurfacePreviewMode = 'wind_down' | 'sleep_in_progress';
 type TonightWidgetUpdateOptions = {
   allowLiveActivityScheduling?: boolean;
+  allowWindDownAppIconSync?: boolean;
 };
 type SleepLiveActivityStartOptions = {
   alertBody?: string;
@@ -654,7 +655,9 @@ async function applyTonightWidgetSnapshot(
 
   await syncSleepLiveActivity(lastSnapshot, options).catch(() => {});
 
-  await syncWindDownAppIcon(lastSnapshot).catch(() => {});
+  if (options.allowWindDownAppIconSync) {
+    await syncWindDownAppIcon(lastSnapshot).catch(() => {});
+  }
 }
 
 export async function registerTonightWidgetLayout() {

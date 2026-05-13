@@ -51,7 +51,7 @@ import {
   normalizeAlarmScheduleKind,
   normalizeAlarmWakeMode,
   normalizeAlarmWeekdayMask,
-  roundClockMinutes,
+  normalizeClockMinutes,
   type AlarmSettingsInput,
 } from '@/utils/sleepPlan';
 
@@ -1484,7 +1484,7 @@ export class MockHealthRepository implements HealthRepository {
 
   async setTargetWakeMinutes(minutes: number): Promise<void> {
     await this.wait();
-    this.targetWakeMinutes = roundClockMinutes(minutes);
+    this.targetWakeMinutes = normalizeClockMinutes(minutes);
     this.alarmEnabled = false;
     this.alarmOneOffAt = null;
   }
@@ -1498,7 +1498,7 @@ export class MockHealthRepository implements HealthRepository {
       throw new Error('Select at least one wake day before enabling a recurring alarm.');
     }
 
-    this.targetWakeMinutes = roundClockMinutes(settings.targetWakeMinutes);
+    this.targetWakeMinutes = normalizeClockMinutes(settings.targetWakeMinutes);
     this.alarmScheduleKind = alarmScheduleKind;
     this.alarmWeekdayMask = normalizeAlarmWeekdayMask(alarmWeekdayMask);
     this.alarmWakeMode = normalizeAlarmWakeMode(settings.alarmWakeMode);
@@ -1516,7 +1516,7 @@ export class MockHealthRepository implements HealthRepository {
 
   async disableAlarm(targetWakeMinutes: number): Promise<void> {
     await this.wait();
-    this.targetWakeMinutes = roundClockMinutes(targetWakeMinutes);
+    this.targetWakeMinutes = normalizeClockMinutes(targetWakeMinutes);
     this.alarmEnabled = false;
     this.alarmOneOffAt = null;
   }

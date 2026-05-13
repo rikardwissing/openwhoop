@@ -70,18 +70,25 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
   const plannedSleepProgressValue = Math.max(6, Math.min(96, Math.round(props.progress * 100)));
   const sleepProgressValue = Math.max(6, Math.min(96, Math.round(props.sleepProgress * 100)));
   const windDownActive = props.sleepThemeActive && props.sleepThemeLabel === 'Time to wind down';
+  const postBedtimeAwaitingSleep = props.bedtimePassed && !props.sleepInProgress;
   const sleepWindowProgressActive = props.sleepInProgress || props.bedtimePassed;
   const ringValue = props.sleepInProgress
     ? sleepProgressValue
-    : props.bedtimePassed
-      ? plannedSleepProgressValue
+    : postBedtimeAwaitingSleep
+      ? 0
       : windDownActive
         ? 0
         : scoreValue;
   const ringText = sleepWindowProgressActive || windDownActive ? `${ringValue}` : scoreText;
   const scoreRingColor =
     props.score === null ? accent : props.score >= 80 ? success : props.score >= 65 ? caution : alert;
-  const ringColor = sleepWindowProgressActive ? sleepAccent : windDownActive ? sleepCyan : scoreRingColor;
+  const ringColor = props.sleepInProgress
+    ? sleepAccent
+    : windDownActive
+      ? sleepCyan
+      : postBedtimeAwaitingSleep
+        ? sleepWarm
+        : scoreRingColor;
   const headline = windDownActive ? 'Wind down now' : props.sleepThemeLabel;
   const scheduleLine = props.sleepInProgress || props.bedtimePassed
     ? `100% by ${props.projectedSleepLabel}`
@@ -90,7 +97,7 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
   const detailLine = props.sleepInProgress ? sleepNeedDetail : windDownActive ? sleepNeedDetail : props.phaseLabel;
   const compactTrailingText = windDownActive ? 'Now' : sleepWindowProgressActive ? `${ringValue}` : props.bedtimeLabel;
   const compactLeadingColor = windDownActive ? sleepCyan : sleepAccent;
-  const showSleepThemeIcon = props.sleepInProgress || windDownActive;
+  const showSleepThemeIcon = props.sleepInProgress || windDownActive || postBedtimeAwaitingSleep;
   const batteryLabel = (() => {
     const value = rawProps.batteryLabel?.trim();
     if (value) {
@@ -138,6 +145,34 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
           ? 'Progress'
           : 'Score';
 
+  function formatRelativeTimeText(referenceDate: Date, countsDown: boolean, now = new Date()) {
+    const rawMinutes = countsDown
+      ? (referenceDate.getTime() - now.getTime()) / 60_000
+      : (now.getTime() - referenceDate.getTime()) / 60_000;
+    const totalMinutes = countsDown ? Math.max(0, Math.ceil(rawMinutes)) : Math.max(0, Math.floor(rawMinutes));
+
+    if (countsDown && totalMinutes <= 0) {
+      return 'Now';
+    }
+
+    if (totalMinutes < 60) {
+      return `${totalMinutes}m`;
+    }
+
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+
+    if (minutes === 0) {
+      return `${hours}h`;
+    }
+
+    return `${hours}h ${minutes}m`;
+  }
+
+  const rightHandTimerText = rightHandReferenceDate
+    ? formatRelativeTimeText(rightHandReferenceDate, rightHandCountsDown)
+    : null;
+
   function ActivityRing({ size }: { size: number }) {
     return (
       <ZStack alignment="center" modifiers={[frame({ width: size, height: size })]}>
@@ -166,18 +201,17 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
   }
 
   function ActivityMetric({ size, staticColor }: { size: number; staticColor: string }) {
-    if (rightHandReferenceDate) {
+    if (rightHandTimerText !== null) {
       return (
         <Text
-          compactTimerCountsDown={rightHandCountsDown}
-          compactTimerDate={rightHandReferenceDate}
           modifiers={[
             font({ size, weight: 'bold', design: 'rounded' }),
             foregroundStyle(rightHandTimerColor),
             monospacedDigit(),
             lineLimit(1),
-          ]}
-        />
+          ]}>
+          {rightHandTimerText}
+        </Text>
       );
     }
 
@@ -195,18 +229,17 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
   }
 
   function CompactTrailingMetric() {
-    if (rightHandReferenceDate) {
+    if (rightHandTimerText !== null) {
       return (
         <Text
-          compactTimerCountsDown={rightHandCountsDown}
-          compactTimerDate={rightHandReferenceDate}
           modifiers={[
             font({ size: 14, weight: 'bold', design: 'rounded' }),
             foregroundStyle(rightHandTimerColor),
             monospacedDigit(),
             lineLimit(1),
-          ]}
-        />
+          ]}>
+          {rightHandTimerText}
+        </Text>
       );
     }
 

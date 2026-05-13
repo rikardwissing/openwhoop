@@ -140,16 +140,13 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
   const ringValue = projectedSleepActive
     ? sleepProgressValue
     : postBedtimeActive
-      ? plannedSleepProgressValue
+      ? 0
       : windDownActive
         ? 0
         : scoreValue;
   const ringText = projectedSleepActive ? `${ringValue}` : scoreText;
-  const scoreHeadline = projectedSleepActive
-    ? `Sleep ${ringValue}`
-    : props.score === null
-      ? 'Sleep --'
-      : `Sleep ${scoreText}`;
+  const scoreHeadline = props.score === null ? 'Sleep --' : `Sleep ${scoreText}`;
+  const projectedSleepHeadline = 'Sleeping';
   const scoreRingColor =
     props.score === null ? accent : props.score >= 80 ? success : props.score >= 65 ? caution : alert;
   const ringColor = projectedSleepActive
@@ -175,10 +172,16 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
   const wakeValue = props.sleepInProgress || props.bedtimePassed ? props.projectedSleepLabel : props.wakeLabel;
   const lockscreenBedtimeValue = props.bedtimePassed ? `${bedtimeValue}!` : bedtimeValue;
   const greetingColor = props.sleepThemeActive ? sleepCyan : success;
-  const inlineLead = projectedSleepActive ? scoreHeadline : postBedtimeActive ? 'Past bedtime' : windDownActive ? 'Wind down' : scoreHeadline;
+  const inlineLead = projectedSleepActive
+    ? projectedSleepHeadline
+    : postBedtimeActive
+      ? 'Past bedtime'
+      : windDownActive
+        ? 'Wind down'
+        : scoreHeadline;
   const lockscreenThemeLabel = windDownActive ? 'Wind down now' : props.sleepThemeLabel;
   const smallBedtimeTitle = props.sleepThemeActive ? props.sleepThemeLabel : bedtimeTitle;
-  const showSleepThemeIcon = props.sleepThemeActive && !projectedSleepActive;
+  const showSleepThemeIcon = projectedSleepActive || props.sleepThemeActive || postBedtimeActive;
   const homeWidgetURL = 'btwearable://';
 
   function Metric({ label, value }: { label: string; value: string }) {
