@@ -17,6 +17,8 @@ const LIVE_ACTIVITY_URL = 'btwearable://';
 const LIVE_ACTIVITY_WIND_DOWN_PREVIEW_MINUTES = 30;
 const LIVE_ACTIVITY_SLEEP_PREVIEW_MINUTES = 120;
 const LIVE_ACTIVITY_REFRESH_INTERVAL_MS = 60_000;
+const LIVE_ACTIVITY_SCHEDULED_START_MIN_IOS_VERSION = 26;
+const LIVE_ACTIVITY_SCHEDULED_WIND_DOWN_ALERT_TITLE = 'Time to wind down';
 const PREVIEW_TIMELINE_HOLD_MS = 24 * 60 * 60 * 1000;
 type TonightWidgetSnapshot = Pick<
   SleepHistoryData,
@@ -26,6 +28,14 @@ type TonightWidgetSnapshot = Pick<
   chargingStatus?: 'charging' | 'not_charging' | null;
 };
 export type SleepSurfacePreviewMode = 'wind_down' | 'sleep_in_progress';
+type TonightWidgetUpdateOptions = {
+  allowLiveActivityScheduling?: boolean;
+};
+type SleepLiveActivityStartOptions = {
+  alertBody?: string;
+  alertTitle?: string;
+  startDate?: Date;
+};
 type ExpoWidgetsModule = {
   reloadAllWidgets(): void;
 };
@@ -39,9 +49,30 @@ let lastWidgetTimelineKey: string | null = null;
 let lastLiveActivityPropsKey: string | null = null;
 let lastLiveActivityInstanceCount = 0;
 let liveActivityRefreshTimeout: ReturnType<typeof setTimeout> | null = null;
+let scheduledLiveActivityPropsKey: string | null = null;
+let scheduledLiveActivityStartAtMs: number | null = null;
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
+}
+
+function getCurrentIOSVersion() {
+  if (Platform.OS !== 'ios') {
+    return null;
+  }
+
+  const rawVersion = typeof Platform.Version === 'string' ? Number.parseFloat(Platform.Version) : Platform.Version;
+  return Number.isFinite(rawVersion) ? rawVersion : null;
+}
+
+function supportsScheduledSleepLiveActivityStart() {
+  const version = getCurrentIOSVersion();
+  return version !== null && version >= LIVE_ACTIVITY_SCHEDULED_START_MIN_IOS_VERSION;
+}
+
+function warnSleepLiveActivityFailure(action: string, error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  console.warn(`[widgets] Failed to ${action} sleep live activity`, message);
 }
 
 function reloadAllWidgetSnapshots() {
@@ -325,6 +356,7 @@ async function refreshSleepLiveActivityForClockTick() {
     return;
   }
 
+  await endPendingSleepLiveActivities();
   await startOrUpdateSleepLiveActivity(props);
   scheduleSleepLiveActivityRefresh();
 }
@@ -344,31 +376,83 @@ async function endSleepLiveActivities() {
 
   lastLiveActivityPropsKey = null;
   lastLiveActivityInstanceCount = 0;
+  scheduledLiveActivityPropsKey = null;
+  scheduledLiveActivityStartAtMs = null;
 }
 
-async function startOrUpdateSleepLiveActivity(props: TonightWidgetProps) {
+async function endPendingSleepLiveActivities() {
+  const instances = getSleepLiveActivityInstances();
+
+  if (instances.length === 0) {
+    return false;
+  }
+
+  const pendingInstances: typeof instances = [];
+
+  await Promise.all(
+    instances.map(async (instance) => {
+      try {
+        if ((await instance.getState()) === 'pending') {
+          pendingInstances.push(instance);
+        }
+      } catch {}
+    }),
+  );
+
+  if (pendingInstances.length === 0) {
+    return false;
+  }
+
+  await Promise.all(
+    pendingInstances.map(async (instance) => {
+      try {
+        await instance.end('immediate');
+      } catch {}
+    }),
+  );
+
+  lastLiveActivityPropsKey = null;
+  lastLiveActivityInstanceCount = 0;
+  scheduledLiveActivityPropsKey = null;
+  scheduledLiveActivityStartAtMs = null;
+  return true;
+}
+
+async function startOrUpdateSleepLiveActivity(
+  props: TonightWidgetProps,
+  options: SleepLiveActivityStartOptions = {},
+) {
   const instances = getSleepLiveActivityInstances();
   const nextPropsKey = JSON.stringify(props);
 
   if (instances.length === 0) {
     try {
-      SleepLiveActivity.start(props, LIVE_ACTIVITY_URL);
+      SleepLiveActivity.start(props, LIVE_ACTIVITY_URL, options);
       lastLiveActivityPropsKey = nextPropsKey;
       lastLiveActivityInstanceCount = 1;
-    } catch {}
-    return;
+      return true;
+    } catch (error) {
+      lastLiveActivityPropsKey = null;
+      lastLiveActivityInstanceCount = 0;
+      warnSleepLiveActivityFailure(options.startDate ? 'schedule' : 'start', error);
+    }
+
+    return false;
   }
 
   if (nextPropsKey === lastLiveActivityPropsKey && instances.length === lastLiveActivityInstanceCount) {
-    return;
+    return true;
   }
 
+  const updateFailures: unknown[] = [];
   const updateResults = await Promise.all(
     instances.map(async (instance) => {
       try {
         await instance.update(props);
         return true;
-      } catch {}
+      } catch (error) {
+        updateFailures.push(error);
+      }
 
       return false;
     }),
@@ -377,10 +461,68 @@ async function startOrUpdateSleepLiveActivity(props: TonightWidgetProps) {
   if (updateResults.some(Boolean)) {
     lastLiveActivityPropsKey = nextPropsKey;
     lastLiveActivityInstanceCount = instances.length;
+    return true;
   } else {
     lastLiveActivityPropsKey = null;
     lastLiveActivityInstanceCount = instances.length;
   }
+
+  if (updateFailures[0]) {
+    warnSleepLiveActivityFailure('update', updateFailures[0]);
+  }
+
+  return false;
+}
+
+async function scheduleSleepLiveActivityAtWindDown(snapshot: TonightWidgetSnapshot, now = new Date()) {
+  if (!supportsScheduledSleepLiveActivityStart()) {
+    return false;
+  }
+
+  let { prepStartDate, wakeDate } = resolveSleepPlanWindow(snapshot.sleepPlan, now);
+
+  if (prepStartDate.getTime() <= now.getTime()) {
+    ({ prepStartDate, wakeDate } = resolveSleepPlanWindow(
+      snapshot.sleepPlan,
+      new Date(wakeDate.getTime() + 60_000),
+    ));
+  }
+
+  if (prepStartDate.getTime() <= now.getTime()) {
+    return false;
+  }
+
+  const props = buildTonightWidgetProps(snapshot, prepStartDate);
+  const nextPropsKey = JSON.stringify(props);
+  const instances = getSleepLiveActivityInstances();
+
+  if (
+    instances.length > 0 &&
+    scheduledLiveActivityStartAtMs === prepStartDate.getTime() &&
+    scheduledLiveActivityPropsKey === nextPropsKey
+  ) {
+    return true;
+  }
+
+  clearSleepLiveActivityRefreshTimer();
+
+  if (instances.length > 0) {
+    await endSleepLiveActivities();
+  }
+
+  const scheduled = await startOrUpdateSleepLiveActivity(props, {
+    alertBody: `Bed ${props.bedtimeLabel}, wake ${props.wakeLabel}`,
+    alertTitle: LIVE_ACTIVITY_SCHEDULED_WIND_DOWN_ALERT_TITLE,
+    startDate: prepStartDate,
+  });
+
+  if (!scheduled) {
+    return false;
+  }
+
+  scheduledLiveActivityStartAtMs = prepStartDate.getTime();
+  scheduledLiveActivityPropsKey = nextPropsKey;
+  return true;
 }
 
 function buildSleepSurfacePreviewProps(
@@ -429,16 +571,34 @@ function buildSleepSurfacePreviewProps(
   } satisfies TonightWidgetProps;
 }
 
-async function syncSleepLiveActivity(snapshot: TonightWidgetSnapshot) {
-  const props = sleepSurfacePreviewProps ?? buildTonightWidgetProps(snapshot);
+async function syncSleepLiveActivity(
+  snapshot: TonightWidgetSnapshot,
+  options: TonightWidgetUpdateOptions = {},
+) {
+  const now = new Date();
+  const props = sleepSurfacePreviewProps ?? buildTonightWidgetProps(snapshot, now);
+  const allowLiveActivityScheduling = options.allowLiveActivityScheduling ?? true;
 
   if (!props.sleepThemeActive) {
+    if (
+      allowLiveActivityScheduling &&
+      !sleepSurfacePreviewProps &&
+      (await scheduleSleepLiveActivityAtWindDown(snapshot, now))
+    ) {
+      return;
+    }
+
     await endSleepLiveActivities();
     return;
   }
 
-  await startOrUpdateSleepLiveActivity(props);
-  scheduleSleepLiveActivityRefresh();
+  await endPendingSleepLiveActivities();
+  scheduledLiveActivityPropsKey = null;
+  scheduledLiveActivityStartAtMs = null;
+
+  if (await startOrUpdateSleepLiveActivity(props)) {
+    scheduleSleepLiveActivityRefresh();
+  }
 }
 
 export async function previewSleepSurfaces(
@@ -480,7 +640,10 @@ export async function restoreSleepSurfacePreview() {
   await endSleepLiveActivities();
 }
 
-async function applyTonightWidgetSnapshot(snapshot: TonightWidgetSnapshot) {
+async function applyTonightWidgetSnapshot(
+  snapshot: TonightWidgetSnapshot,
+  options: TonightWidgetUpdateOptions = {},
+) {
   lastSnapshot = {
     ...snapshot,
     batteryPercent: snapshot.batteryPercent ?? lastSnapshot?.batteryPercent,
@@ -489,7 +652,7 @@ async function applyTonightWidgetSnapshot(snapshot: TonightWidgetSnapshot) {
 
   syncTonightWidgetPreviewOrLive(lastSnapshot);
 
-  await syncSleepLiveActivity(lastSnapshot).catch(() => {});
+  await syncSleepLiveActivity(lastSnapshot, options).catch(() => {});
 
   await syncWindDownAppIcon(lastSnapshot).catch(() => {});
 }
@@ -522,12 +685,13 @@ export async function registerTonightWidgetLayout() {
 
 export async function updateTonightWidgetFromSleepHistory(
   snapshot: TonightWidgetSnapshot,
+  options: TonightWidgetUpdateOptions = {},
 ) {
   if (Platform.OS !== 'ios') {
     return;
   }
 
-  await applyTonightWidgetSnapshot(snapshot);
+  await applyTonightWidgetSnapshot(snapshot, options);
 }
 
 export async function updateTonightWidgetPowerState(powerState: {
@@ -579,7 +743,10 @@ async function loadLatestPowerState(db: SQLiteDatabase) {
   };
 }
 
-export async function updateTonightWidgetFromDatabase(db: SQLiteDatabase) {
+export async function updateTonightWidgetFromDatabase(
+  db: SQLiteDatabase,
+  options: TonightWidgetUpdateOptions = {},
+) {
   const repository = new SQLiteHealthRepository(db);
   const sleep = await repository.getSleepHistory('14d');
   const powerState = await loadLatestPowerState(db).catch(() => ({
@@ -590,5 +757,5 @@ export async function updateTonightWidgetFromDatabase(db: SQLiteDatabase) {
     ...sleep,
     batteryPercent: powerState.batteryPercent,
     chargingStatus: powerState.chargingStatus,
-  });
+  }, options);
 }

@@ -269,7 +269,9 @@ async function executeBackgroundDeviceSyncAsync(options: {
         dismissDelivered: outcome.importedReadings > 0,
         deviceName,
       }).catch(() => null);
-      await updateTonightWidgetFromDatabase(db).catch(() => null);
+      await updateTonightWidgetFromDatabase(db, {
+        allowLiveActivityScheduling: false,
+      }).catch(() => null);
     }
 
     return {

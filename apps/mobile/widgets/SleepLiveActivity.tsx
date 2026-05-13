@@ -138,29 +138,6 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
           ? 'Progress'
           : 'Score';
 
-  function formatRelativeLabel(referenceDate: Date, countsDown: boolean) {
-    const deltaMs = countsDown ? referenceDate.getTime() - Date.now() : Date.now() - referenceDate.getTime();
-
-    if (deltaMs < 60_000) {
-      return 'Now';
-    }
-
-    if (deltaMs < 60 * 60_000) {
-      const minutes = Math.floor(deltaMs / 60_000);
-      return `${Math.max(1, minutes)} min`;
-    }
-
-    const totalMinutes = Math.floor(deltaMs / 60_000);
-    const hours = Math.floor(totalMinutes / 60);
-    const minutes = totalMinutes % 60;
-
-    return `${hours}:${minutes.toString().padStart(2, '0')}`;
-  }
-
-  const rightHandMetricText = rightHandReferenceDate
-    ? formatRelativeLabel(rightHandReferenceDate, rightHandCountsDown)
-    : null;
-
   function ActivityRing({ size }: { size: number }) {
     return (
       <ZStack alignment="center" modifiers={[frame({ width: size, height: size })]}>
@@ -189,17 +166,18 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
   }
 
   function ActivityMetric({ size, staticColor }: { size: number; staticColor: string }) {
-    if (rightHandMetricText) {
+    if (rightHandReferenceDate) {
       return (
         <Text
+          compactTimerCountsDown={rightHandCountsDown}
+          compactTimerDate={rightHandReferenceDate}
           modifiers={[
             font({ size, weight: 'bold', design: 'rounded' }),
             foregroundStyle(rightHandTimerColor),
             monospacedDigit(),
             lineLimit(1),
-          ]}>
-          {rightHandMetricText}
-        </Text>
+          ]}
+        />
       );
     }
 
@@ -217,17 +195,18 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
   }
 
   function CompactTrailingMetric() {
-    if (rightHandMetricText) {
+    if (rightHandReferenceDate) {
       return (
         <Text
+          compactTimerCountsDown={rightHandCountsDown}
+          compactTimerDate={rightHandReferenceDate}
           modifiers={[
             font({ size: 14, weight: 'bold', design: 'rounded' }),
             foregroundStyle(rightHandTimerColor),
             monospacedDigit(),
             lineLimit(1),
-          ]}>
-          {rightHandMetricText}
-        </Text>
+          ]}
+        />
       );
     }
 

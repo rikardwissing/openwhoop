@@ -135,23 +135,30 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
   const windDownActive = props.sleepThemeActive && props.sleepThemeLabel === 'Time to wind down';
   const plannedSleepProgressValue = Math.max(6, Math.min(96, Math.round(props.progress * 100)));
   const sleepProgressValue = Math.max(6, Math.min(96, Math.round(props.sleepProgress * 100)));
-  const sleepWindowProgressActive = props.sleepInProgress || props.bedtimePassed;
-  const ringValue = props.sleepInProgress
+  const projectedSleepActive = props.sleepInProgress;
+  const postBedtimeActive = props.bedtimePassed && !props.sleepInProgress;
+  const ringValue = projectedSleepActive
     ? sleepProgressValue
-    : props.bedtimePassed
+    : postBedtimeActive
       ? plannedSleepProgressValue
       : windDownActive
         ? 0
         : scoreValue;
-  const ringText = sleepWindowProgressActive || windDownActive ? `${ringValue}` : scoreText;
-  const scoreHeadline = sleepWindowProgressActive || windDownActive
+  const ringText = projectedSleepActive ? `${ringValue}` : scoreText;
+  const scoreHeadline = projectedSleepActive
     ? `Sleep ${ringValue}`
     : props.score === null
       ? 'Sleep --'
       : `Sleep ${scoreText}`;
   const scoreRingColor =
     props.score === null ? accent : props.score >= 80 ? success : props.score >= 65 ? caution : alert;
-  const ringColor = sleepWindowProgressActive ? sleepAccent : windDownActive ? sleepCyan : props.sleepThemeActive ? sleepWarm : scoreRingColor;
+  const ringColor = projectedSleepActive
+    ? sleepAccent
+    : windDownActive
+      ? sleepCyan
+      : postBedtimeActive || props.sleepThemeActive
+        ? sleepWarm
+        : scoreRingColor;
   const scoreTextColor =
     props.score === null
       ? resolvedText
@@ -168,10 +175,10 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
   const wakeValue = props.sleepInProgress || props.bedtimePassed ? props.projectedSleepLabel : props.wakeLabel;
   const lockscreenBedtimeValue = props.bedtimePassed ? `${bedtimeValue}!` : bedtimeValue;
   const greetingColor = props.sleepThemeActive ? sleepCyan : success;
-  const inlineLead = props.sleepInProgress ? 'Sleep in progress' : props.bedtimePassed ? scoreHeadline : windDownActive ? 'Wind down' : scoreHeadline;
+  const inlineLead = projectedSleepActive ? scoreHeadline : postBedtimeActive ? 'Past bedtime' : windDownActive ? 'Wind down' : scoreHeadline;
   const lockscreenThemeLabel = windDownActive ? 'Wind down now' : props.sleepThemeLabel;
   const smallBedtimeTitle = props.sleepThemeActive ? props.sleepThemeLabel : bedtimeTitle;
-  const showSleepThemeIcon = props.sleepInProgress || (props.sleepThemeActive && !sleepWindowProgressActive);
+  const showSleepThemeIcon = props.sleepThemeActive && !projectedSleepActive;
   const homeWidgetURL = 'btwearable://';
 
   function Metric({ label, value }: { label: string; value: string }) {
@@ -320,7 +327,7 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
             <VStack alignment="center" spacing={4}>
               <ScoreRing size={88} />
               <Text modifiers={[font({ size: 10, weight: 'semibold' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-                {sleepWindowProgressActive ? 'Progress' : props.sleepThemeActive ? 'Wind down' : 'Last sleep'}
+                {projectedSleepActive ? 'Progress' : postBedtimeActive ? 'Bedtime' : props.sleepThemeActive ? 'Wind down' : 'Last sleep'}
               </Text>
             </VStack>
 
