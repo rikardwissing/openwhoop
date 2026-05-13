@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Alert, Image, Pressable, StyleSheet, Switch, Text, View } from 'react-native';
+import { Alert, Image, Platform, Pressable, StyleSheet, Switch, Text, View } from 'react-native';
 import { useRouter } from 'expo-router';
 
 import {
@@ -26,6 +26,7 @@ import {
   useWearableSyncState,
 } from '@/providers/WearableSyncProvider';
 import { exportAndShareDatabaseSnapshot } from '@/services/databaseExport';
+import { previewSleepSurfaces, restoreSleepSurfacePreview, type SleepSurfacePreviewMode } from '@/services/widgets/tonightWidget';
 import {
   BACKGROUND_DEVICE_SYNC_INTERVAL_MINUTES,
   BACKGROUND_DEVICE_SYNC_TIME_BUDGET_MS,
@@ -337,6 +338,13 @@ export function SettingsScreen() {
     status: 'idle',
     message: 'Run the bounded background sync path immediately for the selected wearable.',
   });
+  const [liveActivityPreviewState, setLiveActivityPreviewState] = useState<{
+    status: 'idle' | 'running' | 'success' | 'error';
+    message: string;
+  }>({
+    status: 'idle',
+    message: 'Start a local iPhone preview for the wind-down or sleep Live Activity, then restore the real live state when you are done.',
+  });
   const deviceBusy = isBlockingSyncStatus(progress.status);
   const maintenanceBusy = maintenanceState.status === 'running';
   const activityRescanBusy = activityRescanState.status === 'running';
@@ -386,6 +394,18 @@ export function SettingsScreen() {
     performanceSweepState.status === 'running' ||
     clearDataState.status === 'running' ||
     appleHealthExportState.status === 'running';
+  const liveActivityPreviewDisabled =
+    Platform.OS !== 'ios' ||
+    progress.status === 'scanning' ||
+    deviceBusy ||
+    maintenanceBusy ||
+    activityRescanBusy ||
+    exportState.status === 'running' ||
+    performanceSweepState.status === 'running' ||
+    clearDataState.status === 'running' ||
+    appleHealthExportState.status === 'running' ||
+    backgroundDeviceSyncBusy ||
+    liveActivityPreviewState.status === 'running';
 
   async function refreshBackgroundDeviceSyncRegistrationState() {
     setBackgroundDeviceSyncRegistrationState({
@@ -460,6 +480,58 @@ export function SettingsScreen() {
       });
     } finally {
       await refreshBackgroundDeviceSyncRegistrationState();
+    }
+  }
+
+  async function handlePreviewSleepSurface(mode: SleepSurfacePreviewMode) {
+    setLiveActivityPreviewState({
+      status: 'running',
+      message: mode === 'wind_down' ? 'Starting wind-down preview for widgets and Live Activity...' : 'Starting sleep preview for widgets and Live Activity...',
+    });
+
+    try {
+      const snapshot = await repository.getSleepHistory('14d');
+      await previewSleepSurfaces(
+        {
+          ...snapshot,
+          batteryPercent: deviceState.batteryPercent,
+          chargingStatus: deviceState.chargingStatus,
+        },
+        mode,
+      );
+
+      setLiveActivityPreviewState({
+        status: 'success',
+        message:
+          mode === 'wind_down'
+            ? 'Wind-down preview is active in the widgets, Lock Screen, and Dynamic Island until you restore the live state.'
+            : 'Sleep preview is active in the widgets, Lock Screen, and Dynamic Island until you restore the live state.',
+      });
+    } catch (error) {
+      setLiveActivityPreviewState({
+        status: 'error',
+        message: error instanceof Error ? error.message : 'Unable to start the sleep surface preview.',
+      });
+    }
+  }
+
+  async function handleRestoreSleepSurfacePreview() {
+    setLiveActivityPreviewState({
+      status: 'running',
+      message: 'Restoring the current widget and Live Activity state...',
+    });
+
+    try {
+      await restoreSleepSurfacePreview();
+      setLiveActivityPreviewState({
+        status: 'success',
+        message: 'Restored the current widget and Live Activity state from the latest real sleep snapshot.',
+      });
+    } catch (error) {
+      setLiveActivityPreviewState({
+        status: 'error',
+        message: error instanceof Error ? error.message : 'Unable to restore the sleep surface state.',
+      });
     }
   }
 
@@ -871,6 +943,60 @@ export function SettingsScreen() {
 
           <Text style={styles.settingSubtitle}>
             Session log stores the latest {liveEvents.length} meaningful wearable events seen since this app session started.
+          </Text>
+        </View>
+      </GlassCard>
+
+      <GlassCard accentColor={colors.primary}>
+        <SectionHeader title="Sleep Surface Preview" trailing={Platform.OS === 'ios' ? 'iPhone' : 'Unavailable'} />
+        <View style={styles.settingColumn}>
+          <View>
+            <Text style={styles.settingTitle}>Preview sleep states</Text>
+            <Text style={styles.settingSubtitle}>
+              Start a local preview for wind-down or sleep in progress without waiting for the real schedule to become active.
+              The preview updates home and lock-screen widgets plus the Live Activity together.
+            </Text>
+          </View>
+
+          <View style={styles.buttonRow}>
+            <ActionButton
+              label="Preview Wind Down"
+              onPress={() => {
+                void handlePreviewSleepSurface('wind_down');
+              }}
+              disabled={liveActivityPreviewDisabled}
+              tone="secondary"
+            />
+            <ActionButton
+              label="Preview Sleep"
+              onPress={() => {
+                void handlePreviewSleepSurface('sleep_in_progress');
+              }}
+              disabled={liveActivityPreviewDisabled}
+              tone="secondary"
+            />
+          </View>
+
+          <View style={styles.buttonRow}>
+            <ActionButton
+              label="Restore Live State"
+              onPress={() => {
+                void handleRestoreSleepSurfacePreview();
+              }}
+              disabled={liveActivityPreviewDisabled}
+              tone="secondary"
+            />
+          </View>
+
+          <Text
+            style={[
+              styles.roadmapText,
+              liveActivityPreviewState.status === 'error' ? styles.errorText : null,
+              liveActivityPreviewState.status === 'success' ? styles.successText : null,
+            ]}>
+            {Platform.OS === 'ios'
+              ? liveActivityPreviewState.message
+              : 'Sleep surface preview is only available on iPhone builds.'}
           </Text>
         </View>
       </GlassCard>

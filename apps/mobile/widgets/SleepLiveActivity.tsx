@@ -1,37 +1,37 @@
-import { Gauge, HStack, Image, Spacer, Text, VStack, ZStack } from '@expo/ui/swift-ui';
+import { HStack, Image, Text, VStack } from '@expo/ui/swift-ui';
 import {
   font,
   foregroundStyle,
-  frame,
-  gaugeStyle,
   lineLimit,
   monospacedDigit,
   padding,
-  tint,
 } from '@expo/ui/swift-ui/modifiers';
 import { createLiveActivity } from 'expo-widgets';
 
 import type { TonightWidgetProps } from '@/widgets/TonightWidget';
 
-const PRIMARY_ICON = 'moon.zzz.fill';
+type SleepLiveActivityEnvironment = {
+  colorScheme?: 'light' | 'dark';
+};
 
-function clamp(value: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, value));
-}
-
-const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
+const SleepLiveActivityComponent = (
+  rawProps: TonightWidgetProps,
+  environment: SleepLiveActivityEnvironment = {},
+) => {
   'widget';
 
+  const primaryIcon = 'moon.zzz.fill';
+  const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
   const accent = '#52D8E8';
   const caution = '#ffd26b';
   const alert = '#ff7d70';
   const success = '#8dffb3';
-  const secondary = '#BCB8D8';
-  const subtle = '#8582A9';
-  const text = '#F8F4FF';
-  const sleepAccent = '#B7B2FF';
-  const sleepCyan = '#78E6F4';
-  const sleepWarm = '#F4C66A';
+  const isDark = environment.colorScheme !== 'light';
+  const text = isDark ? '#F8FAFC' : '#0F172A';
+  const secondary = isDark ? '#CBD5E1' : '#475569';
+  const subtle = isDark ? '#94A3B8' : '#64748B';
+  const sleepAccent = isDark ? '#B7B2FF' : '#4F46E5';
+  const sleepCyan = isDark ? '#78E6F4' : '#0284C7';
 
   const defaultProps: Required<TonightWidgetProps> = {
     alarmStatusLabel: 'Open Unstrap',
@@ -83,7 +83,7 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
   const scoreRingColor =
     props.score === null ? accent : props.score >= 80 ? success : props.score >= 65 ? caution : alert;
   const ringColor = sleepWindowProgressActive ? sleepAccent : windDownActive ? sleepCyan : scoreRingColor;
-  const headline = windDownActive ? 'Wind down now' : props.sleepThemeLabel;
+  const headline = windDownActive ? 'Wind down now' : props.sleepInProgress ? 'Sleep in progress' : props.sleepThemeLabel;
   const scheduleLine = props.sleepInProgress || props.bedtimePassed
     ? `Done by ${props.projectedSleepLabel}`
     : `Bed ${props.bedtimeLabel} · Wake ${props.wakeLabel}`;
@@ -94,83 +94,58 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
       : `Bed ${props.bedtimeLabel} · Wake ${props.wakeLabel}`;
   const compactTrailingText = windDownActive ? 'Now' : sleepWindowProgressActive ? `${ringValue}` : props.bedtimeLabel;
   const compactLeadingColor = windDownActive ? sleepCyan : sleepAccent;
-  const showSleepThemeIcon = props.sleepInProgress || windDownActive;
+  const activityLabel = windDownActive ? 'Wind down' : sleepWindowProgressActive ? 'Progress' : 'Sleep score';
   const batteryLabel = props.batteryLabel?.trim() || defaultProps.batteryLabel;
 
-  function ActivityRing({ size }: { size: number }) {
-    return (
-      <ZStack alignment="center" modifiers={[frame({ width: size, height: size })]}>
-        <Gauge
-          value={ringValue}
-          min={0}
-          max={100}
-          modifiers={[gaugeStyle('circularCapacity'), tint(ringColor), frame({ width: size, height: size })]}
-        />
+  return {
+    banner: (
+      <HStack alignment="center" spacing={12} modifiers={[padding({ all: 12 })]}>
+        <Image color={ringColor} size={22} systemName={primaryIcon} />
 
-        {showSleepThemeIcon ? (
-          <Image color={ringColor} size={size >= 56 ? 22 : 16} systemName={PRIMARY_ICON} />
-        ) : (
+        <VStack alignment="leading" spacing={2}>
+          <Text modifiers={[font({ size: 16, weight: 'bold' }), foregroundStyle(text), lineLimit(1)]}>
+            {headline}
+          </Text>
+          <Text modifiers={[font({ size: 13, weight: 'semibold' }), foregroundStyle(secondary), lineLimit(1)]}>
+            {scheduleLine}
+          </Text>
+          <Text modifiers={[font({ size: 12, weight: 'medium' }), foregroundStyle(subtle), lineLimit(1)]}>
+            {detailLine}
+          </Text>
+        </VStack>
+
+        <VStack alignment="trailing" spacing={2}>
+          <Text modifiers={[font({ size: 11, weight: 'semibold' }), foregroundStyle(subtle), lineLimit(1)]}>
+            {activityLabel}
+          </Text>
           <Text
             modifiers={[
-              font({ size: size >= 56 ? 22 : 15, weight: 'bold', design: 'rounded' }),
-              foregroundStyle(text),
+              font({ size: 22, weight: 'bold' }),
+              foregroundStyle(ringColor),
               monospacedDigit(),
               lineLimit(1),
             ]}>
             {ringText}
           </Text>
-        )}
-      </ZStack>
-    );
-  }
-
-  const banner = (
-    <HStack alignment="center" spacing={12} modifiers={[padding({ all: 14 })]}>
-      <ActivityRing size={56} />
-
-      <VStack alignment="leading" spacing={2}>
-        <Text modifiers={[font({ size: 16, weight: 'bold' }), foregroundStyle(text), lineLimit(1)]}>
+          <Text modifiers={[font({ size: 11, weight: 'medium' }), foregroundStyle(subtle), lineLimit(1)]}>
+            {batteryLabel}
+          </Text>
+        </VStack>
+      </HStack>
+    ),
+    bannerSmall: (
+      <HStack alignment="center" spacing={8} modifiers={[padding({ all: 10 })]}>
+        <Image color={ringColor} size={16} systemName={primaryIcon} />
+        <Text modifiers={[font({ size: 13, weight: 'semibold' }), foregroundStyle(text), lineLimit(1)]}>
           {headline}
         </Text>
-        <Text modifiers={[font({ size: 13, weight: 'semibold' }), foregroundStyle(text), lineLimit(1)]}>
-          {scheduleLine}
-        </Text>
-        <Text modifiers={[font({ size: 12, weight: 'medium' }), foregroundStyle(subtle), lineLimit(1)]}>
-          {detailLine}
-        </Text>
-      </VStack>
-
-      <Spacer />
-
-      <VStack alignment="trailing" spacing={2}>
-        <Text
-          modifiers={[
-            font({ size: 20, weight: 'bold', design: 'rounded' }),
-            foregroundStyle(ringColor),
-            monospacedDigit(),
-            lineLimit(1),
-          ]}>
-          {ringText}
-        </Text>
-        <Text modifiers={[font({ size: 11, weight: 'medium' }), foregroundStyle(subtle), lineLimit(1)]}>
-          {batteryLabel}
-        </Text>
-      </VStack>
-    </HStack>
-  );
-
-  return {
-    banner,
-    bannerSmall: (
-      <Text modifiers={[font({ size: 13, weight: 'semibold' }), foregroundStyle(text), padding({ all: 10 }), lineLimit(1)]}>
-        {headline}
-      </Text>
+      </HStack>
     ),
-    compactLeading: <Image color={compactLeadingColor} size={16} systemName={PRIMARY_ICON} />,
+    compactLeading: <Image color={compactLeadingColor} size={16} systemName={primaryIcon} />,
     compactTrailing: (
       <Text
         modifiers={[
-          font({ size: 14, weight: 'bold', design: 'rounded' }),
+          font({ size: 14, weight: 'bold' }),
           foregroundStyle(text),
           monospacedDigit(),
           lineLimit(1),
@@ -178,14 +153,21 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
         {compactTrailingText}
       </Text>
     ),
-    minimal: <Image color={compactLeadingColor} size={15} systemName={PRIMARY_ICON} />,
-    expandedLeading: <ActivityRing size={68} />,
+    minimal: <Image color={compactLeadingColor} size={15} systemName={primaryIcon} />,
+    expandedLeading: (
+      <VStack alignment="leading" spacing={4} modifiers={[padding({ all: 12 })]}>
+        <Image color={ringColor} size={24} systemName={primaryIcon} />
+        <Text modifiers={[font({ size: 12, weight: 'semibold' }), foregroundStyle(subtle), lineLimit(1)]}>
+          {windDownActive ? 'Wind down' : props.sleepInProgress ? 'Sleeping' : 'Tonight'}
+        </Text>
+      </VStack>
+    ),
     expandedCenter: (
-      <VStack alignment="leading" spacing={4} modifiers={[padding({ leading: 6 })]}>
+      <VStack alignment="leading" spacing={4} modifiers={[padding({ all: 12 })]}>
         <Text modifiers={[font({ size: 15, weight: 'bold' }), foregroundStyle(text), lineLimit(1)]}>
           {headline}
         </Text>
-        <Text modifiers={[font({ size: 13, weight: 'semibold' }), foregroundStyle(text), lineLimit(1)]}>
+        <Text modifiers={[font({ size: 13, weight: 'semibold' }), foregroundStyle(secondary), lineLimit(1)]}>
           {scheduleLine}
         </Text>
         <Text modifiers={[font({ size: 12, weight: 'medium' }), foregroundStyle(subtle), lineLimit(1)]}>
@@ -194,13 +176,13 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
       </VStack>
     ),
     expandedTrailing: (
-      <VStack alignment="trailing" spacing={4}>
+      <VStack alignment="trailing" spacing={4} modifiers={[padding({ all: 12 })]}>
         <Text modifiers={[font({ size: 10, weight: 'semibold' }), foregroundStyle(subtle), lineLimit(1)]}>
-          {sleepWindowProgressActive ? 'Progress' : windDownActive ? 'Window' : 'Score'}
+          {activityLabel}
         </Text>
         <Text
           modifiers={[
-            font({ size: 26, weight: 'bold', design: 'rounded' }),
+            font({ size: 26, weight: 'bold' }),
             foregroundStyle(ringColor),
             monospacedDigit(),
             lineLimit(1),

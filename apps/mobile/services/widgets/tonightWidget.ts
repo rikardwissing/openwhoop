@@ -14,6 +14,8 @@ import type { TonightWidgetProps } from '@/widgets/TonightWidget';
 
 const TIMELINE_WINDOW_MS = 30 * 60 * 60 * 1000;
 const LIVE_ACTIVITY_URL = 'btwearable://';
+const LIVE_ACTIVITY_WIND_DOWN_PREVIEW_MINUTES = 30;
+const LIVE_ACTIVITY_SLEEP_PREVIEW_MINUTES = 120;
 type TonightWidgetSnapshot = Pick<
   SleepHistoryData,
   'sleepPlan' | 'headlineLabel' | 'headlineScore' | 'completionStatus' | 'isInProgress' | 'sessions'
@@ -21,6 +23,7 @@ type TonightWidgetSnapshot = Pick<
   batteryPercent?: number | null;
   chargingStatus?: 'charging' | 'not_charging' | null;
 };
+export type SleepSurfacePreviewMode = 'wind_down' | 'sleep_in_progress';
 type ExpoWidgetsModule = {
   reloadAllWidgets(): void;
 };
@@ -28,6 +31,7 @@ type ExpoWidgetsModule = {
 let expoWidgetsModule: ExpoWidgetsModule | null = null;
 let lastKnownBatteryPercent: number | null = null;
 let lastSnapshot: TonightWidgetSnapshot | null = null;
+let sleepSurfacePreviewProps: TonightWidgetProps | null = null;
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
@@ -189,6 +193,25 @@ export function buildTonightWidgetTimeline(snapshot: TonightWidgetSnapshot, now 
   }));
 }
 
+function buildPreviewWidgetTimeline(props: TonightWidgetProps, now = new Date()) {
+  return [
+    {
+      date: now,
+      props,
+    },
+  ];
+}
+
+function syncTonightWidgetPreviewOrLive(snapshot: TonightWidgetSnapshot) {
+  try {
+    TonightWidget.updateTimeline(
+      sleepSurfacePreviewProps
+        ? buildPreviewWidgetTimeline(sleepSurfacePreviewProps)
+        : buildTonightWidgetTimeline(snapshot),
+    );
+  } catch {}
+}
+
 function getSleepLiveActivityInstances() {
   try {
     return SleepLiveActivity.getInstances();
@@ -197,20 +220,20 @@ function getSleepLiveActivityInstances() {
   }
 }
 
-async function syncSleepLiveActivity(snapshot: TonightWidgetSnapshot) {
-  const props = buildTonightWidgetProps(snapshot);
+async function endSleepLiveActivities() {
   const instances = getSleepLiveActivityInstances();
 
-  if (!props.sleepThemeActive) {
-    await Promise.all(
-      instances.map(async (instance) => {
-        try {
-          await instance.end('immediate');
-        } catch {}
-      }),
-    );
-    return;
-  }
+  await Promise.all(
+    instances.map(async (instance) => {
+      try {
+        await instance.end('immediate');
+      } catch {}
+    }),
+  );
+}
+
+async function startOrUpdateSleepLiveActivity(props: TonightWidgetProps) {
+  const instances = getSleepLiveActivityInstances();
 
   if (instances.length === 0) {
     try {
@@ -228,6 +251,96 @@ async function syncSleepLiveActivity(snapshot: TonightWidgetSnapshot) {
   );
 }
 
+function buildSleepSurfacePreviewProps(
+  snapshot: TonightWidgetSnapshot,
+  mode: SleepSurfacePreviewMode,
+) {
+  const { bedtimeDate, wakeDate } = resolveSleepPlanWindow(snapshot.sleepPlan, new Date());
+
+  if (mode === 'wind_down') {
+    const previewDate = new Date(bedtimeDate.getTime() - LIVE_ACTIVITY_WIND_DOWN_PREVIEW_MINUTES * 60_000);
+    const previewProps = buildTonightWidgetProps(snapshot, previewDate);
+
+    return {
+      ...previewProps,
+      greetingLabel: 'Time to wind down',
+      sleepThemeActive: true,
+      sleepThemeLabel: 'Time to wind down',
+    } satisfies TonightWidgetProps;
+  }
+
+  const previewDate = new Date(
+    Math.min(
+      wakeDate.getTime() - 60_000,
+      bedtimeDate.getTime() + LIVE_ACTIVITY_SLEEP_PREVIEW_MINUTES * 60_000,
+    ),
+  );
+  const previewProps = buildTonightWidgetProps(snapshot, previewDate);
+  const previewSleepProgress = clamp(
+    (previewDate.getTime() - bedtimeDate.getTime()) / Math.max(1, snapshot.sleepPlan.sleepNeedMinutes * 60_000),
+    0.06,
+    0.96,
+  );
+
+  return {
+    ...previewProps,
+    bedtimeLabel: 'Now',
+    bedtimePassed: false,
+    greetingLabel: 'Sleep in progress',
+    phaseLabel: 'Sleep in progress',
+    projectedSleepLabel: formatClock(new Date(bedtimeDate.getTime() + snapshot.sleepPlan.sleepNeedMinutes * 60_000)),
+    sleepInProgress: true,
+    sleepProgress: previewSleepProgress,
+    sleepThemeActive: true,
+    sleepThemeLabel: 'Sleep in progress',
+  } satisfies TonightWidgetProps;
+}
+
+async function syncSleepLiveActivity(snapshot: TonightWidgetSnapshot) {
+  const props = sleepSurfacePreviewProps ?? buildTonightWidgetProps(snapshot);
+
+  if (!props.sleepThemeActive) {
+    await endSleepLiveActivities();
+    return;
+  }
+
+  await startOrUpdateSleepLiveActivity(props);
+}
+
+export async function previewSleepSurfaces(
+  snapshot: TonightWidgetSnapshot,
+  mode: SleepSurfacePreviewMode,
+) {
+  if (Platform.OS !== 'ios') {
+    return;
+  }
+
+  lastSnapshot = {
+    ...snapshot,
+    batteryPercent: snapshot.batteryPercent ?? lastSnapshot?.batteryPercent,
+    chargingStatus: snapshot.chargingStatus ?? lastSnapshot?.chargingStatus,
+  };
+
+  sleepSurfacePreviewProps = buildSleepSurfacePreviewProps(lastSnapshot, mode);
+  syncTonightWidgetPreviewOrLive(lastSnapshot);
+  await startOrUpdateSleepLiveActivity(sleepSurfacePreviewProps);
+}
+
+export async function restoreSleepSurfacePreview() {
+  if (Platform.OS !== 'ios') {
+    return;
+  }
+
+  sleepSurfacePreviewProps = null;
+
+  if (lastSnapshot) {
+    await applyTonightWidgetSnapshot(lastSnapshot);
+    return;
+  }
+
+  await endSleepLiveActivities();
+}
+
 async function applyTonightWidgetSnapshot(snapshot: TonightWidgetSnapshot) {
   lastSnapshot = {
     ...snapshot,
@@ -235,9 +348,7 @@ async function applyTonightWidgetSnapshot(snapshot: TonightWidgetSnapshot) {
     chargingStatus: snapshot.chargingStatus ?? lastSnapshot?.chargingStatus,
   };
 
-  try {
-    TonightWidget.updateTimeline(buildTonightWidgetTimeline(lastSnapshot));
-  } catch {}
+  syncTonightWidgetPreviewOrLive(lastSnapshot);
 
   await syncSleepLiveActivity(lastSnapshot).catch(() => {});
 
@@ -256,7 +367,13 @@ export async function registerTonightWidgetLayout() {
   getSleepLiveActivityInstances();
 
   if (lastSnapshot) {
-    await syncSleepLiveActivity(lastSnapshot).catch(() => {});
+    await applyTonightWidgetSnapshot(lastSnapshot).catch(() => {});
+  } else if (sleepSurfacePreviewProps) {
+    try {
+      TonightWidget.updateTimeline(buildPreviewWidgetTimeline(sleepSurfacePreviewProps));
+    } catch {}
+
+    await startOrUpdateSleepLiveActivity(sleepSurfacePreviewProps).catch(() => {});
   }
 
   reloadAllWidgetSnapshots();
