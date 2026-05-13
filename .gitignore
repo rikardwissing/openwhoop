@@ -9,3 +9,5 @@ apps/.DS_Store
 /tmp
 tmp/.DS_Store
 .DS_Store
+apps/mobile/assets/databases/btwearable.db-wal
+apps/mobile/assets/databases/btwearable.db-shm

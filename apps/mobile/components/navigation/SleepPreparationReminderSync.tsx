@@ -1,4 +1,5 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
+import { AppState } from 'react-native';
 
 import { useHealthDataVersion, useHealthRepository } from '@/providers/HealthDataProvider';
 import { useWearableSyncState } from '@/providers/WearableSyncProvider';
@@ -9,6 +10,19 @@ export function SleepPreparationReminderSync() {
   const repository = useHealthRepository();
   const version = useHealthDataVersion('sleep');
   const { deviceState } = useWearableSyncState();
+  const [resumeTick, setResumeTick] = useState(0);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'active') {
+        setResumeTick((value) => value + 1);
+      }
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -36,7 +50,7 @@ export function SleepPreparationReminderSync() {
     return () => {
       cancelled = true;
     };
-  }, [deviceState.batteryPercent, deviceState.chargingStatus, repository, version]);
+  }, [deviceState.batteryPercent, deviceState.chargingStatus, repository, resumeTick, version]);
 
   return null;
 }

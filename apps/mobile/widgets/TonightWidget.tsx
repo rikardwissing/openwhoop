@@ -26,7 +26,11 @@ export interface TonightWidgetProps {
   score?: number | null;
   scoreLabel?: string;
   sleepDebtLabel?: string;
+  sleepInProgress?: boolean;
   sleepNeedLabel?: string;
+  sleepProgress?: number;
+  sleepThemeActive?: boolean;
+  sleepThemeLabel?: string;
   updatedAtLabel?: string;
   wakeLabel?: string;
 }
@@ -42,6 +46,13 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
   const subtle = '#7684A6';
   const text = '#F6F8FF';
   const widgetBackground = '#0F172A';
+  const sleepAccent = '#B7B2FF';
+  const sleepCyan = '#78E6F4';
+  const sleepSecondary = '#BCB8D8';
+  const sleepSubtle = '#8582A9';
+  const sleepText = '#F8F4FF';
+  const sleepWarm = '#F4C66A';
+  const sleepWidgetBackground = '#080B1F';
   const defaultProps: Required<TonightWidgetProps> = {
     alarmStatusLabel: 'Open Unstrap',
     batteryCharging: false,
@@ -55,7 +66,11 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
     score: null,
     scoreLabel: 'Waiting for sleep',
     sleepDebtLabel: 'Sync to update',
+    sleepInProgress: false,
     sleepNeedLabel: 'Need --',
+    sleepProgress: 0,
+    sleepThemeActive: false,
+    sleepThemeLabel: 'Tonight plan',
     updatedAtLabel: '--',
     wakeLabel: '--',
   };
@@ -64,6 +79,7 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
     ...defaultProps,
     ...rawProps,
     progress: Math.max(0, Math.min(1, rawProps.progress ?? defaultProps.progress)),
+    sleepProgress: Math.max(0, Math.min(1, rawProps.sleepProgress ?? defaultProps.sleepProgress)),
     score:
       rawProps.score === null || rawProps.score === undefined
         ? defaultProps.score
@@ -104,31 +120,54 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
   })();
 
   const accessoryFamily = environment.widgetFamily.startsWith('accessory');
-  const primaryColor = accessoryFamily ? { type: 'hierarchical' as const, style: 'primary' as const } : text;
-  const secondaryColor = accessoryFamily ? { type: 'hierarchical' as const, style: 'secondary' as const } : secondary;
+  const widgetBackgroundColor = props.sleepThemeActive ? sleepWidgetBackground : widgetBackground;
+  const resolvedText = props.sleepThemeActive ? sleepText : text;
+  const resolvedSecondary = props.sleepThemeActive ? sleepSecondary : secondary;
+  const resolvedSubtle = props.sleepThemeActive ? sleepSubtle : subtle;
+  const primaryColor = accessoryFamily ? { type: 'hierarchical' as const, style: 'primary' as const } : resolvedText;
+  const secondaryColor = accessoryFamily ? { type: 'hierarchical' as const, style: 'secondary' as const } : resolvedSecondary;
   const scoreValue = props.score === null ? 0 : Math.round(props.score);
   const scoreText = props.score === null ? '--' : `${scoreValue}`;
-  const scoreHeadline = props.score === null ? 'Sleep --' : `Sleep ${scoreText}%`;
+  const windDownActive = props.sleepThemeActive && props.sleepThemeLabel === 'Time to wind down';
+  const plannedSleepProgressValue = Math.max(6, Math.min(96, Math.round(props.progress * 100)));
+  const sleepProgressValue = Math.max(6, Math.min(96, Math.round(props.sleepProgress * 100)));
+  const sleepWindowProgressActive = props.sleepInProgress || props.bedtimePassed;
+  const ringValue = props.sleepInProgress
+    ? sleepProgressValue
+    : props.bedtimePassed
+      ? plannedSleepProgressValue
+      : windDownActive
+        ? 0
+        : scoreValue;
+  const ringText = sleepWindowProgressActive || windDownActive ? `${ringValue}` : scoreText;
+  const scoreHeadline = sleepWindowProgressActive || windDownActive
+    ? `Sleep ${ringValue}`
+    : props.score === null
+      ? 'Sleep --'
+      : `Sleep ${scoreText}`;
   const scoreRingColor =
     props.score === null ? accent : props.score >= 80 ? success : props.score >= 65 ? caution : alert;
+  const ringColor = sleepWindowProgressActive ? sleepAccent : windDownActive ? sleepCyan : props.sleepThemeActive ? sleepWarm : scoreRingColor;
   const scoreTextColor =
     props.score === null
-      ? text
+      ? resolvedText
       : props.score >= 80
         ? '#f5fff8'
         : props.score >= 65
           ? '#fff8ee'
           : '#fff3f1';
-  const bedtimeColor = props.bedtimePassed ? alert : primaryColor;
-  const bedtimeTitle = props.bedtimePassed ? 'Past bedtime' : "Tonight's bedtime";
+  const ringTextColor = props.sleepThemeActive ? resolvedText : scoreTextColor;
+  const bedtimeColor = props.sleepInProgress ? sleepWarm : props.bedtimePassed ? alert : primaryColor;
+  const bedtimeTitle = props.sleepInProgress ? 'Sleep started' : props.bedtimePassed ? 'Past bedtime' : "Tonight's bedtime";
   const bedtimeValue = props.bedtimePassed ? 'Now' : props.bedtimeLabel;
-  const wakeTitle = props.bedtimePassed ? '100% by' : 'Wake';
-  const wakeValue = props.bedtimePassed ? props.projectedSleepLabel : props.wakeLabel;
+  const wakeTitle = props.sleepInProgress || props.bedtimePassed ? 'Done by' : 'Wake';
+  const wakeValue = props.sleepInProgress || props.bedtimePassed ? props.projectedSleepLabel : props.wakeLabel;
   const lockscreenBedtimeValue = props.bedtimePassed ? `${bedtimeValue}!` : bedtimeValue;
-  const windDownActive = props.greetingLabel === 'Time to wind down';
-  const greetingColor = success;
-  const inlineLead = windDownActive ? 'Wind down' : props.bedtimePassed ? 'Bedtime' : scoreHeadline;
-  const smallBedtimeTitle = windDownActive ? 'Time to wind down' : bedtimeTitle;
+  const greetingColor = props.sleepThemeActive ? sleepCyan : success;
+  const inlineLead = props.sleepInProgress ? 'Sleep in progress' : props.bedtimePassed ? scoreHeadline : windDownActive ? 'Wind down' : scoreHeadline;
+  const lockscreenThemeLabel = windDownActive ? 'Wind down now' : props.sleepThemeLabel;
+  const smallBedtimeTitle = props.sleepThemeActive ? props.sleepThemeLabel : bedtimeTitle;
+  const showSleepThemeIcon = props.sleepInProgress || (props.sleepThemeActive && !sleepWindowProgressActive);
   const homeWidgetURL = 'btwearable://';
 
   function Metric({ label, value }: { label: string; value: string }) {
@@ -154,31 +193,35 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
     return (
       <ZStack alignment="center" modifiers={[frame({ width: size, height: size })]}>
         <Gauge
-          value={scoreValue}
+          value={ringValue}
           min={0}
           max={100}
-          modifiers={[gaugeStyle('circularCapacity'), tint(scoreRingColor), frame({ width: size, height: size })]}
+          modifiers={[gaugeStyle('circularCapacity'), tint(ringColor), frame({ width: size, height: size })]}
         />
 
-        <Text
-          modifiers={[
-            font({
-              size: scoreFontSize ?? (size >= 88 ? 26 : size >= 74 ? 23 : 18),
-              weight: 'bold',
-              design: 'rounded',
-            }),
-            foregroundStyle(scoreTextColor),
-            monospacedDigit(),
-            lineLimit(1),
-          ]}>
-          {scoreText}
-        </Text>
+        {showSleepThemeIcon ? (
+          <Image color={ringColor} size={size >= 88 ? 26 : size >= 74 ? 26 : 20} systemName="moon.zzz.fill" />
+        ) : (
+          <Text
+            modifiers={[
+              font({
+                size: scoreFontSize ?? (size >= 88 ? 26 : size >= 74 ? 23 : 18),
+                weight: 'bold',
+                design: 'rounded',
+              }),
+              foregroundStyle(ringTextColor),
+              monospacedDigit(),
+              lineLimit(1),
+            ]}>
+            {ringText}
+          </Text>
+        )}
       </ZStack>
     );
   }
 
   function BatteryBadge() {
-    const batteryIconColor = props.batteryCharging ? success : secondary;
+    const batteryIconColor = props.batteryCharging ? success : resolvedSecondary;
     const batteryTextColor = props.batteryCharging ? success : secondaryColor;
 
     return (
@@ -201,30 +244,34 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
     return (
       <ZStack
         alignment="center"
-        modifiers={[widgetURL(homeWidgetURL), containerBackground(widgetBackground, 'widget')]}>
+        modifiers={[widgetURL(homeWidgetURL), containerBackground(widgetBackgroundColor, 'widget')]}>
         <Gauge
-          value={scoreValue}
+          value={ringValue}
           min={0}
           max={100}
-          modifiers={[gaugeStyle('circularCapacity'), tint(scoreRingColor)]}
+          modifiers={[gaugeStyle('circularCapacity'), tint(ringColor)]}
         />
 
-        <Text
-          modifiers={[
-            font({ size: 18, weight: 'bold', design: 'rounded' }),
-            foregroundStyle(scoreTextColor),
-            monospacedDigit(),
-            lineLimit(1),
-          ]}>
-          {scoreText}
-        </Text>
+        {showSleepThemeIcon ? (
+          <Image color={ringColor} size={18} systemName="moon.zzz.fill" />
+        ) : (
+          <Text
+            modifiers={[
+              font({ size: 18, weight: 'bold', design: 'rounded' }),
+              foregroundStyle(ringTextColor),
+              monospacedDigit(),
+              lineLimit(1),
+            ]}>
+            {ringText}
+          </Text>
+        )}
       </ZStack>
     );
   }
 
   if (environment.widgetFamily === 'accessoryInline') {
     return (
-      <ZStack modifiers={[widgetURL(homeWidgetURL), containerBackground(widgetBackground, 'widget')]}>
+      <ZStack modifiers={[widgetURL(homeWidgetURL), containerBackground(widgetBackgroundColor, 'widget')]}>
         <Text modifiers={[font({ size: 13, weight: 'semibold' }), lineLimit(1)]}>
           {inlineLead} · Bed {lockscreenBedtimeValue} · {wakeTitle} {wakeValue}
         </Text>
@@ -236,13 +283,13 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
     return (
       <ZStack
         alignment="topTrailing"
-        modifiers={[widgetURL(homeWidgetURL), containerBackground(widgetBackground, 'widget')]}>
+        modifiers={[widgetURL(homeWidgetURL), containerBackground(widgetBackgroundColor, 'widget')]}>
         <HStack alignment="center" spacing={8}>
           <ScoreRing size={46} scoreFontSize={21} />
 
           <VStack alignment="leading" spacing={0}>
-            <Text modifiers={[font({ size: 11, weight: 'semibold' }), foregroundStyle(greetingColor), lineLimit(1)]}>
-              {props.greetingLabel}
+            <Text modifiers={[font({ size: 10, weight: 'semibold' }), foregroundStyle(greetingColor), lineLimit(1)]}>
+              {props.sleepThemeActive ? lockscreenThemeLabel : props.greetingLabel}
             </Text>
             <Text modifiers={[font({ size: 12, weight: 'medium' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
               Bed {lockscreenBedtimeValue}
@@ -260,16 +307,16 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
     return (
       <ZStack
         alignment="topTrailing"
-        modifiers={[padding({ all: 4 }), widgetURL(homeWidgetURL), containerBackground(widgetBackground, 'widget')]}>
+        modifiers={[padding({ all: 4 }), widgetURL(homeWidgetURL), containerBackground(widgetBackgroundColor, 'widget')]}>
         <VStack alignment="leading" spacing={6}>
           <Text modifiers={[font({ size: 12, weight: 'bold' }), foregroundStyle(greetingColor), lineLimit(1)]}>
-            {props.greetingLabel}
+            {props.sleepThemeActive ? props.sleepThemeLabel : props.greetingLabel}
           </Text>
           <HStack alignment="center" spacing={14}>
             <VStack alignment="center" spacing={4}>
               <ScoreRing size={88} />
               <Text modifiers={[font({ size: 10, weight: 'semibold' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-                Last sleep
+                {sleepWindowProgressActive ? 'Progress' : props.sleepThemeActive ? 'Wind down' : 'Last sleep'}
               </Text>
             </VStack>
 
@@ -289,7 +336,7 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
               <Text modifiers={[font({ size: 12, weight: 'medium' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
                 {wakeTitle} {wakeValue}
               </Text>
-              <Text modifiers={[font({ size: 11, weight: 'medium' }), foregroundStyle(subtle), lineLimit(1)]}>
+              <Text modifiers={[font({ size: 11, weight: 'medium' }), foregroundStyle(resolvedSubtle), lineLimit(1)]}>
                 {props.phaseLabel}
               </Text>
             </VStack>
@@ -297,7 +344,7 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
             <Spacer />
             <VStack alignment="leading" spacing={2}>
               <Metric label="Sleep need" value={props.sleepNeedLabel} />
-              <Text modifiers={[font({ size: 11, weight: 'medium' }), foregroundStyle(subtle), lineLimit(1)]}>
+              <Text modifiers={[font({ size: 11, weight: 'medium' }), foregroundStyle(resolvedSubtle), lineLimit(1)]}>
                 {props.sleepDebtLabel}
               </Text>
             </VStack>
@@ -314,7 +361,7 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
   return (
     <ZStack
       alignment="top"
-      modifiers={[widgetURL(homeWidgetURL), containerBackground(widgetBackground, 'widget')]}>
+      modifiers={[widgetURL(homeWidgetURL), containerBackground(widgetBackgroundColor, 'widget')]}>
       <HStack
         alignment="center"
         spacing={0}

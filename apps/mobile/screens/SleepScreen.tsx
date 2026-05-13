@@ -519,8 +519,11 @@ export function SleepScreen() {
       <TonightWidgetPlanSync
         batteryPercent={deviceState.batteryPercent}
         chargingStatus={deviceState.chargingStatus}
+        completionStatus={data.completionStatus}
         headlineLabel={data.headlineLabel}
         headlineScore={data.headlineScore}
+        isInProgress={data.isInProgress}
+        sessions={data.sessions}
         sleepPlan={sleepPlan}
       />
       {state.status === 'error' ? (

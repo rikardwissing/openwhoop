@@ -3,17 +3,18 @@ import { Platform } from 'react-native';
 import type { SQLiteDatabase } from 'expo-sqlite';
 
 import { SQLiteHealthRepository } from '@/data/sqlite/SQLiteHealthRepository';
+import { syncWindDownAppIcon } from '@/services/windDownAppIcon';
 import type { SleepHistoryData, SleepPlan } from '@/types/health';
-import { formatClock } from '@/utils/dateTime';
+import { formatClock, formatSqliteDateTime } from '@/utils/dateTime';
 import { describeSleepScore, formatShortDuration } from '@/utils/formatters';
-import { buildSleepPlanGreeting, buildSleepWindDownStatus, resolveSleepPlanWindow } from '@/utils/sleepPlan';
+import { buildSleepPlanGreeting, buildSleepThemeStatus, buildSleepWindDownStatus, resolveSleepPlanWindow } from '@/utils/sleepPlan';
 import TonightWidget from '@/widgets/TonightWidget';
 import type { TonightWidgetProps } from '@/widgets/TonightWidget';
 
 const TIMELINE_WINDOW_MS = 30 * 60 * 60 * 1000;
 type TonightWidgetSnapshot = Pick<
   SleepHistoryData,
-  'sleepPlan' | 'headlineLabel' | 'headlineScore' | 'completionStatus' | 'isInProgress'
+  'sleepPlan' | 'headlineLabel' | 'headlineScore' | 'completionStatus' | 'isInProgress' | 'sessions'
 > & {
   batteryPercent?: number | null;
   chargingStatus?: 'charging' | 'not_charging' | null;
@@ -21,8 +22,12 @@ type TonightWidgetSnapshot = Pick<
 type ExpoWidgetsModule = {
   reloadAllWidgets(): void;
 };
+type UpdateTonightWidgetOptions = {
+  force?: boolean;
+};
 
 let expoWidgetsModule: ExpoWidgetsModule | null = null;
+let isWindDownPreviewActive = false;
 let lastKnownBatteryPercent: number | null = null;
 let lastSnapshot: TonightWidgetSnapshot | null = null;
 
@@ -79,6 +84,7 @@ function buildSnapshotFromPlan(
     chargingStatus: options.chargingStatus,
     completionStatus: 'complete',
     isInProgress: false,
+    sessions: [],
     sleepPlan: plan,
     headlineLabel: options.headlineLabel ?? describeSleepScore(headlineScore),
     headlineScore,
@@ -93,10 +99,28 @@ function formatBatteryLabel(batteryPercent: number | null | undefined) {
   return `${Math.max(0, Math.min(100, Math.round(batteryPercent)))}%`;
 }
 
+function clockMinutesFromDate(date: Date) {
+  return date.getHours() * 60 + date.getMinutes();
+}
+
+function buildWindDownPreviewPlan(plan: SleepPlan, now = new Date()): SleepPlan {
+  const bedtimeDate = new Date(now.getTime() + 45 * 60_000);
+  const wakeDate = new Date(bedtimeDate.getTime() + plan.sleepNeedMinutes * 60_000);
+
+  return {
+    ...plan,
+    alarmEnabled: true,
+    nextAlarmAt: formatSqliteDateTime(wakeDate),
+    optimalBedtime: formatClock(bedtimeDate),
+    optimalBedtimeMinutes: clockMinutesFromDate(bedtimeDate),
+    targetWakeMinutes: clockMinutesFromDate(wakeDate),
+    targetWakeTime: formatClock(wakeDate),
+  };
+}
+
 export function buildTonightWidgetProps(snapshot: TonightWidgetSnapshot, now = new Date()): TonightWidgetProps {
   const plan = snapshot.sleepPlan;
   const resolvedBatteryPercent = snapshot.batteryPercent ?? lastKnownBatteryPercent;
-  const sleepInProgress = snapshot.isInProgress || snapshot.completionStatus === 'in_progress';
 
   if (snapshot.batteryPercent !== undefined) {
     lastKnownBatteryPercent = snapshot.batteryPercent;
@@ -104,6 +128,8 @@ export function buildTonightWidgetProps(snapshot: TonightWidgetSnapshot, now = n
 
   const { bedtimeDate, wakeDate } = resolveSleepPlanWindow(plan, now);
   const windDownStatus = buildSleepWindDownStatus(plan, now);
+  const sleepThemeStatus = buildSleepThemeStatus(snapshot, now);
+  const sleepInProgress = sleepThemeStatus.sleepInProgress;
   const sleepWindowMs = Math.max(1, wakeDate.getTime() - bedtimeDate.getTime());
   const bedtimePassed = !sleepInProgress && windDownStatus.isBedtimeStarted;
   const projectedFullSleepDate = new Date(now.getTime() + plan.sleepNeedMinutes * 60_000);
@@ -123,14 +149,20 @@ export function buildTonightWidgetProps(snapshot: TonightWidgetSnapshot, now = n
     score: snapshot.headlineScore,
     scoreLabel: snapshot.headlineLabel,
     sleepDebtLabel: buildSleepDebtLabel(plan),
+    sleepInProgress,
     sleepNeedLabel: formatShortDuration(plan.sleepNeedMinutes),
+    sleepProgress: sleepThemeStatus.sleepProgress,
+    sleepThemeActive: sleepThemeStatus.sleepThemeActive,
+    sleepThemeLabel: sleepThemeStatus.sleepThemeLabel,
     updatedAtLabel: formatClock(now),
     wakeLabel: formatClock(wakeDate),
   };
 }
 
-function buildTimelineDates(plan: SleepPlan, now: Date) {
+function buildTimelineDates(snapshot: TonightWidgetSnapshot, now: Date) {
+  const plan = snapshot.sleepPlan;
   const { bedtimeDate, previewStartDate, prepStartDate, wakeDate } = resolveSleepPlanWindow(plan, now);
+  const sleepThemeStatus = buildSleepThemeStatus(snapshot, now);
   const candidates = [
     now,
     previewStartDate,
@@ -141,6 +173,24 @@ function buildTimelineDates(plan: SleepPlan, now: Date) {
   ];
   const latestDate = new Date(now.getTime() + TIMELINE_WINDOW_MS);
   const uniqueDates = new Map<number, Date>();
+
+  if (sleepThemeStatus.sleepInProgress) {
+    const sleepEndEstimate = sleepThemeStatus.sleepStartDate
+      ? new Date(sleepThemeStatus.sleepStartDate.getTime() + plan.sleepNeedMinutes * 60_000)
+      : wakeDate;
+    const progressTimelineEnd = new Date(Math.min(latestDate.getTime(), sleepEndEstimate.getTime() + 60 * 60_000));
+    const nextHalfHour = new Date(Math.ceil(now.getTime() / (30 * 60_000)) * 30 * 60_000);
+
+    candidates.push(sleepEndEstimate);
+
+    for (
+      let time = nextHalfHour.getTime();
+      time <= progressTimelineEnd.getTime();
+      time += 30 * 60_000
+    ) {
+      candidates.push(new Date(time));
+    }
+  }
 
   for (const date of candidates) {
     if (date.getTime() < now.getTime() || date.getTime() > latestDate.getTime()) {
@@ -154,10 +204,24 @@ function buildTimelineDates(plan: SleepPlan, now: Date) {
 }
 
 export function buildTonightWidgetTimeline(snapshot: TonightWidgetSnapshot, now = new Date()) {
-  return buildTimelineDates(snapshot.sleepPlan, now).map((date) => ({
+  return buildTimelineDates(snapshot, now).map((date) => ({
     date,
     props: buildTonightWidgetProps(snapshot, date),
   }));
+}
+
+async function applyTonightWidgetSnapshot(snapshot: TonightWidgetSnapshot) {
+  lastSnapshot = {
+    ...snapshot,
+    batteryPercent: snapshot.batteryPercent ?? lastSnapshot?.batteryPercent,
+    chargingStatus: snapshot.chargingStatus ?? lastSnapshot?.chargingStatus,
+  };
+
+  try {
+    TonightWidget.updateTimeline(buildTonightWidgetTimeline(lastSnapshot));
+  } catch {}
+
+  await syncWindDownAppIcon(lastSnapshot).catch(() => {});
 }
 
 export async function registerTonightWidgetLayout() {
@@ -172,20 +236,37 @@ export async function registerTonightWidgetLayout() {
   reloadAllWidgetSnapshots();
 }
 
-export async function updateTonightWidgetFromSleepHistory(snapshot: TonightWidgetSnapshot) {
+export async function updateTonightWidgetFromSleepHistory(
+  snapshot: TonightWidgetSnapshot,
+  options: UpdateTonightWidgetOptions = {},
+) {
   if (Platform.OS !== 'ios') {
     return;
   }
 
-  lastSnapshot = {
-    ...snapshot,
-    batteryPercent: snapshot.batteryPercent ?? lastSnapshot?.batteryPercent,
-    chargingStatus: snapshot.chargingStatus ?? lastSnapshot?.chargingStatus,
-  };
+  if (isWindDownPreviewActive && !options.force) {
+    return;
+  }
 
-  try {
-    TonightWidget.updateTimeline(buildTonightWidgetTimeline(lastSnapshot));
-  } catch {}
+  await applyTonightWidgetSnapshot(snapshot);
+}
+
+export async function previewTonightWidgetWindDownTheme(snapshot: TonightWidgetSnapshot, now = new Date()) {
+  isWindDownPreviewActive = true;
+
+  await applyTonightWidgetSnapshot({
+    ...snapshot,
+    completionStatus: 'complete',
+    headlineLabel: snapshot.headlineLabel || 'Wind-down preview',
+    isInProgress: false,
+    sessions: [],
+    sleepPlan: buildWindDownPreviewPlan(snapshot.sleepPlan, now),
+  });
+}
+
+export async function restoreTonightWidgetLiveState(snapshot: TonightWidgetSnapshot) {
+  isWindDownPreviewActive = false;
+  await applyTonightWidgetSnapshot(snapshot);
 }
 
 export async function updateTonightWidgetPowerState(powerState: {
@@ -208,7 +289,7 @@ export async function updateTonightWidgetPowerState(powerState: {
     ...lastSnapshot,
     batteryPercent: powerState.batteryPercent ?? lastSnapshot.batteryPercent,
     chargingStatus: powerState.chargingStatus ?? lastSnapshot.chargingStatus,
-  });
+  }, { force: true });
 }
 
 export async function updateTonightWidgetFromSleepPlan(

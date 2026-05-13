@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Alert, Image, Pressable, StyleSheet, Switch, Text, View } from 'react-native';
+import { Alert, Image, Platform, Pressable, StyleSheet, Switch, Text, View } from 'react-native';
 import { useRouter } from 'expo-router';
 
 import {
@@ -26,6 +26,10 @@ import {
   useWearableSyncState,
 } from '@/providers/WearableSyncProvider';
 import { exportAndShareDatabaseSnapshot } from '@/services/databaseExport';
+import {
+  previewTonightWidgetWindDownTheme,
+  restoreTonightWidgetLiveState,
+} from '@/services/widgets/tonightWidget';
 import {
   BACKGROUND_DEVICE_SYNC_INTERVAL_MINUTES,
   BACKGROUND_DEVICE_SYNC_TIME_BUDGET_MS,
@@ -337,6 +341,15 @@ export function SettingsScreen() {
     status: 'idle',
     message: 'Run the bounded background sync path immediately for the selected wearable.',
   });
+  const [windDownPreviewState, setWindDownPreviewState] = useState<{
+    status: 'idle' | 'running' | 'success' | 'error';
+    message: string;
+  }>({
+    status: 'idle',
+    message: Platform.OS === 'ios'
+      ? 'Preview the wind-down widget theme and alternate app icon without changing sleep data.'
+      : 'Wind-down widget preview is available on iOS builds.',
+  });
   const deviceBusy = isBlockingSyncStatus(progress.status);
   const maintenanceBusy = maintenanceState.status === 'running';
   const activityRescanBusy = activityRescanState.status === 'running';
@@ -386,6 +399,7 @@ export function SettingsScreen() {
     performanceSweepState.status === 'running' ||
     clearDataState.status === 'running' ||
     appleHealthExportState.status === 'running';
+  const windDownPreviewDisabled = Platform.OS !== 'ios' || windDownPreviewState.status === 'running';
 
   async function refreshBackgroundDeviceSyncRegistrationState() {
     setBackgroundDeviceSyncRegistrationState({
@@ -460,6 +474,56 @@ export function SettingsScreen() {
       });
     } finally {
       await refreshBackgroundDeviceSyncRegistrationState();
+    }
+  }
+
+  async function loadWidgetSleepSnapshot() {
+    const sleep = await repository.getSleepHistory('14d');
+
+    return {
+      ...sleep,
+      batteryPercent: deviceState.batteryPercent,
+      chargingStatus: deviceState.chargingStatus,
+    };
+  }
+
+  async function handlePreviewWindDownTheme() {
+    setWindDownPreviewState({
+      status: 'running',
+      message: 'Applying wind-down preview to widgets and app icon...',
+    });
+
+    try {
+      await previewTonightWidgetWindDownTheme(await loadWidgetSleepSnapshot());
+      setWindDownPreviewState({
+        status: 'success',
+        message: 'Wind-down preview applied. Use Restore live state when you are done checking the widgets.',
+      });
+    } catch (error) {
+      setWindDownPreviewState({
+        status: 'error',
+        message: error instanceof Error ? error.message : 'Unable to preview the wind-down theme.',
+      });
+    }
+  }
+
+  async function handleRestoreLiveWidgetTheme() {
+    setWindDownPreviewState({
+      status: 'running',
+      message: 'Restoring live widget and app icon state...',
+    });
+
+    try {
+      await restoreTonightWidgetLiveState(await loadWidgetSleepSnapshot());
+      setWindDownPreviewState({
+        status: 'success',
+        message: 'Live widget and app icon state restored from current sleep data.',
+      });
+    } catch (error) {
+      setWindDownPreviewState({
+        status: 'error',
+        message: error instanceof Error ? error.message : 'Unable to restore live widget state.',
+      });
     }
   }
 
@@ -788,6 +852,42 @@ export function SettingsScreen() {
             <Text style={styles.settingSubtitle}>This build stays in Unstrap's neon dark mode.</Text>
           </View>
           <Switch disabled trackColor={{ false: colors.border, true: colors.primary }} value />
+        </View>
+        <View style={styles.settingColumn}>
+          <View>
+            <Text style={styles.settingTitle}>Wind-down preview</Text>
+            <Text style={styles.settingSubtitle}>
+              Apply the sleep-themed widget state and alternate app icon for visual checks.
+            </Text>
+          </View>
+
+          <View style={styles.buttonRow}>
+            <ActionButton
+              label={windDownPreviewState.status === 'running' ? 'Previewing...' : 'Preview wind-down'}
+              onPress={() => {
+                void handlePreviewWindDownTheme();
+              }}
+              disabled={windDownPreviewDisabled}
+              tone="secondary"
+            />
+            <ActionButton
+              label="Restore live"
+              onPress={() => {
+                void handleRestoreLiveWidgetTheme();
+              }}
+              disabled={windDownPreviewDisabled}
+              tone="secondary"
+            />
+          </View>
+
+          <Text
+            style={[
+              styles.roadmapText,
+              windDownPreviewState.status === 'error' ? styles.errorText : null,
+              windDownPreviewState.status === 'success' ? styles.successText : null,
+            ]}>
+            {windDownPreviewState.message}
+          </Text>
         </View>
       </GlassCard>
 

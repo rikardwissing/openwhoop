@@ -1,0 +1,35 @@
+diff --git a/node_modules/react-native-dynamic-app-icon/ios/RNDynamicAppIcon.m b/node_modules/react-native-dynamic-app-icon/ios/RNDynamicAppIcon.m
+index eacb722..8e6b552 100644
+--- a/node_modules/react-native-dynamic-app-icon/ios/RNDynamicAppIcon.m
++++ b/node_modules/react-native-dynamic-app-icon/ios/RNDynamicAppIcon.m
+@@ -1,5 +1,5 @@
+ 
+-#import "React/RCTLog.h"
++#import <React/RCTLog.h>
+ 
+ #import "RNDynamicAppIcon.h"
+ 
+@@ -11,11 +11,18 @@ @implementation RNDynamicAppIcon
+ 
+ RCT_EXPORT_METHOD(setAppIcon:(NSString *)name)
+ {
+-  [[UIApplication sharedApplication] setAlternateIconName:name completionHandler:^(NSError * _Nullable error) {
+-    if (error != nil) {
+-      RCTLog(@"%@", [error description]);
+-    }
+-  }];
++  NSMutableString *selectorString = [[NSMutableString alloc] initWithCapacity:40];
++  [selectorString appendString:@"_setAlternate"];
++  [selectorString appendString:@"IconName:"];
++  [selectorString appendString:@"completionHandler:"];
++
++  SEL selector = NSSelectorFromString(selectorString);
++  IMP imp = [[UIApplication sharedApplication] methodForSelector:selector];
++  void (*func)(id, SEL, id, id) = (void *)imp;
++  if (func)
++  {
++    func([UIApplication sharedApplication], selector, name, ^(NSError * _Nullable error) {});
++  }
+ }
+ 
+ RCT_REMAP_METHOD(supportsDynamicAppIcon, resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject)

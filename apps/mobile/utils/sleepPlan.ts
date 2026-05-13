@@ -1,4 +1,4 @@
-import type { AlarmScheduleKind, AlarmWakeMode, SleepPlan } from '@/types/health';
+import type { AlarmScheduleKind, AlarmWakeMode, SleepCompletionStatus, SleepPlan, SleepSession } from '@/types/health';
 import { formatClock, parseSqliteDateTime } from '@/utils/dateTime';
 
 export const BASE_SLEEP_NEED_MINUTES = 8 * 60;
@@ -42,6 +42,25 @@ export interface SleepWindDownStatus {
   phaseLabel: string;
   prepStartDate: Date;
   wakeDate: Date;
+}
+
+export interface SleepThemeStatus {
+  completedSleepEndDate: Date | null;
+  sleepInProgress: boolean;
+  sleepProgress: number;
+  sleepStartDate: Date | null;
+  sleepThemeActive: boolean;
+  sleepThemeLabel: string;
+  windDownStatus: SleepWindDownStatus;
+}
+
+type SleepThemeSession = Pick<SleepSession, 'completionStatus' | 'endAt' | 'isInProgress' | 'startAt'>;
+
+interface SleepThemeInput {
+  completionStatus?: SleepCompletionStatus | null;
+  isInProgress?: boolean | null;
+  sessions?: SleepThemeSession[];
+  sleepPlan: SleepPlan;
 }
 
 export function normalizeClockMinutes(minutes: number) {
@@ -128,6 +147,30 @@ function formatCountdownMinutes(minutes: number) {
   }
 
   return `${hours}h ${remainingMinutes}m`;
+}
+
+function parseValidDate(value: string) {
+  const date = parseSqliteDateTime(value);
+  return Number.isFinite(date.getTime()) ? date : null;
+}
+
+function latestSessionByDate(
+  sessions: SleepThemeSession[],
+  getDate: (session: SleepThemeSession) => Date | null,
+) {
+  return sessions.reduce<{ date: Date; session: SleepThemeSession } | null>((latest, session) => {
+    const date = getDate(session);
+
+    if (!date) {
+      return latest;
+    }
+
+    if (!latest || date.getTime() > latest.date.getTime()) {
+      return { date, session };
+    }
+
+    return latest;
+  }, null);
 }
 
 export function resolveSleepPlanWakeDate(plan: SleepPlan, now = new Date()) {
@@ -234,6 +277,54 @@ export function buildSleepPlanGreeting(plan: SleepPlan, now = new Date()) {
   return windDownStatus.phase === 'wind_down' || windDownStatus.phase === 'bedtime'
     ? windDownStatus.greeting
     : buildTimeOfDayGreeting(now);
+}
+
+export function buildSleepThemeStatus(input: SleepThemeInput, now = new Date()): SleepThemeStatus {
+  const windDownStatus = buildSleepWindDownStatus(input.sleepPlan, now);
+  const sessions = input.sessions ?? [];
+  const fallbackSleepInProgress = Boolean(input.isInProgress || input.completionStatus === 'in_progress');
+  const inProgressSession = latestSessionByDate(
+    sessions.filter((session) => session.isInProgress || session.completionStatus === 'in_progress'),
+    (session) => parseValidDate(session.startAt),
+  );
+  const latestSession = latestSessionByDate(sessions, (session) => parseValidDate(session.startAt));
+  const completedAfterWindDown = latestSessionByDate(
+    sessions.filter((session) => !session.isInProgress && session.completionStatus === 'complete'),
+    (session) => {
+      const endDate = parseValidDate(session.endAt);
+      return endDate && endDate.getTime() >= windDownStatus.prepStartDate.getTime() ? endDate : null;
+    },
+  );
+  const sleepInProgress = Boolean(inProgressSession || fallbackSleepInProgress);
+  const sleepStartDate =
+    inProgressSession?.date ?? (fallbackSleepInProgress ? latestSession?.date ?? null : null);
+  const rawSleepProgress = sleepStartDate
+    ? (now.getTime() - sleepStartDate.getTime()) / Math.max(1, input.sleepPlan.sleepNeedMinutes * 60_000)
+    : 0;
+  const sleepProgress = sleepInProgress
+    ? Math.max(0.06, Math.min(0.96, rawSleepProgress))
+    : 0;
+  const plannedSleepWindowActive =
+    now.getTime() >= windDownStatus.prepStartDate.getTime() &&
+    now.getTime() < windDownStatus.wakeDate.getTime();
+  const sleepThemeActive = sleepInProgress || (plannedSleepWindowActive && !completedAfterWindDown);
+  const sleepThemeLabel = sleepInProgress
+    ? 'Sleep in progress'
+    : windDownStatus.phase === 'bedtime'
+      ? 'Bedtime has started'
+      : windDownStatus.phase === 'wind_down'
+        ? 'Time to wind down'
+        : windDownStatus.greeting;
+
+  return {
+    completedSleepEndDate: completedAfterWindDown?.date ?? null,
+    sleepInProgress,
+    sleepProgress,
+    sleepStartDate,
+    sleepThemeActive,
+    sleepThemeLabel,
+    windDownStatus,
+  };
 }
 
 export function normalizeAlarmWeekdayMask(mask: number | null | undefined) {
