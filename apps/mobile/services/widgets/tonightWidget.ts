@@ -5,7 +5,7 @@ import type { SQLiteDatabase } from 'expo-sqlite';
 import { SQLiteHealthRepository } from '@/data/sqlite/SQLiteHealthRepository';
 import { syncWindDownAppIcon } from '@/services/windDownAppIcon';
 import type { SleepHistoryData, SleepPlan } from '@/types/health';
-import { formatClock, formatSqliteDateTime } from '@/utils/dateTime';
+import { formatClock } from '@/utils/dateTime';
 import { describeSleepScore, formatShortDuration } from '@/utils/formatters';
 import { buildSleepPlanGreeting, buildSleepThemeStatus, buildSleepWindDownStatus, resolveSleepPlanWindow } from '@/utils/sleepPlan';
 import TonightWidget from '@/widgets/TonightWidget';
@@ -22,12 +22,8 @@ type TonightWidgetSnapshot = Pick<
 type ExpoWidgetsModule = {
   reloadAllWidgets(): void;
 };
-type UpdateTonightWidgetOptions = {
-  force?: boolean;
-};
 
 let expoWidgetsModule: ExpoWidgetsModule | null = null;
-let isWindDownPreviewActive = false;
 let lastKnownBatteryPercent: number | null = null;
 let lastSnapshot: TonightWidgetSnapshot | null = null;
 
@@ -97,25 +93,6 @@ function formatBatteryLabel(batteryPercent: number | null | undefined) {
   }
 
   return `${Math.max(0, Math.min(100, Math.round(batteryPercent)))}%`;
-}
-
-function clockMinutesFromDate(date: Date) {
-  return date.getHours() * 60 + date.getMinutes();
-}
-
-function buildWindDownPreviewPlan(plan: SleepPlan, now = new Date()): SleepPlan {
-  const bedtimeDate = new Date(now.getTime() + 45 * 60_000);
-  const wakeDate = new Date(bedtimeDate.getTime() + plan.sleepNeedMinutes * 60_000);
-
-  return {
-    ...plan,
-    alarmEnabled: true,
-    nextAlarmAt: formatSqliteDateTime(wakeDate),
-    optimalBedtime: formatClock(bedtimeDate),
-    optimalBedtimeMinutes: clockMinutesFromDate(bedtimeDate),
-    targetWakeMinutes: clockMinutesFromDate(wakeDate),
-    targetWakeTime: formatClock(wakeDate),
-  };
 }
 
 export function buildTonightWidgetProps(snapshot: TonightWidgetSnapshot, now = new Date()): TonightWidgetProps {
@@ -238,34 +215,11 @@ export async function registerTonightWidgetLayout() {
 
 export async function updateTonightWidgetFromSleepHistory(
   snapshot: TonightWidgetSnapshot,
-  options: UpdateTonightWidgetOptions = {},
 ) {
   if (Platform.OS !== 'ios') {
     return;
   }
 
-  if (isWindDownPreviewActive && !options.force) {
-    return;
-  }
-
-  await applyTonightWidgetSnapshot(snapshot);
-}
-
-export async function previewTonightWidgetWindDownTheme(snapshot: TonightWidgetSnapshot, now = new Date()) {
-  isWindDownPreviewActive = true;
-
-  await applyTonightWidgetSnapshot({
-    ...snapshot,
-    completionStatus: 'complete',
-    headlineLabel: snapshot.headlineLabel || 'Wind-down preview',
-    isInProgress: false,
-    sessions: [],
-    sleepPlan: buildWindDownPreviewPlan(snapshot.sleepPlan, now),
-  });
-}
-
-export async function restoreTonightWidgetLiveState(snapshot: TonightWidgetSnapshot) {
-  isWindDownPreviewActive = false;
   await applyTonightWidgetSnapshot(snapshot);
 }
 
@@ -289,7 +243,7 @@ export async function updateTonightWidgetPowerState(powerState: {
     ...lastSnapshot,
     batteryPercent: powerState.batteryPercent ?? lastSnapshot.batteryPercent,
     chargingStatus: powerState.chargingStatus ?? lastSnapshot.chargingStatus,
-  }, { force: true });
+  });
 }
 
 export async function updateTonightWidgetFromSleepPlan(
