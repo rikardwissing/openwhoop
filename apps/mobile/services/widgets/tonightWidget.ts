@@ -8,10 +8,12 @@ import type { SleepHistoryData, SleepPlan } from '@/types/health';
 import { formatClock } from '@/utils/dateTime';
 import { describeSleepScore, formatShortDuration } from '@/utils/formatters';
 import { buildSleepPlanGreeting, buildSleepThemeStatus, buildSleepWindDownStatus, resolveSleepPlanWindow } from '@/utils/sleepPlan';
+import SleepLiveActivity from '@/widgets/SleepLiveActivity';
 import TonightWidget from '@/widgets/TonightWidget';
 import type { TonightWidgetProps } from '@/widgets/TonightWidget';
 
 const TIMELINE_WINDOW_MS = 30 * 60 * 60 * 1000;
+const LIVE_ACTIVITY_URL = 'btwearable://';
 type TonightWidgetSnapshot = Pick<
   SleepHistoryData,
   'sleepPlan' | 'headlineLabel' | 'headlineScore' | 'completionStatus' | 'isInProgress' | 'sessions'
@@ -187,6 +189,45 @@ export function buildTonightWidgetTimeline(snapshot: TonightWidgetSnapshot, now 
   }));
 }
 
+function getSleepLiveActivityInstances() {
+  try {
+    return SleepLiveActivity.getInstances();
+  } catch {
+    return [];
+  }
+}
+
+async function syncSleepLiveActivity(snapshot: TonightWidgetSnapshot) {
+  const props = buildTonightWidgetProps(snapshot);
+  const instances = getSleepLiveActivityInstances();
+
+  if (!props.sleepThemeActive) {
+    await Promise.all(
+      instances.map(async (instance) => {
+        try {
+          await instance.end('immediate');
+        } catch {}
+      }),
+    );
+    return;
+  }
+
+  if (instances.length === 0) {
+    try {
+      SleepLiveActivity.start(props, LIVE_ACTIVITY_URL);
+    } catch {}
+    return;
+  }
+
+  await Promise.all(
+    instances.map(async (instance) => {
+      try {
+        await instance.update(props);
+      } catch {}
+    }),
+  );
+}
+
 async function applyTonightWidgetSnapshot(snapshot: TonightWidgetSnapshot) {
   lastSnapshot = {
     ...snapshot,
@@ -197,6 +238,8 @@ async function applyTonightWidgetSnapshot(snapshot: TonightWidgetSnapshot) {
   try {
     TonightWidget.updateTimeline(buildTonightWidgetTimeline(lastSnapshot));
   } catch {}
+
+  await syncSleepLiveActivity(lastSnapshot).catch(() => {});
 
   await syncWindDownAppIcon(lastSnapshot).catch(() => {});
 }
@@ -209,6 +252,12 @@ export async function registerTonightWidgetLayout() {
   try {
     TonightWidget.reload();
   } catch {}
+
+  getSleepLiveActivityInstances();
+
+  if (lastSnapshot) {
+    await syncSleepLiveActivity(lastSnapshot).catch(() => {});
+  }
 
   reloadAllWidgetSnapshots();
 }
