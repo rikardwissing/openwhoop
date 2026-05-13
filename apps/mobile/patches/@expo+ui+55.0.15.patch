@@ -1,0 +1,396 @@
+diff --git a/node_modules/@expo/ui/build/swift-ui/Text/index.d.ts b/node_modules/@expo/ui/build/swift-ui/Text/index.d.ts
+index 4cc64ee..f4850ae 100644
+--- a/node_modules/@expo/ui/build/swift-ui/Text/index.d.ts
++++ b/node_modules/@expo/ui/build/swift-ui/Text/index.d.ts
+@@ -35,12 +35,34 @@ export interface TextProps extends CommonViewModifierProps {
+      * @platform tvos 16.0+
+      */
+     countsDown?: boolean;
++    /**
++     * Whether the timer includes an hours component once the interval exceeds 60 minutes.
++     * @default true
++     * @platform ios 16.0+
++     * @platform tvos 16.0+
++     */
++    showsHours?: boolean;
+     /**
+      * A date at which the timer should appear paused.
+      * @platform ios 16.0+
+      * @platform tvos 16.0+
+      */
+     pauseTime?: Date;
++    /**
++     * A date used to display a compact live-updating timer.
++     * Values under a minute render as seconds, under an hour as minutes,
++     * and larger values as `hh:mm`.
++     * @platform ios 16.0+
++     * @platform tvos 16.0+
++     */
++    compactTimerDate?: Date;
++    /**
++     * Whether the compact timer counts down (`true`) or up (`false`).
++     * @default true
++     * @platform ios 16.0+
++     * @platform tvos 16.0+
++     */
++    compactTimerCountsDown?: boolean;
+ }
+ export declare function Text(props: TextProps): React.JSX.Element | null;
+ //# sourceMappingURL=index.d.ts.map
+\ No newline at end of file
+diff --git a/node_modules/@expo/ui/build/swift-ui/modifiers/containerBackground.d.ts b/node_modules/@expo/ui/build/swift-ui/modifiers/containerBackground.d.ts
+new file mode 100644
+index 0000000..379c157
+--- /dev/null
++++ b/node_modules/@expo/ui/build/swift-ui/modifiers/containerBackground.d.ts
+@@ -0,0 +1,9 @@
++import type { Color } from './types';
++export type ContainerBackgroundPlacement = 'widget' | 'navigation' | 'navigationSplitView';
++/**
++ * Sets the container background of the enclosing container using a view.
++ * @param color - The color to set as the background of the container.
++ * @param container - The type of container to apply the background to.
++ * @see Official [SwiftUI documentation](https://developer.apple.com/documentation/swiftui/view/containerbackground(_:for:)).
++ */
++export declare const containerBackground: (color: Color, container: ContainerBackgroundPlacement) => import('./createModifier').ModifierConfig;
+\ No newline at end of file
+diff --git a/node_modules/@expo/ui/build/swift-ui/modifiers/index.d.ts b/node_modules/@expo/ui/build/swift-ui/modifiers/index.d.ts
+index 1e0d2ba..4145980 100644
+--- a/node_modules/@expo/ui/build/swift-ui/modifiers/index.d.ts
++++ b/node_modules/@expo/ui/build/swift-ui/modifiers/index.d.ts
+@@ -4,6 +4,7 @@
+  */
+ import { animation } from './animation/index';
+ import { background } from './background';
++import { containerBackground } from './containerBackground';
+ import { containerShape } from './containerShape';
+ import { contentShape } from './contentShape';
+ import { ModifierConfig } from './createModifier';
+@@ -925,7 +926,7 @@ export declare const resizable: (capInsets?: {
+  * This provides type safety for the modifiers array.
+  * @hidden
+  */
+-export type BuiltInModifier = ReturnType<typeof listSectionSpacing> | ReturnType<typeof background> | ReturnType<typeof cornerRadius> | ReturnType<typeof shadow> | ReturnType<typeof frame> | ReturnType<typeof padding> | ReturnType<typeof fixedSize> | ReturnType<typeof ignoreSafeArea> | ReturnType<typeof onTapGesture> | ReturnType<typeof onLongPressGesture> | ReturnType<typeof onAppear> | ReturnType<typeof luminanceToAlpha> | ReturnType<typeof onDisappear> | ReturnType<typeof opacity> | ReturnType<typeof clipShape> | ReturnType<typeof border> | ReturnType<typeof scaleEffect> | ReturnType<typeof rotationEffect> | ReturnType<typeof rotation3DEffect> | ReturnType<typeof offset> | ReturnType<typeof foregroundColor> | ReturnType<typeof foregroundStyle> | ReturnType<typeof bold> | ReturnType<typeof italic> | ReturnType<typeof monospacedDigit> | ReturnType<typeof tint> | ReturnType<typeof hidden> | ReturnType<typeof disabled> | ReturnType<typeof zIndex> | ReturnType<typeof blur> | ReturnType<typeof brightness> | ReturnType<typeof contrast> | ReturnType<typeof saturation> | ReturnType<typeof hueRotation> | ReturnType<typeof colorInvert> | ReturnType<typeof grayscale> | ReturnType<typeof buttonStyle> | ReturnType<typeof toggleStyle> | ReturnType<typeof controlSize> | ReturnType<typeof labelStyle> | ReturnType<typeof labelsHidden> | ReturnType<typeof textFieldStyle> | ReturnType<typeof menuActionDismissBehavior> | ReturnType<typeof accessibilityLabel> | ReturnType<typeof accessibilityHint> | ReturnType<typeof accessibilityValue> | ReturnType<typeof layoutPriority> | ReturnType<typeof mask> | ReturnType<typeof overlay> | ReturnType<typeof backgroundOverlay> | ReturnType<typeof aspectRatio> | ReturnType<typeof clipped> | ReturnType<typeof glassEffect> | ReturnType<typeof glassEffectId> | ReturnType<typeof animation> | ReturnType<typeof containerShape> | ReturnType<typeof contentShape> | ReturnType<typeof containerRelativeFrame> | ReturnType<typeof scrollContentBackground> | ReturnType<typeof scrollDisabled> | ReturnType<typeof defaultScrollAnchor> | ReturnType<typeof defaultScrollAnchorForRole> | ReturnType<typeof scrollTargetBehavior> | ReturnType<typeof scrollTargetLayout> | ReturnType<typeof moveDisabled> | ReturnType<typeof deleteDisabled> | ReturnType<typeof environment> | ReturnType<typeof listRowBackground> | ReturnType<typeof listRowSeparator> | ReturnType<typeof truncationMode> | ReturnType<typeof allowsTightening> | ReturnType<typeof kerning> | ReturnType<typeof textCase> | ReturnType<typeof underline> | ReturnType<typeof strikethrough> | ReturnType<typeof multilineTextAlignment> | ReturnType<typeof textSelection> | ReturnType<typeof lineSpacing> | ReturnType<typeof lineLimit> | ReturnType<typeof headerProminence> | ReturnType<typeof listRowInsets> | ReturnType<typeof badgeProminence> | ReturnType<typeof badge> | ReturnType<typeof listSectionMargins> | ReturnType<typeof font> | ReturnType<typeof gridCellUnsizedAxes> | ReturnType<typeof gridCellColumns> | ReturnType<typeof gridColumnAlignment> | ReturnType<typeof gridCellAnchor> | ReturnType<typeof submitLabel> | ReturnType<typeof keyboardType> | ReturnType<typeof autocorrectionDisabled> | ReturnType<typeof onSubmit> | ReturnType<typeof textInputAutocapitalization> | ReturnType<typeof textContentType> | ReturnType<typeof datePickerStyle> | ReturnType<typeof progressViewStyle> | ReturnType<typeof gaugeStyle> | ReturnType<typeof listStyle> | ReturnType<typeof contentTransition> | ReturnType<typeof resizable> | ReturnType<typeof widgetAccentedRenderingMode> | ReturnType<typeof widgetURL>;
++export type BuiltInModifier = ReturnType<typeof listSectionSpacing> | ReturnType<typeof background> | ReturnType<typeof cornerRadius> | ReturnType<typeof shadow> | ReturnType<typeof frame> | ReturnType<typeof padding> | ReturnType<typeof fixedSize> | ReturnType<typeof ignoreSafeArea> | ReturnType<typeof onTapGesture> | ReturnType<typeof onLongPressGesture> | ReturnType<typeof onAppear> | ReturnType<typeof luminanceToAlpha> | ReturnType<typeof onDisappear> | ReturnType<typeof opacity> | ReturnType<typeof clipShape> | ReturnType<typeof border> | ReturnType<typeof scaleEffect> | ReturnType<typeof rotationEffect> | ReturnType<typeof rotation3DEffect> | ReturnType<typeof offset> | ReturnType<typeof foregroundColor> | ReturnType<typeof foregroundStyle> | ReturnType<typeof bold> | ReturnType<typeof italic> | ReturnType<typeof monospacedDigit> | ReturnType<typeof tint> | ReturnType<typeof hidden> | ReturnType<typeof disabled> | ReturnType<typeof zIndex> | ReturnType<typeof blur> | ReturnType<typeof brightness> | ReturnType<typeof contrast> | ReturnType<typeof saturation> | ReturnType<typeof hueRotation> | ReturnType<typeof colorInvert> | ReturnType<typeof grayscale> | ReturnType<typeof buttonStyle> | ReturnType<typeof toggleStyle> | ReturnType<typeof controlSize> | ReturnType<typeof labelStyle> | ReturnType<typeof labelsHidden> | ReturnType<typeof textFieldStyle> | ReturnType<typeof menuActionDismissBehavior> | ReturnType<typeof accessibilityLabel> | ReturnType<typeof accessibilityHint> | ReturnType<typeof accessibilityValue> | ReturnType<typeof layoutPriority> | ReturnType<typeof mask> | ReturnType<typeof overlay> | ReturnType<typeof backgroundOverlay> | ReturnType<typeof aspectRatio> | ReturnType<typeof clipped> | ReturnType<typeof glassEffect> | ReturnType<typeof glassEffectId> | ReturnType<typeof animation> | ReturnType<typeof containerShape> | ReturnType<typeof contentShape> | ReturnType<typeof containerRelativeFrame> | ReturnType<typeof scrollContentBackground> | ReturnType<typeof scrollDisabled> | ReturnType<typeof defaultScrollAnchor> | ReturnType<typeof defaultScrollAnchorForRole> | ReturnType<typeof scrollTargetBehavior> | ReturnType<typeof scrollTargetLayout> | ReturnType<typeof moveDisabled> | ReturnType<typeof deleteDisabled> | ReturnType<typeof environment> | ReturnType<typeof listRowBackground> | ReturnType<typeof listRowSeparator> | ReturnType<typeof truncationMode> | ReturnType<typeof allowsTightening> | ReturnType<typeof kerning> | ReturnType<typeof textCase> | ReturnType<typeof underline> | ReturnType<typeof strikethrough> | ReturnType<typeof multilineTextAlignment> | ReturnType<typeof textSelection> | ReturnType<typeof lineSpacing> | ReturnType<typeof lineLimit> | ReturnType<typeof headerProminence> | ReturnType<typeof listRowInsets> | ReturnType<typeof badgeProminence> | ReturnType<typeof badge> | ReturnType<typeof listSectionMargins> | ReturnType<typeof font> | ReturnType<typeof gridCellUnsizedAxes> | ReturnType<typeof gridCellColumns> | ReturnType<typeof gridColumnAlignment> | ReturnType<typeof gridCellAnchor> | ReturnType<typeof submitLabel> | ReturnType<typeof keyboardType> | ReturnType<typeof autocorrectionDisabled> | ReturnType<typeof onSubmit> | ReturnType<typeof textInputAutocapitalization> | ReturnType<typeof textContentType> | ReturnType<typeof datePickerStyle> | ReturnType<typeof progressViewStyle> | ReturnType<typeof gaugeStyle> | ReturnType<typeof listStyle> | ReturnType<typeof contentTransition> | ReturnType<typeof resizable> | ReturnType<typeof containerBackground> | ReturnType<typeof widgetAccentedRenderingMode> | ReturnType<typeof widgetURL>;
+ /**
+  * Main ViewModifier type that supports both built-in and 3rd party modifiers.
+  * 3rd party modifiers should return ModifierConfig objects with their own type strings.
+@@ -945,6 +946,7 @@ export declare const isModifier: (value: any) => value is ModifierConfig;
+  */
+ export declare const filterModifiers: (modifiers: unknown[]) => ModifierConfig[];
+ export * from './animation/index';
++export * from './containerBackground';
+ export * from './containerShape';
+ export * from './contentShape';
+ export * from './shapes/index';
+diff --git a/node_modules/@expo/ui/ios/Modifiers/ViewModifierRegistry.swift b/node_modules/@expo/ui/ios/Modifiers/ViewModifierRegistry.swift
+index 552adc5..be728d3 100644
+--- a/node_modules/@expo/ui/ios/Modifiers/ViewModifierRegistry.swift
++++ b/node_modules/@expo/ui/ios/Modifiers/ViewModifierRegistry.swift
+@@ -1907,6 +1907,10 @@ extension ViewModifierRegistry {
+       return try ContentTransitionModifier(from: params, appContext: appContext)
+     }
+ 
++    register("containerBackground") { params, appContext, _ in
++      return try ContainerBackgroundModifier(from: params, appContext: appContext)
++    }
++
+     register("widgetURL") { params, appContext, _ in
+       return try WidgetURLModifier(from: params, appContext: appContext)
+     }
+diff --git a/node_modules/@expo/ui/ios/Modifiers/WidgetModifiers.swift b/node_modules/@expo/ui/ios/Modifiers/WidgetModifiers.swift
+index df1109e..8865d71 100644
+--- a/node_modules/@expo/ui/ios/Modifiers/WidgetModifiers.swift
++++ b/node_modules/@expo/ui/ios/Modifiers/WidgetModifiers.swift
+@@ -25,6 +25,26 @@ internal enum WidgetAccentedRenderingModeOptions: String, Enumerable {
+ #endif
+ }
+ 
++internal enum ContainerBackgroundPlacementOptions: String, Enumerable {
++  case widget
++  case navigation
++  case navigationSplitView
++
++#if !os(tvOS)
++  @available(iOS 18.0, *)
++  var toContainerBackgroundPlacement: ContainerBackgroundPlacement {
++    switch self {
++    case .widget:
++      return .widget
++    case .navigation:
++      return .navigation
++    case .navigationSplitView:
++      return .navigationSplitView
++    }
++  }
++#endif
++}
++
+ /**
+  * This is a unique modifier that exists only on Image, but returns some View, and for this reason it cannot be a ViewModifier.
+  */
+@@ -56,3 +76,27 @@ internal struct WidgetURLModifier: ViewModifier, Record {
+ #endif
+   }
+ }
++
++internal struct ContainerBackgroundModifier: ViewModifier, Record {
++  @Field var color: Color?
++  @Field var container: ContainerBackgroundPlacementOptions?
++
++  @ViewBuilder
++  func body(content: Content) -> some View {
++#if !os(tvOS)
++    if let color, let container {
++      if #available(iOS 18.0, *) {
++        content.containerBackground(color, for: container.toContainerBackgroundPlacement)
++      } else if #available(iOS 17.0, *), container == .widget {
++        content.containerBackground(color, for: .widget)
++      } else {
++        content
++      }
++    } else {
++      content
++    }
++#else
++    content
++#endif
++  }
++}
+diff --git a/node_modules/@expo/ui/ios/TextView.swift b/node_modules/@expo/ui/ios/TextView.swift
+index 7dfe0a9..27a6fbf 100644
+--- a/node_modules/@expo/ui/ios/TextView.swift
++++ b/node_modules/@expo/ui/ios/TextView.swift
+@@ -17,6 +17,23 @@ public enum TextDateStyle: String, Enumerable {
+   }
+ }
+ 
++private func formatCompactTimerLabel(totalSeconds: Int) -> String {
++  if totalSeconds < 60 {
++    return "\(totalSeconds)s"
++  }
++
++  if totalSeconds < 3600 {
++    return "\(totalSeconds / 60)m"
++  }
++
++  let hours = totalSeconds / 3600
++  let minutes = (totalSeconds % 3600) / 60
++  let hoursText = hours < 10 ? "0\(hours)" : "\(hours)"
++  let minutesText = minutes < 10 ? "0\(minutes)" : "\(minutes)"
++
++  return "\(hoursText):\(minutesText)"
++}
++
+ public final class TextViewProps: UIBaseViewProps {
+   @Field public var text: String = ""
+   @Field public var markdownEnabled: Bool = false
+@@ -24,7 +41,10 @@ public final class TextViewProps: UIBaseViewProps {
+   @Field public var dateStyle: TextDateStyle?
+   @Field public var timerInterval: ClosedRangeDate?
+   @Field public var countsDown: Bool?
++  @Field public var showsHours: Bool?
+   @Field public var pauseTime: Date?
++  @Field public var compactTimerDate: Date?
++  @Field public var compactTimerCountsDown: Bool?
+ 
+   // Override default frame alignment for text views
+   override var defaultFrameAlignment: Alignment { .leading }
+@@ -37,9 +57,27 @@ public struct TextView: ExpoSwiftUI.View {
+     self.props = props
+   }
+ 
++  @ViewBuilder
+   public var body: some View {
+-    buildText(applyModifiers: false)
+-      .applyModifiers(props.modifiers, appContext: props.appContext, globalEventDispatcher: props.globalEventDispatcher)
++    if #available(iOS 16.0, tvOS 16.0, *),
++       let compactTimerDate = props.compactTimerDate {
++      TimelineView(.periodic(from: .now, by: 1)) { context in
++        buildCompactTimerText(referenceDate: compactTimerDate, now: context.date, countsDown: props.compactTimerCountsDown ?? true)
++          .applyTextModifiers(props.modifiers, appContext: props.appContext)
++      }
++    } else {
++      buildText(applyModifiers: false)
++        .applyModifiers(props.modifiers, appContext: props.appContext, globalEventDispatcher: props.globalEventDispatcher)
++    }
++  }
++
++  @available(iOS 16.0, tvOS 16.0, *)
++  internal func buildCompactTimerText(referenceDate: Date, now: Date, countsDown: Bool) -> Text {
++    let rawInterval = countsDown ? referenceDate.timeIntervalSince(now) : now.timeIntervalSince(referenceDate)
++    let clampedInterval = max(0, rawInterval)
++    let totalSeconds = countsDown ? Int(ceil(clampedInterval)) : Int(floor(clampedInterval))
++
++    return Text(formatCompactTimerLabel(totalSeconds: totalSeconds))
+   }
+ 
+   internal func buildText(applyModifiers: Bool = true) -> Text {
+@@ -53,7 +91,8 @@ public struct TextView: ExpoSwiftUI.View {
+       text = Text(
+         timerInterval: ClosedRange(uncheckedBounds: (lower: lower, upper: upper)),
+         pauseTime: props.pauseTime,
+-        countsDown: props.countsDown ?? true
++        countsDown: props.countsDown ?? true,
++        showsHours: props.showsHours ?? true
+       )
+     } else if let date = props.date {
+       text = Text(date, style: props.dateStyle?.toSwiftUI() ?? .date)
+diff --git a/node_modules/@expo/ui/src/swift-ui/Text/index.tsx b/node_modules/@expo/ui/src/swift-ui/Text/index.tsx
+index 2351ee8..80f5d51 100644
+--- a/node_modules/@expo/ui/src/swift-ui/Text/index.tsx
++++ b/node_modules/@expo/ui/src/swift-ui/Text/index.tsx
+@@ -46,12 +46,37 @@ export interface TextProps extends CommonViewModifierProps {
+    */
+   countsDown?: boolean;
+ 
++  /**
++   * Whether the timer includes an hours component once the interval exceeds 60 minutes.
++   * @default true
++   * @platform ios 16.0+
++   * @platform tvos 16.0+
++   */
++  showsHours?: boolean;
++
+   /**
+    * A date at which the timer should appear paused.
+    * @platform ios 16.0+
+    * @platform tvos 16.0+
+    */
+   pauseTime?: Date;
++
++  /**
++   * A date used to display a compact live-updating timer.
++   * Values under a minute render as seconds, under an hour as minutes,
++   * and larger values as `hh:mm`.
++   * @platform ios 16.0+
++   * @platform tvos 16.0+
++   */
++  compactTimerDate?: Date;
++
++  /**
++   * Whether the compact timer counts down (`true`) or up (`false`).
++   * @default true
++   * @platform ios 16.0+
++   * @platform tvos 16.0+
++   */
++  compactTimerCountsDown?: boolean;
+ }
+ 
+ type NativeTextProps = CommonViewModifierProps & {
+@@ -62,7 +87,10 @@ type NativeTextProps = CommonViewModifierProps & {
+   dateStyle?: TextDateStyle;
+   timerInterval?: { lower: number; upper: number };
+   countsDown?: boolean;
++  showsHours?: boolean;
+   pauseTime?: number;
++  compactTimerDate?: number;
++  compactTimerCountsDown?: boolean;
+ };
+ 
+ const TextNativeView: React.ComponentType<NativeTextProps> = requireNativeView(
+@@ -70,11 +98,44 @@ const TextNativeView: React.ComponentType<NativeTextProps> = requireNativeView(
+   'TextView'
+ );
+ 
++function formatCompactTimerText(referenceDate: Date, countsDown = true, now = new Date()) {
++  const rawSeconds = countsDown
++    ? (referenceDate.getTime() - now.getTime()) / 1000
++    : (now.getTime() - referenceDate.getTime()) / 1000;
++  const totalSeconds = countsDown ? Math.max(0, Math.ceil(rawSeconds)) : Math.max(0, Math.floor(rawSeconds));
++
++  if (totalSeconds < 60) {
++    return `${totalSeconds}s`;
++  }
++
++  if (totalSeconds < 3600) {
++    return `${Math.floor(totalSeconds / 60)}m`;
++  }
++
++  const hours = Math.floor(totalSeconds / 3600)
++    .toString()
++    .padStart(2, '0');
++  const minutes = Math.floor((totalSeconds % 3600) / 60)
++    .toString()
++    .padStart(2, '0');
++
++  return `${hours}:${minutes}`;
++}
++
+ export function Text(props: TextProps) {
+-  const { children, modifiers, date, timerInterval, pauseTime, ...restProps } = props;
++  const {
++    children,
++    modifiers,
++    date,
++    timerInterval,
++    pauseTime,
++    compactTimerDate,
++    compactTimerCountsDown = true,
++    ...restProps
++  } = props;
+ 
+   // Date/timer mode: pass converted timestamps to native, ignore children
+-  if (date != null || timerInterval != null) {
++  if (date != null || timerInterval != null || compactTimerDate != null) {
+     return (
+       <TextNativeView
+         modifiers={modifiers}
+@@ -90,6 +151,9 @@ export function Text(props: TextProps) {
+             : undefined
+         }
+         pauseTime={pauseTime ? pauseTime.getTime() : undefined}
++        compactTimerCountsDown={compactTimerCountsDown}
++        compactTimerDate={compactTimerDate ? compactTimerDate.getTime() : undefined}
++        text={compactTimerDate ? formatCompactTimerText(compactTimerDate, compactTimerCountsDown) : undefined}
+       />
+     );
+   }
+diff --git a/node_modules/@expo/ui/src/swift-ui/modifiers/containerBackground.ts b/node_modules/@expo/ui/src/swift-ui/modifiers/containerBackground.ts
+new file mode 100644
+index 0000000..1920e57
+--- /dev/null
++++ b/node_modules/@expo/ui/src/swift-ui/modifiers/containerBackground.ts
+@@ -0,0 +1,13 @@
++import { createModifier } from './createModifier';
++import type { Color } from './types';
++
++export type ContainerBackgroundPlacement = 'widget' | 'navigation' | 'navigationSplitView';
++
++/**
++ * Sets the container background of the enclosing container using a view.
++ * @param color - The color to set as the background of the container.
++ * @param container - The type of container to apply the background to.
++ * @see Official [SwiftUI documentation](https://developer.apple.com/documentation/swiftui/view/containerbackground(_:for:)).
++ */
++export const containerBackground = (color: Color, container: ContainerBackgroundPlacement) =>
++  createModifier('containerBackground', { color, container });
+\ No newline at end of file
+diff --git a/node_modules/@expo/ui/src/swift-ui/modifiers/index.ts b/node_modules/@expo/ui/src/swift-ui/modifiers/index.ts
+index d64100e..e2c0a49 100644
+--- a/node_modules/@expo/ui/src/swift-ui/modifiers/index.ts
++++ b/node_modules/@expo/ui/src/swift-ui/modifiers/index.ts
+@@ -7,6 +7,7 @@ import { requireNativeModule } from 'expo';
+ 
+ import { animation } from './animation/index';
+ import { background } from './background';
++import { containerBackground } from './containerBackground';
+ import { containerShape } from './containerShape';
+ import { contentShape } from './contentShape';
+ import { createModifier, createModifierWithEventListener, ModifierConfig } from './createModifier';
+@@ -1310,6 +1311,7 @@ export type BuiltInModifier =
+   | ReturnType<typeof listStyle>
+   | ReturnType<typeof contentTransition>
+   | ReturnType<typeof resizable>
++  | ReturnType<typeof containerBackground>
+   | ReturnType<typeof widgetAccentedRenderingMode>
+   | ReturnType<typeof widgetURL>;
+ 
+@@ -1326,6 +1328,7 @@ export type ViewModifier = BuiltInModifier | ModifierConfig;
+ 
+ export * from './createModifier';
+ export * from './utils';
++export * from './containerBackground';
+ 
+ /**
+  * Type guard to check if a value is a valid modifier.

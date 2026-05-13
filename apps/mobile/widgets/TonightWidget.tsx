@@ -18,6 +18,7 @@ export interface TonightWidgetProps {
   batteryCharging?: boolean;
   batteryLabel?: string;
   bedtimeLabel?: string;
+  bedtimeTimestamp?: number;
   bedtimePassed?: boolean;
   greetingLabel?: string;
   phaseLabel?: string;
@@ -29,6 +30,7 @@ export interface TonightWidgetProps {
   sleepInProgress?: boolean;
   sleepNeedLabel?: string;
   sleepProgress?: number;
+  sleepStartTimestamp?: number;
   sleepThemeActive?: boolean;
   sleepThemeLabel?: string;
   updatedAtLabel?: string;
@@ -58,6 +60,7 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
     batteryCharging: false,
     batteryLabel: '--%',
     bedtimeLabel: '--',
+    bedtimeTimestamp: 0,
     bedtimePassed: false,
     greetingLabel: 'Tonight plan',
     phaseLabel: 'Tonight plan',
@@ -69,6 +72,7 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
     sleepInProgress: false,
     sleepNeedLabel: 'Need --',
     sleepProgress: 0,
+    sleepStartTimestamp: 0,
     sleepThemeActive: false,
     sleepThemeLabel: 'Tonight plan',
     updatedAtLabel: '--',
@@ -160,7 +164,7 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
   const bedtimeColor = props.sleepInProgress ? sleepWarm : props.bedtimePassed ? alert : primaryColor;
   const bedtimeTitle = props.sleepInProgress ? 'Sleep started' : props.bedtimePassed ? 'Past bedtime' : "Tonight's bedtime";
   const bedtimeValue = props.bedtimePassed ? 'Now' : props.bedtimeLabel;
-  const wakeTitle = props.sleepInProgress || props.bedtimePassed ? 'Done by' : 'Wake';
+  const wakeTitle = props.sleepInProgress || props.bedtimePassed ? '100% by' : 'Wake';
   const wakeValue = props.sleepInProgress || props.bedtimePassed ? props.projectedSleepLabel : props.wakeLabel;
   const lockscreenBedtimeValue = props.bedtimePassed ? `${bedtimeValue}!` : bedtimeValue;
   const greetingColor = props.sleepThemeActive ? sleepCyan : success;

@@ -16,6 +16,8 @@ const TIMELINE_WINDOW_MS = 30 * 60 * 60 * 1000;
 const LIVE_ACTIVITY_URL = 'btwearable://';
 const LIVE_ACTIVITY_WIND_DOWN_PREVIEW_MINUTES = 30;
 const LIVE_ACTIVITY_SLEEP_PREVIEW_MINUTES = 120;
+const LIVE_ACTIVITY_REFRESH_INTERVAL_MS = 60_000;
+const PREVIEW_TIMELINE_HOLD_MS = 24 * 60 * 60 * 1000;
 type TonightWidgetSnapshot = Pick<
   SleepHistoryData,
   'sleepPlan' | 'headlineLabel' | 'headlineScore' | 'completionStatus' | 'isInProgress' | 'sessions'
@@ -32,6 +34,11 @@ let expoWidgetsModule: ExpoWidgetsModule | null = null;
 let lastKnownBatteryPercent: number | null = null;
 let lastSnapshot: TonightWidgetSnapshot | null = null;
 let sleepSurfacePreviewProps: TonightWidgetProps | null = null;
+let sleepSurfacePreviewTimeline: { date: Date; props: TonightWidgetProps }[] | null = null;
+let lastWidgetTimelineKey: string | null = null;
+let lastLiveActivityPropsKey: string | null = null;
+let lastLiveActivityInstanceCount = 0;
+let liveActivityRefreshTimeout: ReturnType<typeof setTimeout> | null = null;
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
@@ -120,6 +127,7 @@ export function buildTonightWidgetProps(snapshot: TonightWidgetSnapshot, now = n
   return {
     alarmStatusLabel: buildAlarmLabel(plan, wakeDate),
     bedtimeLabel: sleepInProgress ? 'Now' : formatClock(bedtimeDate),
+    bedtimeTimestamp: bedtimeDate.getTime(),
     bedtimePassed,
     greetingLabel: sleepInProgress ? 'Sleep in progress' : buildSleepPlanGreeting(plan, now),
     phaseLabel: sleepInProgress ? 'Sleep in progress' : windDownStatus.phaseLabel,
@@ -135,6 +143,9 @@ export function buildTonightWidgetProps(snapshot: TonightWidgetSnapshot, now = n
     sleepInProgress,
     sleepNeedLabel: formatShortDuration(plan.sleepNeedMinutes),
     sleepProgress: sleepThemeStatus.sleepProgress,
+    sleepStartTimestamp: sleepInProgress
+      ? (sleepThemeStatus.sleepStartDate?.getTime() ?? now.getTime())
+      : undefined,
     sleepThemeActive: sleepThemeStatus.sleepThemeActive,
     sleepThemeLabel: sleepThemeStatus.sleepThemeLabel,
     updatedAtLabel: formatClock(now),
@@ -194,22 +205,61 @@ export function buildTonightWidgetTimeline(snapshot: TonightWidgetSnapshot, now 
 }
 
 function buildPreviewWidgetTimeline(props: TonightWidgetProps, now = new Date()) {
+  const holdUntil = new Date(now.getTime() + PREVIEW_TIMELINE_HOLD_MS);
+
   return [
     {
       date: now,
       props,
     },
+    {
+      date: holdUntil,
+      props,
+    },
   ];
 }
 
-function syncTonightWidgetPreviewOrLive(snapshot: TonightWidgetSnapshot) {
+function getPreviewWidgetTimeline() {
+  if (!sleepSurfacePreviewProps) {
+    return null;
+  }
+
+  if (!sleepSurfacePreviewTimeline) {
+    sleepSurfacePreviewTimeline = buildPreviewWidgetTimeline(sleepSurfacePreviewProps);
+  }
+
+  return sleepSurfacePreviewTimeline;
+}
+
+function buildWidgetTimelineKey(entries: { date: Date; props: TonightWidgetProps }[]) {
+  return JSON.stringify(
+    entries.map((entry) => ({
+      timestamp: entry.date.getTime(),
+      props: entry.props,
+    })),
+  );
+}
+
+function syncTonightWidgetPreviewOrLive(snapshot?: TonightWidgetSnapshot) {
+  if (!sleepSurfacePreviewProps && !snapshot) {
+    return;
+  }
+
+  const entries = sleepSurfacePreviewProps
+    ? getPreviewWidgetTimeline() ?? buildPreviewWidgetTimeline(sleepSurfacePreviewProps)
+    : buildTonightWidgetTimeline(snapshot as TonightWidgetSnapshot);
+  const nextKey = buildWidgetTimelineKey(entries);
+
+  if (nextKey === lastWidgetTimelineKey) {
+    return;
+  }
+
   try {
-    TonightWidget.updateTimeline(
-      sleepSurfacePreviewProps
-        ? buildPreviewWidgetTimeline(sleepSurfacePreviewProps)
-        : buildTonightWidgetTimeline(snapshot),
-    );
-  } catch {}
+    TonightWidget.updateTimeline(entries);
+    lastWidgetTimelineKey = nextKey;
+  } catch {
+    lastWidgetTimelineKey = null;
+  }
 }
 
 function getSleepLiveActivityInstances() {
@@ -220,7 +270,68 @@ function getSleepLiveActivityInstances() {
   }
 }
 
+function clearSleepLiveActivityRefreshTimer() {
+  if (liveActivityRefreshTimeout === null) {
+    return;
+  }
+
+  clearTimeout(liveActivityRefreshTimeout);
+  liveActivityRefreshTimeout = null;
+}
+
+function scheduleSleepLiveActivityRefresh() {
+  if (Platform.OS !== 'ios') {
+    return;
+  }
+
+  clearSleepLiveActivityRefreshTimer();
+
+  const delay = LIVE_ACTIVITY_REFRESH_INTERVAL_MS - (Date.now() % LIVE_ACTIVITY_REFRESH_INTERVAL_MS);
+
+  liveActivityRefreshTimeout = setTimeout(() => {
+    liveActivityRefreshTimeout = null;
+    void refreshSleepLiveActivityForClockTick();
+  }, delay + 250);
+}
+
+async function refreshSleepLiveActivityForClockTick() {
+  if (Platform.OS !== 'ios') {
+    return;
+  }
+
+  if (getSleepLiveActivityInstances().length === 0) {
+    return;
+  }
+
+  if (sleepSurfacePreviewProps) {
+    sleepSurfacePreviewProps = {
+      ...sleepSurfacePreviewProps,
+      updatedAtLabel: formatClock(new Date()),
+    };
+
+    await startOrUpdateSleepLiveActivity(sleepSurfacePreviewProps);
+    scheduleSleepLiveActivityRefresh();
+    return;
+  }
+
+  if (!lastSnapshot) {
+    return;
+  }
+
+  const props = buildTonightWidgetProps(lastSnapshot);
+
+  if (!props.sleepThemeActive) {
+    await endSleepLiveActivities();
+    return;
+  }
+
+  await startOrUpdateSleepLiveActivity(props);
+  scheduleSleepLiveActivityRefresh();
+}
+
 async function endSleepLiveActivities() {
+  clearSleepLiveActivityRefreshTimer();
+
   const instances = getSleepLiveActivityInstances();
 
   await Promise.all(
@@ -230,25 +341,46 @@ async function endSleepLiveActivities() {
       } catch {}
     }),
   );
+
+  lastLiveActivityPropsKey = null;
+  lastLiveActivityInstanceCount = 0;
 }
 
 async function startOrUpdateSleepLiveActivity(props: TonightWidgetProps) {
   const instances = getSleepLiveActivityInstances();
+  const nextPropsKey = JSON.stringify(props);
 
   if (instances.length === 0) {
     try {
       SleepLiveActivity.start(props, LIVE_ACTIVITY_URL);
+      lastLiveActivityPropsKey = nextPropsKey;
+      lastLiveActivityInstanceCount = 1;
     } catch {}
     return;
   }
 
-  await Promise.all(
+  if (nextPropsKey === lastLiveActivityPropsKey && instances.length === lastLiveActivityInstanceCount) {
+    return;
+  }
+
+  const updateResults = await Promise.all(
     instances.map(async (instance) => {
       try {
         await instance.update(props);
+        return true;
       } catch {}
+
+      return false;
     }),
   );
+
+  if (updateResults.some(Boolean)) {
+    lastLiveActivityPropsKey = nextPropsKey;
+    lastLiveActivityInstanceCount = instances.length;
+  } else {
+    lastLiveActivityPropsKey = null;
+    lastLiveActivityInstanceCount = instances.length;
+  }
 }
 
 function buildSleepSurfacePreviewProps(
@@ -291,6 +423,7 @@ function buildSleepSurfacePreviewProps(
     projectedSleepLabel: formatClock(new Date(bedtimeDate.getTime() + snapshot.sleepPlan.sleepNeedMinutes * 60_000)),
     sleepInProgress: true,
     sleepProgress: previewSleepProgress,
+    sleepStartTimestamp: bedtimeDate.getTime(),
     sleepThemeActive: true,
     sleepThemeLabel: 'Sleep in progress',
   } satisfies TonightWidgetProps;
@@ -305,6 +438,7 @@ async function syncSleepLiveActivity(snapshot: TonightWidgetSnapshot) {
   }
 
   await startOrUpdateSleepLiveActivity(props);
+  scheduleSleepLiveActivityRefresh();
 }
 
 export async function previewSleepSurfaces(
@@ -322,8 +456,11 @@ export async function previewSleepSurfaces(
   };
 
   sleepSurfacePreviewProps = buildSleepSurfacePreviewProps(lastSnapshot, mode);
+  sleepSurfacePreviewTimeline = buildPreviewWidgetTimeline(sleepSurfacePreviewProps);
+  lastWidgetTimelineKey = null;
   syncTonightWidgetPreviewOrLive(lastSnapshot);
   await startOrUpdateSleepLiveActivity(sleepSurfacePreviewProps);
+  scheduleSleepLiveActivityRefresh();
 }
 
 export async function restoreSleepSurfacePreview() {
@@ -332,6 +469,8 @@ export async function restoreSleepSurfacePreview() {
   }
 
   sleepSurfacePreviewProps = null;
+  sleepSurfacePreviewTimeline = null;
+  lastWidgetTimelineKey = null;
 
   if (lastSnapshot) {
     await applyTonightWidgetSnapshot(lastSnapshot);
@@ -365,15 +504,17 @@ export async function registerTonightWidgetLayout() {
   } catch {}
 
   getSleepLiveActivityInstances();
+  lastWidgetTimelineKey = null;
+  lastLiveActivityPropsKey = null;
+  lastLiveActivityInstanceCount = 0;
 
   if (lastSnapshot) {
     await applyTonightWidgetSnapshot(lastSnapshot).catch(() => {});
   } else if (sleepSurfacePreviewProps) {
-    try {
-      TonightWidget.updateTimeline(buildPreviewWidgetTimeline(sleepSurfacePreviewProps));
-    } catch {}
+    syncTonightWidgetPreviewOrLive();
 
     await startOrUpdateSleepLiveActivity(sleepSurfacePreviewProps).catch(() => {});
+    scheduleSleepLiveActivityRefresh();
   }
 
   reloadAllWidgetSnapshots();
