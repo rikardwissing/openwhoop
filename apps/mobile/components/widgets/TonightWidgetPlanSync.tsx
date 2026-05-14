@@ -11,6 +11,22 @@ type TonightWidgetSyncData = Pick<
   chargingStatus?: 'charging' | 'not_charging' | null;
 };
 
+function resolveRelevantSession(sessions: SleepHistoryData['sessions']) {
+  const inProgressSession = sessions.find((session) => session.isInProgress) ?? null;
+
+  if (inProgressSession) {
+    return inProgressSession;
+  }
+
+  return sessions.reduce<SleepHistoryData['sessions'][number] | null>((latest, session) => {
+    if (!latest) {
+      return session;
+    }
+
+    return session.startAt > latest.startAt ? session : latest;
+  }, null);
+}
+
 function widgetSyncKey({
   batteryPercent,
   chargingStatus,
@@ -22,7 +38,7 @@ function widgetSyncKey({
   sleepPlan,
 }: TonightWidgetSyncData) {
   const plan = sleepPlan;
-  const latestSession = sessions[0];
+  const relevantSession = resolveRelevantSession(sessions);
 
   return [
     plan.alarmEnabled,
@@ -42,11 +58,12 @@ function widgetSyncKey({
     chargingStatus ?? 'null',
     completionStatus,
     isInProgress,
-    latestSession?.id ?? 'none',
-    latestSession?.startAt ?? 'null',
-    latestSession?.endAt ?? 'null',
-    latestSession?.completionStatus ?? 'null',
-    latestSession?.isInProgress ?? 'null',
+    sessions.length,
+    relevantSession?.id ?? 'none',
+    relevantSession?.startAt ?? 'null',
+    relevantSession?.endAt ?? 'null',
+    relevantSession?.completionStatus ?? 'null',
+    relevantSession?.isInProgress ?? 'null',
   ].join('|');
 }
 

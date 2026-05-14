@@ -65,9 +65,6 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
         : clamp(rawProps.score, 0, 100),
   };
 
-  const scoreValue = props.score === null ? 0 : Math.round(props.score);
-  const scoreText = props.score === null ? '--' : `${scoreValue}`;
-  const plannedSleepProgressValue = Math.max(6, Math.min(96, Math.round(props.progress * 100)));
   const sleepProgressValue = Math.max(6, Math.min(96, Math.round(props.sleepProgress * 100)));
   const windDownActive = props.sleepThemeActive && props.sleepThemeLabel === 'Time to wind down';
   const postBedtimeAwaitingSleep = props.bedtimePassed && !props.sleepInProgress;
@@ -78,8 +75,7 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
       ? 0
       : windDownActive
         ? 0
-        : scoreValue;
-  const ringText = sleepWindowProgressActive || windDownActive ? `${ringValue}` : scoreText;
+        : 0;
   const scoreRingColor =
     props.score === null ? accent : props.score >= 80 ? success : props.score >= 65 ? caution : alert;
   const ringColor = props.sleepInProgress
@@ -96,8 +92,8 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
   const sleepNeedDetail = props.sleepNeedLabel.startsWith('Need ') ? props.sleepNeedLabel : `Need ${props.sleepNeedLabel}`;
   const detailLine = props.sleepInProgress ? sleepNeedDetail : windDownActive ? sleepNeedDetail : props.phaseLabel;
   const compactTrailingText = windDownActive ? 'Now' : sleepWindowProgressActive ? `${ringValue}` : props.bedtimeLabel;
-  const compactLeadingColor = windDownActive ? sleepCyan : sleepAccent;
-  const showSleepThemeIcon = props.sleepInProgress || windDownActive || postBedtimeAwaitingSleep;
+
+  const showSleepThemeIcon = true;
   const batteryLabel = (() => {
     const value = rawProps.batteryLabel?.trim();
     if (value) {
@@ -134,7 +130,8 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
   const sleepDurationActive = props.sleepInProgress && sleepStartDate !== null;
   const rightHandReferenceDate = sleepDurationActive ? sleepStartDate : bedtimeTimerActive ? bedtimeDate : null;
   const rightHandCountsDown = windDownActive;
-  const rightHandTimerColor = sleepDurationActive ? sleepAccent : props.bedtimePassed ? sleepWarm : sleepCyan;
+  const rightHandTimerColor = sleepDurationActive ? sleepAccent : props.bedtimePassed ? alert : sleepCyan;
+  const compactLeadingColor = sleepDurationActive ? sleepAccent : props.bedtimePassed ? sleepWarm : sleepCyan;
   const rightHandTitle = sleepDurationActive
     ? 'Asleep'
     : props.bedtimePassed
@@ -149,7 +146,7 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
     const rawMinutes = countsDown
       ? (referenceDate.getTime() - now.getTime()) / 60_000
       : (now.getTime() - referenceDate.getTime()) / 60_000;
-    const totalMinutes = countsDown ? Math.max(0, Math.ceil(rawMinutes)) : Math.max(0, Math.floor(rawMinutes));
+    const totalMinutes = Math.max(0, Math.round(rawMinutes));
 
     if (countsDown && totalMinutes <= 0) {
       return 'Now';
@@ -183,19 +180,7 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
           modifiers={[gaugeStyle('circularCapacity'), tint(ringColor), frame({ width: size, height: size })]}
         />
 
-        {showSleepThemeIcon ? (
-          <Image color={ringColor} size={size >= 56 ? 22 : 16} systemName={primaryIcon} />
-        ) : (
-          <Text
-            modifiers={[
-              font({ size: size >= 56 ? 22 : 15, weight: 'bold', design: 'rounded' }),
-              foregroundStyle(text),
-              monospacedDigit(),
-              lineLimit(1),
-            ]}>
-            {ringText}
-          </Text>
-        )}
+        {showSleepThemeIcon ? <Image color={ringColor} size={size >= 56 ? 22 : 16} systemName={primaryIcon} /> : null}
       </ZStack>
     );
   }
@@ -223,7 +208,7 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
           monospacedDigit(),
           lineLimit(1),
         ]}>
-        {ringText}
+        {compactTrailingText}
       </Text>
     );
   }
@@ -257,7 +242,13 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
   }
 
   function BatteryBadge({ iconSize, textSize }: { iconSize: number; textSize: number }) {
-    const batteryColor = props.batteryCharging ? success : secondary;
+    const batteryColor = props.batteryCharging
+      ? success
+      : batteryPercent !== null && batteryPercent < 10
+        ? alert
+        : batteryPercent !== null && batteryPercent < 20
+          ? caution
+          : secondary;
 
     return (
       <HStack alignment="center" spacing={3}>
@@ -311,14 +302,11 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
     compactTrailing: <CompactTrailingMetric />,
     minimal: <Image color={compactLeadingColor} size={15} systemName={primaryIcon} />,
     expandedLeading: (
-            <VStack alignment="leading" spacing={4}>
+      <VStack alignment="leading" spacing={4}>
         <Spacer />
-
-      <ActivityRing size={68} />
+        <ActivityRing size={68} />
         <Spacer />
-
-            </VStack>
-
+      </VStack>
     ),
     expandedCenter: (
       <VStack alignment="leading" spacing={4}>

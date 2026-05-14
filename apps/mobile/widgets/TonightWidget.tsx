@@ -235,8 +235,15 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
   }
 
   function BatteryBadge() {
-    const batteryIconColor = props.batteryCharging ? success : resolvedSecondary;
-    const batteryTextColor = props.batteryCharging ? success : secondaryColor;
+    const batteryStatusColor = props.batteryCharging
+      ? success
+      : batteryPercent !== null && batteryPercent < 10
+        ? alert
+        : batteryPercent !== null && batteryPercent < 20
+          ? caution
+          : null;
+    const batteryIconColor = batteryStatusColor ?? resolvedSecondary;
+    const batteryTextColor = batteryStatusColor ?? secondaryColor;
 
     return (
       <HStack alignment="center" spacing={3}>

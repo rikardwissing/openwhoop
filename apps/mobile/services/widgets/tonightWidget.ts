@@ -154,7 +154,10 @@ export function buildTonightWidgetProps(snapshot: TonightWidgetSnapshot, now = n
   const sleepInProgress = sleepThemeStatus.sleepInProgress;
   const sleepWindowMs = Math.max(1, wakeDate.getTime() - bedtimeDate.getTime());
   const bedtimePassed = !sleepInProgress && windDownStatus.isBedtimeStarted;
-  const projectedFullSleepDate = new Date(now.getTime() + plan.sleepNeedMinutes * 60_000);
+  const projectedFullSleepDate = new Date(
+    (sleepInProgress ? (sleepThemeStatus.sleepStartDate?.getTime() ?? now.getTime()) : now.getTime()) +
+      plan.sleepNeedMinutes * 60_000,
+  );
 
   return {
     alarmStatusLabel: buildAlarmLabel(plan, wakeDate),
@@ -652,6 +655,7 @@ async function applyTonightWidgetSnapshot(
   };
 
   syncTonightWidgetPreviewOrLive(lastSnapshot);
+  reloadAllWidgetSnapshots();
 
   await syncSleepLiveActivity(lastSnapshot, options).catch(() => {});
 

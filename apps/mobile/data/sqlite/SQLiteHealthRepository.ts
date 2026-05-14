@@ -8660,18 +8660,28 @@ export class SQLiteHealthRepository implements HealthRepository {
             return [dateKey(session.end), summary?.timeAsleepMinutes ?? session.asleepMinutes ?? minutesBetween(session.start, session.end)] as const;
           }),
         );
-        const latestSession = mappedSessions[0] ?? null;
+        const inProgressSession = mappedSessions.find((session) => session.isInProgress) ?? null;
+        const latestSession = mappedSessions.reduce<SleepSession | null>((latest, session) => {
+          if (!latest) {
+            return session;
+          }
+
+          return parseSqliteDateTime(session.startAt).getTime() > parseSqliteDateTime(latest.startAt).getTime()
+            ? session
+            : latest;
+        }, null);
+        const surfaceSession = inProgressSession ?? latestSession;
         const trendEndDate = latestSleepForPlan?.end ?? latestSleep.end;
 
         const snapshot = {
-          headlineScore: latestSession?.score ?? latestSleep.score,
-          headlineLabel: latestSession?.isInProgress ? 'In progress' : describeSleepScore(latestSession?.score ?? latestSleep.score),
-          bedtime: latestSession?.bedtime ?? formatClock(latestSleep.start),
-          wakeTime: latestSession?.wakeTime ?? formatClock(latestSleep.end),
-          completionStatus: latestSession?.completionStatus ?? latestSleep.completionStatus,
-          isInProgress: latestSession?.isInProgress ?? latestSleep.isInProgress,
-          durationMinutes: latestSession?.durationMinutes ?? minutesBetween(latestSleep.start, latestSleep.end),
-          timeInBedMinutes: latestSession?.timeInBedMinutes ?? minutesBetween(latestSleep.start, latestSleep.end),
+          headlineScore: surfaceSession?.score ?? latestSleep.score,
+          headlineLabel: surfaceSession?.isInProgress ? 'In progress' : describeSleepScore(surfaceSession?.score ?? latestSleep.score),
+          bedtime: surfaceSession?.bedtime ?? formatClock(latestSleep.start),
+          wakeTime: surfaceSession?.wakeTime ?? formatClock(latestSleep.end),
+          completionStatus: surfaceSession?.completionStatus ?? latestSleep.completionStatus,
+          isInProgress: surfaceSession?.isInProgress ?? latestSleep.isInProgress,
+          durationMinutes: surfaceSession?.durationMinutes ?? minutesBetween(latestSleep.start, latestSleep.end),
+          timeInBedMinutes: surfaceSession?.timeInBedMinutes ?? minutesBetween(latestSleep.start, latestSleep.end),
           bedtimeConsistency: bedtimeConsistency === null ? null : Math.round(bedtimeConsistency),
           wakeConsistency: wakeConsistency === null ? null : Math.round(wakeConsistency),
           scoreTrend: buildFilledDailySeries(range, trendEndDate, (day) => sleepScoreByDay.get(day) ?? null),
