@@ -1,6 +1,7 @@
 import AppIntents
 import Foundation
 import SQLite3
+internal import UnstrapLiveActivityIntents
 
 private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
@@ -38,6 +39,15 @@ enum UnstrapSleepStateValue: String, AppEnum {
     .awake: "Awake",
     .asleep: "Asleep",
   ]
+}
+
+@available(iOS 17.0, *)
+struct UnstrapExternalAppIntentsPackage: AppIntentsPackage {
+  static var includedPackages: [any AppIntentsPackage.Type] {
+    [
+      UnstrapLiveActivityIntentsPackage.self,
+    ]
+  }
 }
 
 @available(iOS 16.0, *)

@@ -3,7 +3,6 @@ import { Platform } from 'react-native';
 import type { SQLiteDatabase } from 'expo-sqlite';
 
 import { SQLiteHealthRepository } from '@/data/sqlite/SQLiteHealthRepository';
-import { syncWindDownAppIcon } from '@/services/windDownAppIcon';
 import type { SleepHistoryData, SleepPlan } from '@/types/health';
 import { formatClock } from '@/utils/dateTime';
 import { describeSleepScore, formatShortDuration } from '@/utils/formatters';
@@ -30,7 +29,6 @@ type TonightWidgetSnapshot = Pick<
 export type SleepSurfacePreviewMode = 'wind_down' | 'sleep_in_progress';
 type TonightWidgetUpdateOptions = {
   allowLiveActivityScheduling?: boolean;
-  allowWindDownAppIconSync?: boolean;
 };
 type SleepLiveActivityStartOptions = {
   alertBody?: string;
@@ -658,10 +656,6 @@ async function applyTonightWidgetSnapshot(
   reloadAllWidgetSnapshots();
 
   await syncSleepLiveActivity(lastSnapshot, options).catch(() => {});
-
-  if (options.allowWindDownAppIconSync) {
-    await syncWindDownAppIcon(lastSnapshot).catch(() => {});
-  }
 }
 
 export async function registerTonightWidgetLayout() {

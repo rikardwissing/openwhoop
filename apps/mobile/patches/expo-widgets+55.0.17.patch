@@ -141,7 +141,7 @@ index a603765..f14091f 100644
      guard #available(iOS 16.1, *) else { throw LiveActivitiesNotSupportedException() }
  
 diff --git a/node_modules/expo-widgets/ios/LiveActivityFactory.swift b/node_modules/expo-widgets/ios/LiveActivityFactory.swift
-index caf1e05..4a348ad 100644
+index caf1e05..4a620c7 100644
 --- a/node_modules/expo-widgets/ios/LiveActivityFactory.swift
 +++ b/node_modules/expo-widgets/ios/LiveActivityFactory.swift
 @@ -8,12 +8,17 @@ final class LiveActivityFactory: SharedObject {
@@ -204,6 +204,63 @@ index caf1e05..4a348ad 100644
  
        let instance = LiveActivity(id: activity.id, name: name)
        instance.observePushTokenUpdates(for: activity, pushNotificationsEnabled: LiveActivityFactory.pushNotificationsEnabled)
+@@ -47,3 +76,56 @@ final class LiveActivityFactory: SharedObject {
+     }
+   }
+ }
++
++public enum ExpoWidgetsLiveActivityLauncher {
++  @available(iOS 16.2, *)
++  @discardableResult
++  public static func startOrUpdate(name: String, props: String, url: URL? = nil) async throws -> String {
++    guard ActivityAuthorizationInfo().areActivitiesEnabled else {
++      throw LiveActivitiesNotSupportedException()
++    }
++
++    if let url {
++      WidgetsStorage.set(url.absoluteString, forKey: "__expo_widgets_live_activity_\(name)_url")
++    }
++
++    let state = LiveActivityAttributes.ContentState(name: name, props: props)
++    let content = ActivityContent(state: state, staleDate: nil)
++    let matchingActivities = Activity<LiveActivityAttributes>.activities.filter { activity in
++      activity.content.state.name == name
++    }
++    var updatedActivityId: String?
++
++    for activity in matchingActivities {
++      if #available(iOS 26.0, *), activity.activityState == .pending {
++        await activity.end(nil, dismissalPolicy: .immediate)
++        continue
++      }
++
++      switch activity.activityState {
++      case .active, .stale:
++        await activity.update(content)
++        updatedActivityId = activity.id
++      case .ended, .dismissed:
++        break
++      @unknown default:
++        break
++      }
++    }
++
++    if let updatedActivityId {
++      return updatedActivityId
++    }
++
++    do {
++      let activity = try Activity.request(
++        attributes: LiveActivityAttributes(),
++        content: content,
++        pushType: LiveActivityFactory.pushNotificationsEnabled ? .token : nil
++      )
++      return activity.id
++    } catch {
++      throw StartLiveActivityException(error.localizedDescription)
++    }
++  }
++}
 diff --git a/node_modules/expo-widgets/ios/Widgets/EntryView.swift b/node_modules/expo-widgets/ios/Widgets/EntryView.swift
 index 947fc2e..af4b567 100644
 --- a/node_modules/expo-widgets/ios/Widgets/EntryView.swift

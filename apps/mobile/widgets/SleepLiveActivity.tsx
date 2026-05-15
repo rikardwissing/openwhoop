@@ -1,9 +1,11 @@
 import { Gauge, HStack, Image, Spacer, Text, VStack, ZStack } from '@expo/ui/swift-ui';
 import {
+  allowsTightening,
   font,
   foregroundStyle,
   frame,
   gaugeStyle,
+  kerning,
   lineLimit,
   monospacedDigit,
   offset,
@@ -169,6 +171,7 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
   const rightHandTimerText = rightHandReferenceDate
     ? formatRelativeTimeText(rightHandReferenceDate, rightHandCountsDown)
     : null;
+  const rightHandTimerNeedsCompression = rightHandTimerText?.includes(' ') ?? false;
 
   function ActivityRing({ size }: { size: number }) {
     return (
@@ -185,14 +188,18 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
     );
   }
 
-  function ActivityMetric({ size, staticColor }: { size: number; staticColor: string }) {
+  function ActivityMetric({ size, staticColor, allowsResizing }: { size: number; staticColor: string; allowsResizing?: boolean }) {
+    const resolvedSize = allowsResizing && rightHandTimerNeedsCompression ? Math.max(16, size - 6) : size;
+
     if (rightHandTimerText !== null) {
       return (
         <Text
           modifiers={[
-            font({ size, weight: 'bold', design: 'rounded' }),
+            font({ size: resolvedSize, weight: 'bold', design: 'rounded' }),
             foregroundStyle(rightHandTimerColor),
             monospacedDigit(),
+            allowsTightening(rightHandTimerNeedsCompression),
+            kerning(allowsResizing &&rightHandTimerNeedsCompression ? -0.4 : undefined),
             lineLimit(1),
           ]}>
           {rightHandTimerText}
@@ -214,13 +221,17 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
   }
 
   function CompactTrailingMetric() {
+    const compactSize = rightHandTimerNeedsCompression ? 12 : 14;
+
     if (rightHandTimerText !== null) {
       return (
         <Text
           modifiers={[
-            font({ size: 14, weight: 'bold', design: 'rounded' }),
+            font({ size: compactSize, weight: 'bold', design: 'rounded' }),
             foregroundStyle(rightHandTimerColor),
             monospacedDigit(),
+            allowsTightening(rightHandTimerNeedsCompression),
+            kerning(rightHandTimerNeedsCompression ? -0.3 : undefined),
             lineLimit(1),
           ]}>
           {rightHandTimerText}
@@ -324,7 +335,7 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
     expandedTrailing: (
       <VStack alignment="trailing" spacing={4}>
         <Spacer />
-        <ActivityMetric size={26} staticColor={ringColor} />
+        <ActivityMetric size={26} staticColor={ringColor} allowsResizing />
         <BatteryBadge iconSize={11} textSize={11} />
         <Spacer />
       </VStack>

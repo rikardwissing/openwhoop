@@ -65,19 +65,6 @@
       ],
       "expo-sharing",
       "./plugins/with-app-intents",
-      [
-        "@config-plugins/react-native-dynamic-app-icon",
-        {
-          "WindDown": {
-            "image": "./assets/images/app-icon-wind-down.png",
-            "prerendered": false
-          },
-          "Activity": {
-            "image": "./assets/images/app-icon-activity.png",
-            "prerendered": false
-          }
-        }
-      ],
       "./plugins/with-local-notifications-only",
       "./plugins/with-force-close-reminder",
       "expo-background-task",
