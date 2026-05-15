@@ -30,12 +30,12 @@ import { addMinutes, formatClock, formatClockMinutes, parseSqliteDateTime } from
 import { getMetricToneColor, getSleepMetricTone } from '@/utils/metricTone';
 import {
   ALARM_WEEKDAY_FULL_MASK,
-  buildSleepWindDownStatus,
   calculateOptimalBedtimeMinutes,
   isAlarmWeekdaySelected,
   nextAlarmTargetDate,
   normalizeClockMinutes,
   resolveNextWearableAlarmDate,
+  resolveTonightSurfaceState,
 } from '@/utils/sleepPlan';
 
 const stageBreakdownOrder: SleepStage[] = ['deep', 'light', 'rem', 'awake'];
@@ -321,7 +321,22 @@ export function SleepScreen() {
     alarmOneOffAt: oneOffAlarmAt ? oneOffAlarmAt.toISOString() : null,
     nextAlarmAt: nextWearableAlarmAt ? nextWearableAlarmAt.toISOString() : null,
   };
-  const windDownStatus = buildSleepWindDownStatus(sleepPlan);
+  const tonightSurfaceState = resolveTonightSurfaceState({
+    completionStatus: data.completionStatus,
+    isInProgress: data.isInProgress,
+    sessions: data.sessions,
+    sleepPlan,
+  });
+  const tonightSurfaceTitle =
+    tonightSurfaceState.mode === 'sleep'
+      ? 'Sleep in progress'
+      : tonightSurfaceState.mode === 'bedtime_passed'
+        ? 'Bedtime has started'
+        : tonightSurfaceState.mode === 'wind_down'
+          ? 'Time to wind down'
+          : tonightSurfaceState.windDownStatus.greeting;
+  const tonightSurfaceDetail =
+    tonightSurfaceState.mode === 'sleep' ? 'Sleep in progress' : tonightSurfaceState.windDownStatus.detail;
   const derivedRefreshMessage =
     derivedRefresh.data?.status === 'pending' || derivedRefresh.data?.status === 'processing'
       ? derivedRefresh.data.isFirstSync
@@ -585,10 +600,10 @@ export function SleepScreen() {
         <SectionHeader title="Tonight's Plan" trailing={`Need ${formatDuration(data.sleepPlan.sleepNeedMinutes)}`} />
         <View style={[
           styles.windDownBanner,
-          windDownStatus.isWindDownActive ? styles.windDownBannerActive : null,
+          tonightSurfaceState.mode !== 'awake' ? styles.windDownBannerActive : null,
         ]}>
-          <Text style={styles.windDownTitle}>{windDownStatus.greeting}</Text>
-          <Text style={styles.windDownDetail}>{windDownStatus.detail}</Text>
+          <Text style={styles.windDownTitle}>{tonightSurfaceTitle}</Text>
+          <Text style={styles.windDownDetail}>{tonightSurfaceDetail}</Text>
         </View>
         <View style={styles.planGrid}>
           <View style={styles.planMetric}>

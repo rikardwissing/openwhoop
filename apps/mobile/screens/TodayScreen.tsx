@@ -33,7 +33,7 @@ import {
 import { buildHeartCardDataFromWindow } from '@/utils/heartTimeline';
 import { logMobilePerf, logMobilePerfError } from '@/utils/mobilePerf';
 import { getRecoveryMetricTone, getSleepMetricTone, getStrainMetricTone } from '@/utils/metricTone';
-import { buildSleepWindDownStatus } from '@/utils/sleepPlan';
+import { resolveTonightSurfaceState } from '@/utils/sleepPlan';
 
 const HEART_PREFETCH_RANGE = '7d';
 const HEART_ACTIVITY_REFRESH_SCOPES = ['dashboard', 'sleep', 'heart', 'wellness', 'trends'] as const;
@@ -273,11 +273,34 @@ export function TodayScreen() {
     : deviceState.id
       ? 'Pull to sync wearable data'
       : 'Pull to refresh today';
-  const windDownStatus = data.day.isToday ? buildSleepWindDownStatus(data.tonightPlan) : null;
-  const useWindDownGreeting =
-    windDownStatus?.phase === 'wind_down' || windDownStatus?.phase === 'bedtime';
-  const useWindDownDetail =
-    windDownStatus?.phase === 'preview' || windDownStatus?.phase === 'wind_down' || windDownStatus?.phase === 'bedtime';
+  const tonightSurfaceState = data.day.isToday
+    ? resolveTonightSurfaceState({
+        completionStatus: data.sleepCard.completionStatus,
+        isInProgress: data.sleepCard.isInProgress,
+        sleepPlan: data.tonightPlan,
+      })
+    : null;
+  const useTonightSurfaceGreeting =
+    tonightSurfaceState?.mode === 'sleep' ||
+    tonightSurfaceState?.mode === 'bedtime_passed' ||
+    tonightSurfaceState?.mode === 'wind_down';
+  const useTonightSurfaceDetail = tonightSurfaceState !== null && tonightSurfaceState.mode !== 'awake';
+  const tonightSurfaceGreeting = (() => {
+    switch (tonightSurfaceState?.mode) {
+      case 'sleep':
+        return 'Sleep in progress';
+      case 'bedtime_passed':
+        return 'Bedtime has started';
+      case 'wind_down':
+        return 'Time to wind down';
+      case 'awake':
+      default:
+        return data.greeting;
+    }
+  })();
+  const tonightSurfaceDetail = tonightSurfaceState?.mode === 'sleep'
+    ? 'Sleep in progress'
+    : tonightSurfaceState?.windDownStatus.detail;
 
   return (
     <ScreenShell
@@ -296,8 +319,8 @@ export function TodayScreen() {
       ) : null}
 
       <View>
-        <Text style={styles.greeting}>{useWindDownGreeting ? windDownStatus?.greeting ?? data.greeting : data.greeting}</Text>
-        <Text style={styles.date}>{useWindDownDetail ? windDownStatus?.detail : data.dateLabel}</Text>
+        <Text style={styles.greeting}>{useTonightSurfaceGreeting ? tonightSurfaceGreeting : data.greeting}</Text>
+        <Text style={styles.date}>{useTonightSurfaceDetail ? tonightSurfaceDetail : data.dateLabel}</Text>
       </View>
 
       <View style={styles.heroRow}>
@@ -330,7 +353,7 @@ export function TodayScreen() {
         />
       </View>
 
-      <TonightPlanCard onOpenSleep={openSleep} plan={data.tonightPlan} />
+      <TonightPlanCard onOpenSleep={openSleep} plan={data.tonightPlan} surfaceState={tonightSurfaceState ?? undefined} />
 
       {displayedHeartCardData ? (
         <HeartCard

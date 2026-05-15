@@ -5,8 +5,8 @@ import type { SQLiteDatabase } from 'expo-sqlite';
 import { SQLiteHealthRepository } from '@/data/sqlite/SQLiteHealthRepository';
 import type { SleepHistoryData, SleepPlan } from '@/types/health';
 import { formatClock } from '@/utils/dateTime';
-import { describeSleepScore, formatShortDuration } from '@/utils/formatters';
-import { buildSleepPlanGreeting, buildSleepThemeStatus, buildSleepWindDownStatus, resolveSleepPlanWindow } from '@/utils/sleepPlan';
+import { describeSleepScore } from '@/utils/formatters';
+import { resolveSleepPlanWindow, resolveTonightSurfaceState } from '@/utils/sleepPlan';
 import SleepLiveActivity from '@/widgets/SleepLiveActivity';
 import TonightWidget from '@/widgets/TonightWidget';
 import type { TonightWidgetProps } from '@/widgets/TonightWidget';
@@ -85,28 +85,6 @@ function reloadAllWidgetSnapshots() {
   } catch {}
 }
 
-function buildAlarmLabel(plan: SleepPlan, wakeDate: Date) {
-  if (!plan.alarmEnabled) {
-    return 'Wake target';
-  }
-
-  return plan.alarmWakeMode === 'exact_time'
-    ? `Alarm ${formatClock(wakeDate)}`
-    : `Smart alarm ${formatClock(wakeDate)}`;
-}
-
-function buildSleepDebtLabel(plan: SleepPlan) {
-  if (plan.sleepDebtMinutes > 0) {
-    return `${formatShortDuration(plan.sleepDebtMinutes)} debt`;
-  }
-
-  if (plan.napCreditMinutes > 0) {
-    return `${formatShortDuration(plan.napCreditMinutes)} nap credit`;
-  }
-
-  return 'No sleep debt';
-}
-
 function buildSnapshotFromPlan(
   plan: SleepPlan,
   options: {
@@ -130,14 +108,6 @@ function buildSnapshotFromPlan(
   };
 }
 
-function formatBatteryLabel(batteryPercent: number | null | undefined) {
-  if (batteryPercent === null || batteryPercent === undefined) {
-    return '--%';
-  }
-
-  return `${Math.max(0, Math.min(100, Math.round(batteryPercent)))}%`;
-}
-
 export function buildTonightWidgetProps(snapshot: TonightWidgetSnapshot, now = new Date()): TonightWidgetProps {
   const plan = snapshot.sleepPlan;
   const resolvedBatteryPercent = snapshot.batteryPercent ?? lastKnownBatteryPercent;
@@ -147,49 +117,40 @@ export function buildTonightWidgetProps(snapshot: TonightWidgetSnapshot, now = n
   }
 
   const { bedtimeDate, wakeDate } = resolveSleepPlanWindow(plan, now);
-  const windDownStatus = buildSleepWindDownStatus(plan, now);
-  const sleepThemeStatus = buildSleepThemeStatus(snapshot, now);
-  const sleepInProgress = sleepThemeStatus.sleepInProgress;
+  const surfaceState = resolveTonightSurfaceState(snapshot, now);
+  const sleepInProgress = surfaceState.mode === 'sleep';
   const sleepWindowMs = Math.max(1, wakeDate.getTime() - bedtimeDate.getTime());
-  const bedtimePassed = !sleepInProgress && windDownStatus.isBedtimeStarted;
+  const bedtimePassed = surfaceState.mode === 'bedtime_passed';
   const projectedFullSleepDate = new Date(
-    (sleepInProgress ? (sleepThemeStatus.sleepStartDate?.getTime() ?? now.getTime()) : now.getTime()) +
+    (sleepInProgress ? (surfaceState.sleepStartDate?.getTime() ?? now.getTime()) : now.getTime()) +
       plan.sleepNeedMinutes * 60_000,
   );
 
   return {
-    alarmStatusLabel: buildAlarmLabel(plan, wakeDate),
-    bedtimeLabel: sleepInProgress ? 'Now' : formatClock(bedtimeDate),
+    batteryCharging: snapshot.chargingStatus === 'charging',
+    batteryPercent: resolvedBatteryPercent,
     bedtimeTimestamp: bedtimeDate.getTime(),
-    bedtimePassed,
-    greetingLabel: sleepInProgress ? 'Sleep in progress' : buildSleepPlanGreeting(plan, now),
-    phaseLabel: sleepInProgress ? 'Sleep in progress' : windDownStatus.phaseLabel,
+    napCreditMinutes: plan.napCreditMinutes,
     progress: bedtimePassed
       ? clamp((now.getTime() - bedtimeDate.getTime()) / sleepWindowMs, 0, 1)
       : 0,
-    batteryCharging: snapshot.chargingStatus === 'charging',
-    batteryLabel: formatBatteryLabel(resolvedBatteryPercent),
-    projectedSleepLabel: formatClock(projectedFullSleepDate),
+    projectedSleepTimestamp: projectedFullSleepDate.getTime(),
     score: snapshot.headlineScore,
-    scoreLabel: snapshot.headlineLabel,
-    sleepDebtLabel: buildSleepDebtLabel(plan),
-    sleepInProgress,
-    sleepNeedLabel: formatShortDuration(plan.sleepNeedMinutes),
-    sleepProgress: sleepThemeStatus.sleepProgress,
+    sleepDebtMinutes: plan.sleepDebtMinutes,
+    sleepNeedMinutes: plan.sleepNeedMinutes,
+    sleepProgress: surfaceState.sleepProgress,
     sleepStartTimestamp: sleepInProgress
-      ? (sleepThemeStatus.sleepStartDate?.getTime() ?? now.getTime())
+      ? (surfaceState.sleepStartDate?.getTime() ?? now.getTime())
       : undefined,
-    sleepThemeActive: sleepThemeStatus.sleepThemeActive,
-    sleepThemeLabel: sleepThemeStatus.sleepThemeLabel,
-    updatedAtLabel: formatClock(now),
-    wakeLabel: formatClock(wakeDate),
+    surfaceMode: surfaceState.mode,
+    wakeTimestamp: wakeDate.getTime(),
   };
 }
 
 function buildTimelineDates(snapshot: TonightWidgetSnapshot, now: Date) {
   const plan = snapshot.sleepPlan;
   const { bedtimeDate, previewStartDate, prepStartDate, wakeDate } = resolveSleepPlanWindow(plan, now);
-  const sleepThemeStatus = buildSleepThemeStatus(snapshot, now);
+  const surfaceState = resolveTonightSurfaceState(snapshot, now);
   const candidates = [
     now,
     previewStartDate,
@@ -201,9 +162,9 @@ function buildTimelineDates(snapshot: TonightWidgetSnapshot, now: Date) {
   const latestDate = new Date(now.getTime() + TIMELINE_WINDOW_MS);
   const uniqueDates = new Map<number, Date>();
 
-  if (sleepThemeStatus.sleepInProgress) {
-    const sleepEndEstimate = sleepThemeStatus.sleepStartDate
-      ? new Date(sleepThemeStatus.sleepStartDate.getTime() + plan.sleepNeedMinutes * 60_000)
+  if (surfaceState.mode === 'sleep') {
+    const sleepEndEstimate = surfaceState.sleepStartDate
+      ? new Date(surfaceState.sleepStartDate.getTime() + plan.sleepNeedMinutes * 60_000)
       : wakeDate;
     const progressTimelineEnd = new Date(Math.min(latestDate.getTime(), sleepEndEstimate.getTime() + 60 * 60_000));
     const nextHalfHour = new Date(Math.ceil(now.getTime() / (30 * 60_000)) * 30 * 60_000);
@@ -337,11 +298,6 @@ async function refreshSleepLiveActivityForClockTick() {
   }
 
   if (sleepSurfacePreviewProps) {
-    sleepSurfacePreviewProps = {
-      ...sleepSurfacePreviewProps,
-      updatedAtLabel: formatClock(new Date()),
-    };
-
     await startOrUpdateSleepLiveActivity(sleepSurfacePreviewProps);
     scheduleSleepLiveActivityRefresh();
     return;
@@ -353,7 +309,7 @@ async function refreshSleepLiveActivityForClockTick() {
 
   const props = buildTonightWidgetProps(lastSnapshot);
 
-  if (!props.sleepThemeActive) {
+  if (props.surfaceMode === 'awake') {
     await endSleepLiveActivities();
     return;
   }
@@ -513,7 +469,7 @@ async function scheduleSleepLiveActivityAtWindDown(snapshot: TonightWidgetSnapsh
   }
 
   const scheduled = await startOrUpdateSleepLiveActivity(props, {
-    alertBody: `Bed ${props.bedtimeLabel}, wake ${props.wakeLabel}`,
+    alertBody: `Bed ${formatClock(prepStartDate)}, wake ${formatClock(wakeDate)}`,
     alertTitle: LIVE_ACTIVITY_SCHEDULED_WIND_DOWN_ALERT_TITLE,
     startDate: prepStartDate,
   });
@@ -539,9 +495,7 @@ function buildSleepSurfacePreviewProps(
 
     return {
       ...previewProps,
-      greetingLabel: 'Time to wind down',
-      sleepThemeActive: true,
-      sleepThemeLabel: 'Time to wind down',
+      surfaceMode: 'wind_down',
     } satisfies TonightWidgetProps;
   }
 
@@ -560,16 +514,10 @@ function buildSleepSurfacePreviewProps(
 
   return {
     ...previewProps,
-    bedtimeLabel: 'Now',
-    bedtimePassed: false,
-    greetingLabel: 'Sleep in progress',
-    phaseLabel: 'Sleep in progress',
-    projectedSleepLabel: formatClock(new Date(bedtimeDate.getTime() + snapshot.sleepPlan.sleepNeedMinutes * 60_000)),
-    sleepInProgress: true,
+    projectedSleepTimestamp: bedtimeDate.getTime() + snapshot.sleepPlan.sleepNeedMinutes * 60_000,
     sleepProgress: previewSleepProgress,
     sleepStartTimestamp: bedtimeDate.getTime(),
-    sleepThemeActive: true,
-    sleepThemeLabel: 'Sleep in progress',
+    surfaceMode: 'sleep',
   } satisfies TonightWidgetProps;
 }
 
@@ -581,7 +529,7 @@ async function syncSleepLiveActivity(
   const props = sleepSurfacePreviewProps ?? buildTonightWidgetProps(snapshot, now);
   const allowLiveActivityScheduling = options.allowLiveActivityScheduling ?? true;
 
-  if (!props.sleepThemeActive) {
+  if (props.surfaceMode === 'awake') {
     if (
       allowLiveActivityScheduling &&
       !sleepSurfacePreviewProps &&

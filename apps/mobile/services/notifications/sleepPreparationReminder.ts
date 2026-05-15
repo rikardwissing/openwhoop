@@ -7,10 +7,7 @@ import { syncNotificationPermissionFromSystem } from '@/services/notifications/n
 import type { NotificationPermissionState } from '@/types/device';
 import type { SleepPlan } from '@/types/health';
 import type { TonightWidgetProps } from '@/widgets/TonightWidget';
-import { formatClock } from '@/utils/dateTime';
-import { formatShortDuration } from '@/utils/formatters';
 import {
-  buildSleepWindDownStatus,
   nextUpcomingClockDate,
   normalizeClockMinutes,
   resolveSleepPlanWindow,
@@ -59,45 +56,22 @@ async function ensureSleepPreparationReminderNotificationCategory() {
   ).catch(() => {});
 }
 
-function buildSleepDebtLabel(plan: SleepPlan) {
-  if (plan.sleepDebtMinutes > 0) {
-    return `${formatShortDuration(plan.sleepDebtMinutes)} debt`;
-  }
-
-  if (plan.napCreditMinutes > 0) {
-    return `${formatShortDuration(plan.napCreditMinutes)} nap credit`;
-  }
-
-  return 'No sleep debt';
-}
-
 function buildSleepPreparationLiveActivityProps(plan: SleepPlan, triggerAt: Date): TonightWidgetProps {
   const { bedtimeDate, wakeDate } = resolveSleepPlanWindow(plan, triggerAt);
-  const windDownStatus = buildSleepWindDownStatus(plan, triggerAt);
 
   return {
-    alarmStatusLabel: plan.alarmWakeMode === 'exact_time'
-      ? `Alarm ${formatClock(wakeDate)}`
-      : `Smart alarm ${formatClock(wakeDate)}`,
     batteryCharging: false,
-    batteryLabel: '--%',
-    bedtimeLabel: formatClock(bedtimeDate),
+    batteryPercent: null,
     bedtimeTimestamp: bedtimeDate.getTime(),
-    bedtimePassed: false,
-    greetingLabel: 'Time to wind down',
-    phaseLabel: windDownStatus.phaseLabel,
-    projectedSleepLabel: formatClock(wakeDate),
+    napCreditMinutes: plan.napCreditMinutes,
     progress: 0,
+    projectedSleepTimestamp: wakeDate.getTime(),
     score: null,
-    scoreLabel: 'Waiting for sleep',
-    sleepDebtLabel: buildSleepDebtLabel(plan),
-    sleepInProgress: false,
-    sleepNeedLabel: formatShortDuration(plan.sleepNeedMinutes),
+    sleepDebtMinutes: plan.sleepDebtMinutes,
+    sleepNeedMinutes: plan.sleepNeedMinutes,
     sleepProgress: 0,
-    sleepThemeActive: true,
-    sleepThemeLabel: 'Time to wind down',
-    updatedAtLabel: formatClock(triggerAt),
-    wakeLabel: formatClock(wakeDate),
+    surfaceMode: 'wind_down',
+    wakeTimestamp: wakeDate.getTime(),
   };
 }
 

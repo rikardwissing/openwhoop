@@ -28,6 +28,7 @@ export interface AlarmResolutionInput extends AlarmSettingsInput {
 }
 
 export type SleepWindDownPhase = 'before_preview' | 'preview' | 'wind_down' | 'bedtime';
+export type TonightSurfaceMode = 'sleep' | 'bedtime_passed' | 'wind_down' | 'awake';
 
 export interface SleepWindDownStatus {
   bedtimeDate: Date;
@@ -39,28 +40,28 @@ export interface SleepWindDownStatus {
   minutesUntilBedtime: number;
   minutesUntilPrepStart: number;
   phase: SleepWindDownPhase;
-  phaseLabel: string;
   prepStartDate: Date;
   wakeDate: Date;
 }
 
-export interface SleepThemeStatus {
-  completedSleepEndDate: Date | null;
-  sleepInProgress: boolean;
-  sleepProgress: number;
-  sleepStartDate: Date | null;
-  sleepThemeActive: boolean;
-  sleepThemeLabel: string;
-  windDownStatus: SleepWindDownStatus;
-}
-
 type SleepThemeSession = Pick<SleepSession, 'completionStatus' | 'endAt' | 'isInProgress' | 'startAt'>;
 
-interface SleepThemeInput {
+export interface TonightSurfaceInput {
   completionStatus?: SleepCompletionStatus | null;
   isInProgress?: boolean | null;
   sessions?: SleepThemeSession[];
   sleepPlan: SleepPlan;
+}
+
+export interface TonightSurfaceState {
+  completedSleepEndDate: Date | null;
+  currentNightSleepEndDate: Date | null;
+  currentNightSleepStartDate: Date | null;
+  hasCurrentNightSleep: boolean;
+  mode: TonightSurfaceMode;
+  sleepProgress: number;
+  sleepStartDate: Date | null;
+  windDownStatus: SleepWindDownStatus;
 }
 
 export function normalizeClockMinutes(minutes: number) {
@@ -173,6 +174,17 @@ function latestSessionByDate(
   }, null);
 }
 
+function sessionInterval(session: SleepThemeSession) {
+  const startDate = parseValidDate(session.startAt);
+  const endDate = parseValidDate(session.endAt);
+
+  if (!startDate || !endDate) {
+    return null;
+  }
+
+  return { endDate, startDate };
+}
+
 export function resolveSleepPlanWakeDate(plan: SleepPlan, now = new Date()) {
   return parseFutureDate(plan.nextAlarmAt, now) ?? nextUpcomingClockDate(plan.targetWakeMinutes, now);
 }
@@ -216,7 +228,6 @@ export function buildSleepWindDownStatus(plan: SleepPlan, now = new Date()): Sle
       minutesUntilBedtime,
       minutesUntilPrepStart,
       phase,
-      phaseLabel: `Wake in ${formatCountdownMinutes(minutesUntilWake)}`,
       prepStartDate,
       wakeDate,
     };
@@ -233,7 +244,6 @@ export function buildSleepWindDownStatus(plan: SleepPlan, now = new Date()): Sle
       minutesUntilBedtime,
       minutesUntilPrepStart,
       phase,
-      phaseLabel: `Bedtime in ${formatCountdownMinutes(minutesUntilBedtime)}`,
       prepStartDate,
       wakeDate,
     };
@@ -250,7 +260,6 @@ export function buildSleepWindDownStatus(plan: SleepPlan, now = new Date()): Sle
       minutesUntilBedtime,
       minutesUntilPrepStart,
       phase,
-      phaseLabel: `Wind-down starts ${formatClock(prepStartDate)}`,
       prepStartDate,
       wakeDate,
     };
@@ -266,7 +275,6 @@ export function buildSleepWindDownStatus(plan: SleepPlan, now = new Date()): Sle
     minutesUntilBedtime,
     minutesUntilPrepStart,
     phase,
-    phaseLabel: `Bed in ${formatCountdownMinutes(minutesUntilBedtime)}`,
     prepStartDate,
     wakeDate,
   };
@@ -279,7 +287,7 @@ export function buildSleepPlanGreeting(plan: SleepPlan, now = new Date()) {
     : buildTimeOfDayGreeting(now);
 }
 
-export function buildSleepThemeStatus(input: SleepThemeInput, now = new Date()): SleepThemeStatus {
+export function resolveTonightSurfaceState(input: TonightSurfaceInput, now = new Date()): TonightSurfaceState {
   const windDownStatus = buildSleepWindDownStatus(input.sleepPlan, now);
   const sessions = input.sessions ?? [];
   const fallbackSleepInProgress = Boolean(input.isInProgress || input.completionStatus === 'in_progress');
@@ -288,11 +296,20 @@ export function buildSleepThemeStatus(input: SleepThemeInput, now = new Date()):
     (session) => parseValidDate(session.startAt),
   );
   const latestSession = latestSessionByDate(sessions, (session) => parseValidDate(session.startAt));
-  const completedAfterWindDown = latestSessionByDate(
+  const currentNightCompletedSleep = latestSessionByDate(
     sessions.filter((session) => !session.isInProgress && session.completionStatus === 'complete'),
     (session) => {
-      const endDate = parseValidDate(session.endAt);
-      return endDate && endDate.getTime() >= windDownStatus.prepStartDate.getTime() ? endDate : null;
+      const interval = sessionInterval(session);
+
+      if (!interval) {
+        return null;
+      }
+
+      const overlapsCurrentNight =
+        interval.startDate.getTime() < windDownStatus.wakeDate.getTime() &&
+        interval.endDate.getTime() > windDownStatus.bedtimeDate.getTime();
+
+      return overlapsCurrentNight ? interval.endDate : null;
     },
   );
   const sleepInProgress = Boolean(inProgressSession || fallbackSleepInProgress);
@@ -304,25 +321,25 @@ export function buildSleepThemeStatus(input: SleepThemeInput, now = new Date()):
   const sleepProgress = sleepInProgress
     ? Math.max(0.06, Math.min(0.96, rawSleepProgress))
     : 0;
-  const plannedSleepWindowActive =
-    now.getTime() >= windDownStatus.prepStartDate.getTime() &&
-    now.getTime() < windDownStatus.wakeDate.getTime();
-  const sleepThemeActive = sleepInProgress || (plannedSleepWindowActive && !completedAfterWindDown);
-  const sleepThemeLabel = sleepInProgress
-    ? 'Sleep in progress'
-    : windDownStatus.phase === 'bedtime'
-      ? 'Bedtime has started'
-      : windDownStatus.phase === 'wind_down'
-        ? 'Time to wind down'
-        : windDownStatus.greeting;
+  const hasCurrentNightSleep = sleepInProgress || Boolean(currentNightCompletedSleep);
+  const mode: TonightSurfaceMode = sleepInProgress
+    ? 'sleep'
+    : windDownStatus.phase === 'bedtime' && !hasCurrentNightSleep
+      ? 'bedtime_passed'
+      : windDownStatus.phase === 'wind_down' && !hasCurrentNightSleep
+        ? 'wind_down'
+        : 'awake';
 
   return {
-    completedSleepEndDate: completedAfterWindDown?.date ?? null,
-    sleepInProgress,
+    completedSleepEndDate: currentNightCompletedSleep?.date ?? null,
+    currentNightSleepEndDate: currentNightCompletedSleep?.date ?? null,
+    currentNightSleepStartDate: currentNightCompletedSleep
+      ? (sessionInterval(currentNightCompletedSleep.session)?.startDate ?? null)
+      : sleepStartDate,
+    hasCurrentNightSleep,
+    mode,
     sleepProgress,
     sleepStartDate,
-    sleepThemeActive,
-    sleepThemeLabel,
     windDownStatus,
   };
 }

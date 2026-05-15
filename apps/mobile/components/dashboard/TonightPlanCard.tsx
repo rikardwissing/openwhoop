@@ -13,10 +13,11 @@ import { formatClock, parseSqliteDateTime } from '@/utils/dateTime';
 import { formatDuration } from '@/utils/formatters';
 import {
   ALARM_WEEKDAY_FULL_MASK,
-  buildSleepWindDownStatus,
   isAlarmWeekdaySelected,
   nextAlarmTargetDate,
   resolveNextWearableAlarmDate,
+  resolveTonightSurfaceState,
+  type TonightSurfaceState,
 } from '@/utils/sleepPlan';
 
 const weekdayLabels = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const;
@@ -56,9 +57,11 @@ function alarmWakeModeSummary(plan: SleepPlan) {
 export function TonightPlanCard({
   onOpenSleep,
   plan,
+  surfaceState,
 }: {
   onOpenSleep: () => void;
   plan: SleepPlan;
+  surfaceState?: TonightSurfaceState;
 }) {
   const repository = useHealthRepository();
   const refreshHealthData = useRefreshHealthData();
@@ -76,7 +79,17 @@ export function TonightPlanCard({
   };
   const nextDisplayedAlarmAt = plan.nextAlarmAt ? parseSqliteDateTime(plan.nextAlarmAt) : null;
   const alarmSummary = `${alarmScheduleSummary(plan)} · ${alarmWakeModeSummary(plan)}`;
-  const windDownStatus = buildSleepWindDownStatus(plan);
+  const tonightSurfaceState = surfaceState ?? resolveTonightSurfaceState({ sleepPlan: plan });
+  const tonightSurfaceTitle =
+    tonightSurfaceState.mode === 'sleep'
+      ? 'Sleep in progress'
+      : tonightSurfaceState.mode === 'bedtime_passed'
+        ? 'Bedtime has started'
+        : tonightSurfaceState.mode === 'wind_down'
+          ? 'Time to wind down'
+          : tonightSurfaceState.windDownStatus.greeting;
+  const tonightSurfaceDetail =
+    tonightSurfaceState.mode === 'sleep' ? 'Sleep in progress' : tonightSurfaceState.windDownStatus.detail;
 
   useEffect(() => {
     setAlarmEnabled(plan.alarmEnabled);
@@ -172,10 +185,10 @@ export function TonightPlanCard({
       <SectionHeader title="Tonight" trailing={`Need ${formatDuration(plan.sleepNeedMinutes)}`} />
       <View style={[
         styles.windDownBanner,
-        windDownStatus.isWindDownActive ? styles.windDownBannerActive : null,
+        tonightSurfaceState.mode !== 'awake' ? styles.windDownBannerActive : null,
       ]}>
-        <Text style={styles.windDownTitle}>{windDownStatus.greeting}</Text>
-        <Text style={styles.windDownDetail}>{windDownStatus.detail}</Text>
+        <Text style={styles.windDownTitle}>{tonightSurfaceTitle}</Text>
+        <Text style={styles.windDownDetail}>{tonightSurfaceDetail}</Text>
       </View>
       <View style={styles.metricRow}>
         <View style={styles.metricBlock}>

@@ -112,26 +112,18 @@ private enum UnstrapNotificationPayload {
 
   static func fallbackLiveActivityPropsJSON(now: Date = Date()) -> String {
     encode([
-      "alarmStatusLabel": "Open Unstrap",
       "batteryCharging": false,
-      "batteryLabel": "--%",
-      "bedtimeLabel": "--",
+      "batteryPercent": NSNull(),
       "bedtimeTimestamp": 0,
-      "bedtimePassed": false,
-      "greetingLabel": "Time to wind down",
-      "phaseLabel": "Wind down",
-      "projectedSleepLabel": "--",
+      "napCreditMinutes": 0,
       "progress": 0,
+      "projectedSleepTimestamp": 0,
       "score": NSNull(),
-      "scoreLabel": "Waiting for sleep",
-      "sleepDebtLabel": "Sync to update",
-      "sleepInProgress": false,
-      "sleepNeedLabel": "Need --",
+      "sleepDebtMinutes": 0,
+      "sleepNeedMinutes": 0,
       "sleepProgress": 0,
-      "sleepThemeActive": true,
-      "sleepThemeLabel": "Time to wind down",
-      "updatedAtLabel": clockString(now),
-      "wakeLabel": "--",
+      "surfaceMode": "wind_down",
+      "wakeTimestamp": 0,
     ]) ?? "{}"
   }
 
