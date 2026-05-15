@@ -53,6 +53,16 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
   const sleepProgressValue = Math.max(6, Math.min(96, Math.round(props.sleepProgress * 100)));
   const scoreRingColor =
     props.score === null ? accent : props.score >= 80 ? success : props.score >= 65 ? caution : alert;
+  type ActivityRingConfig = {
+    color: string;
+    value: number;
+  };
+  type ActivityMetricConfig = {
+    fallbackColor: string;
+    fallbackText: string;
+    timerColor: string;
+    timerText: string | null;
+  };
 
   function formatClock(timestamp: number) {
     if (timestamp <= 0) {
@@ -144,98 +154,45 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
     return `${hours}h ${minutes}m`;
   }
 
-  function ringValue() {
-    return props.surfaceMode === 'sleep' ? sleepProgressValue : 0;
-  }
-
-  function ringColor() {
-    switch (props.surfaceMode) {
-      case 'sleep':
-        return sleepAccent;
-      case 'bedtime_passed':
-        return sleepWarm;
-      case 'wind_down':
-        return sleepCyan;
-      case 'awake':
-      default:
-        return scoreRingColor;
-    }
-  }
-
-  function rightHandTimer() {
-    switch (props.surfaceMode) {
-      case 'sleep':
-        return {
-          color: sleepAccent,
-          text: formatRelativeTimeText(props.sleepStartTimestamp, false),
-        };
-      case 'bedtime_passed':
-        return {
-          color: alert,
-          text: formatRelativeTimeText(props.bedtimeTimestamp, false),
-        };
-      case 'wind_down':
-        return {
-          color: sleepCyan,
-          text: formatRelativeTimeText(props.bedtimeTimestamp, true),
-        };
-      case 'awake':
-      default:
-        return {
-          color: scoreRingColor,
-          text: null,
-        };
-    }
-  }
-
-  function compactTrailingText() {
-    if (props.surfaceMode === 'sleep') {
-      return `${sleepProgressValue}`;
-    }
-
-    if (props.surfaceMode === 'bedtime_passed') {
-      return '0';
-    }
-
-    if (props.surfaceMode === 'wind_down') {
-      return 'Now';
-    }
-
-    return formatClock(props.bedtimeTimestamp);
-  }
-
-  function ActivityRing({ size }: { size: number }) {
+  function ActivityRing({ ring, size }: { ring: ActivityRingConfig; size: number }) {
     return (
       <ZStack alignment="center" modifiers={[frame({ width: size, height: size })]}>
         <Gauge
-          value={ringValue()}
+          value={ring.value}
           min={0}
           max={100}
-          modifiers={[gaugeStyle('circularCapacity'), tint(ringColor()), frame({ width: size, height: size })]}
+          modifiers={[gaugeStyle('circularCapacity'), tint(ring.color), frame({ width: size, height: size })]}
         />
 
-        <Image color={ringColor()} size={size >= 56 ? 22 : 16} systemName={primaryIcon} />
+        <Image color={ring.color} size={size >= 56 ? 22 : 16} systemName={primaryIcon} />
       </ZStack>
     );
   }
 
-  function ActivityMetric({ size, allowsResizing }: { size: number; allowsResizing?: boolean }) {
-    const timer = rightHandTimer();
-    const needsCompression = timer.text?.includes(' ') ?? false;
+  function ActivityMetric({
+    allowsResizing,
+    metric,
+    size,
+  }: {
+    allowsResizing?: boolean;
+    metric: ActivityMetricConfig;
+    size: number;
+  }) {
+    const needsCompression = metric.timerText?.includes(' ') ?? false;
     const resolvedSize = allowsResizing && needsCompression ? Math.max(16, size - 6) : size;
 
-    if (timer.text) {
+    if (metric.timerText) {
       return (
         <Text
           modifiers={[
             font({ size: resolvedSize, weight: 'bold', design: 'rounded' }),
-            foregroundStyle(timer.color),
+            foregroundStyle(metric.timerColor),
             monospacedDigit(),
             allowsTightening(needsCompression),
             kerning(allowsResizing && needsCompression ? -0.4 : undefined),
             lineLimit(1),
           ]}>
-          {timer.text}
+          {metric.timerText}
         </Text>
       );
     }
@@ -244,32 +201,31 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
       <Text
         modifiers={[
           font({ size, weight: 'bold', design: 'rounded' }),
-          foregroundStyle(ringColor()),
+          foregroundStyle(metric.fallbackColor),
           monospacedDigit(),
           lineLimit(1),
         ]}>
-        {compactTrailingText()}
+        {metric.fallbackText}
       </Text>
     );
   }
 
-  function CompactTrailingMetric() {
-    const timer = rightHandTimer();
-    const needsCompression = timer.text?.includes(' ') ?? false;
+  function CompactTrailingMetric({ metric }: { metric: ActivityMetricConfig }) {
+    const needsCompression = metric.timerText?.includes(' ') ?? false;
     const compactSize = needsCompression ? 12 : 14;
 
-    if (timer.text) {
+    if (metric.timerText) {
       return (
         <Text
           modifiers={[
             font({ size: compactSize, weight: 'bold', design: 'rounded' }),
-            foregroundStyle(timer.color),
+            foregroundStyle(metric.timerColor),
             monospacedDigit(),
             allowsTightening(needsCompression),
             kerning(needsCompression ? -0.3 : undefined),
             lineLimit(1),
           ]}>
-          {timer.text}
+          {metric.timerText}
         </Text>
       );
     }
@@ -278,11 +234,11 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
       <Text
         modifiers={[
           font({ size: 14, weight: 'bold', design: 'rounded' }),
-          foregroundStyle(text),
+          foregroundStyle(metric.fallbackColor),
           monospacedDigit(),
           lineLimit(1),
         ]}>
-        {compactTrailingText()}
+        {metric.fallbackText}
       </Text>
     );
   }
@@ -312,27 +268,56 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
     );
   }
 
-  function LiveActivityBannerSleeping() {
+  function LiveActivityBannerLayout({
+    detail,
+    headline,
+    metric,
+    ring,
+    schedule,
+  }: {
+    detail: string;
+    headline: string;
+    metric: ActivityMetricConfig;
+    ring: ActivityRingConfig;
+    schedule: string;
+  }) {
     return (
       <HStack alignment="center" spacing={12} modifiers={[padding({ all: 14 })]}>
-        <ActivityRing size={56} />
+        <ActivityRing ring={ring} size={56} />
         <VStack alignment="leading" spacing={2}>
           <Text modifiers={[font({ size: 16, weight: 'bold' }), foregroundStyle(text), lineLimit(1)]}>
-            Sleep in progress
+            {headline}
           </Text>
           <Text modifiers={[font({ size: 13, weight: 'semibold' }), foregroundStyle(text), lineLimit(1)]}>
-            100% by {formatClock(props.projectedSleepTimestamp)}
+            {schedule}
           </Text>
           <Text modifiers={[font({ size: 12, weight: 'medium' }), foregroundStyle(subtle), lineLimit(1)]}>
-            {sleepNeedLabel()}
+            {detail}
           </Text>
         </VStack>
         <Spacer />
         <VStack alignment="trailing" spacing={2}>
-          <ActivityMetric size={20} />
+          <ActivityMetric metric={metric} size={20} />
           <BatteryBadge iconSize={11} textSize={11} />
         </VStack>
       </HStack>
+    );
+  }
+
+  function LiveActivityBannerSleeping() {
+    return (
+      <LiveActivityBannerLayout
+        detail={sleepNeedLabel()}
+        headline="Sleep in progress"
+        metric={{
+          fallbackColor: sleepAccent,
+          fallbackText: `${sleepProgressValue}`,
+          timerColor: sleepAccent,
+          timerText: formatRelativeTimeText(props.sleepStartTimestamp, false),
+        }}
+        ring={{ color: sleepAccent, value: sleepProgressValue }}
+        schedule={`100% by ${formatClock(props.projectedSleepTimestamp)}`}
+      />
     );
   }
 
@@ -340,49 +325,35 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
     const wakeCountdown = formatRelativeTimeText(props.wakeTimestamp, true);
 
     return (
-      <HStack alignment="center" spacing={12} modifiers={[padding({ all: 14 })]}>
-        <ActivityRing size={56} />
-        <VStack alignment="leading" spacing={2}>
-          <Text modifiers={[font({ size: 16, weight: 'bold' }), foregroundStyle(text), lineLimit(1)]}>
-            Bedtime has started
-          </Text>
-          <Text modifiers={[font({ size: 13, weight: 'semibold' }), foregroundStyle(text), lineLimit(1)]}>
-            100% by {formatClock(props.projectedSleepTimestamp)}
-          </Text>
-          <Text modifiers={[font({ size: 12, weight: 'medium' }), foregroundStyle(subtle), lineLimit(1)]}>
-            {wakeCountdown ? `Wake in ${wakeCountdown}` : 'Wake soon'}
-          </Text>
-        </VStack>
-        <Spacer />
-        <VStack alignment="trailing" spacing={2}>
-          <ActivityMetric size={20} />
-          <BatteryBadge iconSize={11} textSize={11} />
-        </VStack>
-      </HStack>
+      <LiveActivityBannerLayout
+        detail={wakeCountdown ? `Wake in ${wakeCountdown}` : 'Wake soon'}
+        headline="Bedtime has started"
+        metric={{
+          fallbackColor: sleepWarm,
+          fallbackText: '0',
+          timerColor: alert,
+          timerText: formatRelativeTimeText(props.bedtimeTimestamp, false),
+        }}
+        ring={{ color: sleepWarm, value: 0 }}
+        schedule={`100% by ${formatClock(props.projectedSleepTimestamp)}`}
+      />
     );
   }
 
   function LiveActivityBannerWindDown() {
     return (
-      <HStack alignment="center" spacing={12} modifiers={[padding({ all: 14 })]}>
-        <ActivityRing size={56} />
-        <VStack alignment="leading" spacing={2}>
-          <Text modifiers={[font({ size: 16, weight: 'bold' }), foregroundStyle(text), lineLimit(1)]}>
-            Wind down now
-          </Text>
-          <Text modifiers={[font({ size: 13, weight: 'semibold' }), foregroundStyle(text), lineLimit(1)]}>
-            Bed {formatClock(props.bedtimeTimestamp)} · Wake {formatClock(props.wakeTimestamp)}
-          </Text>
-          <Text modifiers={[font({ size: 12, weight: 'medium' }), foregroundStyle(subtle), lineLimit(1)]}>
-            {sleepNeedLabel()}
-          </Text>
-        </VStack>
-        <Spacer />
-        <VStack alignment="trailing" spacing={2}>
-          <ActivityMetric size={20} />
-          <BatteryBadge iconSize={11} textSize={11} />
-        </VStack>
-      </HStack>
+      <LiveActivityBannerLayout
+        detail={sleepNeedLabel()}
+        headline="Wind down now"
+        metric={{
+          fallbackColor: sleepCyan,
+          fallbackText: 'Now',
+          timerColor: sleepCyan,
+          timerText: formatRelativeTimeText(props.bedtimeTimestamp, true),
+        }}
+        ring={{ color: sleepCyan, value: 0 }}
+        schedule={`Bed ${formatClock(props.bedtimeTimestamp)} · Wake ${formatClock(props.wakeTimestamp)}`}
+      />
     );
   }
 
@@ -390,147 +361,190 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
     const bedCountdown = formatRelativeTimeText(props.bedtimeTimestamp, true);
 
     return (
-      <HStack alignment="center" spacing={12} modifiers={[padding({ all: 14 })]}>
-        <ActivityRing size={56} />
-        <VStack alignment="leading" spacing={2}>
-          <Text modifiers={[font({ size: 16, weight: 'bold' }), foregroundStyle(text), lineLimit(1)]}>
-            Tonight plan
-          </Text>
-          <Text modifiers={[font({ size: 13, weight: 'semibold' }), foregroundStyle(text), lineLimit(1)]}>
-            Bed {formatClock(props.bedtimeTimestamp)} · Wake {formatClock(props.wakeTimestamp)}
-          </Text>
-          <Text modifiers={[font({ size: 12, weight: 'medium' }), foregroundStyle(subtle), lineLimit(1)]}>
-            {bedCountdown ? `Bed in ${bedCountdown}` : 'Tonight plan'}
-          </Text>
-        </VStack>
-        <Spacer />
-        <VStack alignment="trailing" spacing={2}>
-          <ActivityMetric size={20} />
-          <BatteryBadge iconSize={11} textSize={11} />
-        </VStack>
-      </HStack>
+      <LiveActivityBannerLayout
+        detail={bedCountdown ? `Bed in ${bedCountdown}` : 'Tonight plan'}
+        headline="Tonight plan"
+        metric={{
+          fallbackColor: scoreRingColor,
+          fallbackText: formatClock(props.bedtimeTimestamp),
+          timerColor: scoreRingColor,
+          timerText: null,
+        }}
+        ring={{ color: scoreRingColor, value: 0 }}
+        schedule={`Bed ${formatClock(props.bedtimeTimestamp)} · Wake ${formatClock(props.wakeTimestamp)}`}
+      />
+    );
+  }
+
+  function LiveActivityBannerSmallLayout({ headline }: { headline: string }) {
+    return (
+      <Text modifiers={[font({ size: 13, weight: 'semibold' }), foregroundStyle(text), padding({ all: 10 }), lineLimit(1)]}>
+        {headline}
+      </Text>
     );
   }
 
   function LiveActivityBannerSmallSleeping() {
-    return (
-      <Text modifiers={[font({ size: 13, weight: 'semibold' }), foregroundStyle(text), padding({ all: 10 }), lineLimit(1)]}>
-        Sleep in progress
-      </Text>
-    );
+    return <LiveActivityBannerSmallLayout headline="Sleep in progress" />;
   }
 
   function LiveActivityBannerSmallBedtimePassed() {
-    return (
-      <Text modifiers={[font({ size: 13, weight: 'semibold' }), foregroundStyle(text), padding({ all: 10 }), lineLimit(1)]}>
-        Bedtime has started
-      </Text>
-    );
+    return <LiveActivityBannerSmallLayout headline="Bedtime has started" />;
   }
 
   function LiveActivityBannerSmallWindDown() {
-    return (
-      <Text modifiers={[font({ size: 13, weight: 'semibold' }), foregroundStyle(text), padding({ all: 10 }), lineLimit(1)]}>
-        Wind down now
-      </Text>
-    );
+    return <LiveActivityBannerSmallLayout headline="Wind down now" />;
   }
 
   function LiveActivityBannerSmallAwake() {
-    return (
-      <Text modifiers={[font({ size: 13, weight: 'semibold' }), foregroundStyle(text), padding({ all: 10 }), lineLimit(1)]}>
-        Tonight plan
-      </Text>
-    );
+    return <LiveActivityBannerSmallLayout headline="Tonight plan" />;
+  }
+
+  function LiveActivityIcon({ color, size }: { color: string; size: number }) {
+    return <Image color={color} size={size} systemName={primaryIcon} />;
   }
 
   function LiveActivityCompactLeadingSleeping() {
-    return <Image color={sleepAccent} size={16} systemName={primaryIcon} />;
+    return <LiveActivityIcon color={sleepAccent} size={16} />;
   }
 
   function LiveActivityCompactLeadingBedtimePassed() {
-    return <Image color={sleepWarm} size={16} systemName={primaryIcon} />;
+    return <LiveActivityIcon color={sleepWarm} size={16} />;
   }
 
   function LiveActivityCompactLeadingWindDown() {
-    return <Image color={sleepCyan} size={16} systemName={primaryIcon} />;
+    return <LiveActivityIcon color={sleepCyan} size={16} />;
   }
 
   function LiveActivityCompactLeadingAwake() {
-    return <Image color={sleepCyan} size={16} systemName={primaryIcon} />;
+    return <LiveActivityIcon color={sleepCyan} size={16} />;
   }
 
   function LiveActivityCompactTrailingSleeping() {
-    return <CompactTrailingMetric />;
+    return (
+      <CompactTrailingMetric
+        metric={{
+          fallbackColor: sleepAccent,
+          fallbackText: `${sleepProgressValue}`,
+          timerColor: sleepAccent,
+          timerText: formatRelativeTimeText(props.sleepStartTimestamp, false),
+        }}
+      />
+    );
   }
 
   function LiveActivityCompactTrailingBedtimePassed() {
-    return <CompactTrailingMetric />;
+    return (
+      <CompactTrailingMetric
+        metric={{
+          fallbackColor: sleepWarm,
+          fallbackText: '0',
+          timerColor: alert,
+          timerText: formatRelativeTimeText(props.bedtimeTimestamp, false),
+        }}
+      />
+    );
   }
 
   function LiveActivityCompactTrailingWindDown() {
-    return <CompactTrailingMetric />;
+    return (
+      <CompactTrailingMetric
+        metric={{
+          fallbackColor: sleepCyan,
+          fallbackText: 'Now',
+          timerColor: sleepCyan,
+          timerText: formatRelativeTimeText(props.bedtimeTimestamp, true),
+        }}
+      />
+    );
   }
 
   function LiveActivityCompactTrailingAwake() {
-    return <CompactTrailingMetric />;
+    return (
+      <CompactTrailingMetric
+        metric={{
+          fallbackColor: text,
+          fallbackText: formatClock(props.bedtimeTimestamp),
+          timerColor: scoreRingColor,
+          timerText: null,
+        }}
+      />
+    );
   }
 
   function LiveActivityMinimalSleeping() {
-    return <Image color={sleepAccent} size={15} systemName={primaryIcon} />;
+    return <LiveActivityIcon color={sleepAccent} size={15} />;
   }
 
   function LiveActivityMinimalBedtimePassed() {
-    return <Image color={sleepWarm} size={15} systemName={primaryIcon} />;
+    return <LiveActivityIcon color={sleepWarm} size={15} />;
   }
 
   function LiveActivityMinimalWindDown() {
-    return <Image color={sleepCyan} size={15} systemName={primaryIcon} />;
+    return <LiveActivityIcon color={sleepCyan} size={15} />;
   }
 
   function LiveActivityMinimalAwake() {
-    return <Image color={sleepCyan} size={15} systemName={primaryIcon} />;
+    return <LiveActivityIcon color={sleepCyan} size={15} />;
   }
 
   function LiveActivityExpandedLeadingSleeping() {
-    return <LiveActivityExpandedLeadingRing />;
+    return <LiveActivityExpandedLeadingRing ring={{ color: sleepAccent, value: sleepProgressValue }} />;
   }
 
   function LiveActivityExpandedLeadingBedtimePassed() {
-    return <LiveActivityExpandedLeadingRing />;
+    return <LiveActivityExpandedLeadingRing ring={{ color: sleepWarm, value: 0 }} />;
   }
 
   function LiveActivityExpandedLeadingWindDown() {
-    return <LiveActivityExpandedLeadingRing />;
+    return <LiveActivityExpandedLeadingRing ring={{ color: sleepCyan, value: 0 }} />;
   }
 
   function LiveActivityExpandedLeadingAwake() {
-    return <LiveActivityExpandedLeadingRing />;
+    return <LiveActivityExpandedLeadingRing ring={{ color: scoreRingColor, value: 0 }} />;
   }
 
-  function LiveActivityExpandedLeadingRing() {
+  function LiveActivityExpandedLeadingRing({ ring }: { ring: ActivityRingConfig }) {
     return (
       <VStack alignment="leading" spacing={4}>
         <Spacer />
-        <ActivityRing size={68} />
+        <ActivityRing ring={ring} size={68} />
         <Spacer />
+      </VStack>
+    );
+  }
+
+  function LiveActivityExpandedCenterLayout({
+    detail,
+    headline,
+    schedule,
+  }: {
+    detail: string;
+    headline: string;
+    schedule: string;
+  }) {
+    return (
+      <VStack alignment="leading" spacing={4}>
+        <Text modifiers={[font({ size: 16, weight: 'bold' }), foregroundStyle(text), lineLimit(1)]}>
+          {headline}
+        </Text>
+        <Text modifiers={[font({ size: 13, weight: 'semibold' }), foregroundStyle(text), lineLimit(1)]}>
+          {schedule}
+        </Text>
+        <Text modifiers={[font({ size: 12, weight: 'medium' }), foregroundStyle(subtle), lineLimit(1)]}>
+          {detail}
+        </Text>
       </VStack>
     );
   }
 
   function LiveActivityExpandedCenterSleeping() {
     return (
-      <VStack alignment="leading" spacing={4}>
-        <Text modifiers={[font({ size: 16, weight: 'bold' }), foregroundStyle(text), lineLimit(1)]}>
-          Sleep in progress
-        </Text>
-        <Text modifiers={[font({ size: 13, weight: 'semibold' }), foregroundStyle(text), lineLimit(1)]}>
-          100% by {formatClock(props.projectedSleepTimestamp)}
-        </Text>
-        <Text modifiers={[font({ size: 12, weight: 'medium' }), foregroundStyle(subtle), lineLimit(1)]}>
-          {sleepNeedLabel()}
-        </Text>
-      </VStack>
+      <LiveActivityExpandedCenterLayout
+        detail={sleepNeedLabel()}
+        headline="Sleep in progress"
+        schedule={`100% by ${formatClock(props.projectedSleepTimestamp)}`}
+      />
     );
   }
 
@@ -538,33 +552,21 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
     const wakeCountdown = formatRelativeTimeText(props.wakeTimestamp, true);
 
     return (
-      <VStack alignment="leading" spacing={4}>
-        <Text modifiers={[font({ size: 16, weight: 'bold' }), foregroundStyle(text), lineLimit(1)]}>
-          Bedtime has started
-        </Text>
-        <Text modifiers={[font({ size: 13, weight: 'semibold' }), foregroundStyle(text), lineLimit(1)]}>
-          100% by {formatClock(props.projectedSleepTimestamp)}
-        </Text>
-        <Text modifiers={[font({ size: 12, weight: 'medium' }), foregroundStyle(subtle), lineLimit(1)]}>
-          {wakeCountdown ? `Wake in ${wakeCountdown}` : 'Wake soon'}
-        </Text>
-      </VStack>
+      <LiveActivityExpandedCenterLayout
+        detail={wakeCountdown ? `Wake in ${wakeCountdown}` : 'Wake soon'}
+        headline="Bedtime has started"
+        schedule={`100% by ${formatClock(props.projectedSleepTimestamp)}`}
+      />
     );
   }
 
   function LiveActivityExpandedCenterWindDown() {
     return (
-      <VStack alignment="leading" spacing={4}>
-        <Text modifiers={[font({ size: 16, weight: 'bold' }), foregroundStyle(text), lineLimit(1)]}>
-          Wind down now
-        </Text>
-        <Text modifiers={[font({ size: 13, weight: 'semibold' }), foregroundStyle(text), lineLimit(1)]}>
-          Bed {formatClock(props.bedtimeTimestamp)} · Wake {formatClock(props.wakeTimestamp)}
-        </Text>
-        <Text modifiers={[font({ size: 12, weight: 'medium' }), foregroundStyle(subtle), lineLimit(1)]}>
-          {sleepNeedLabel()}
-        </Text>
-      </VStack>
+      <LiveActivityExpandedCenterLayout
+        detail={sleepNeedLabel()}
+        headline="Wind down now"
+        schedule={`Bed ${formatClock(props.bedtimeTimestamp)} · Wake ${formatClock(props.wakeTimestamp)}`}
+      />
     );
   }
 
@@ -572,169 +574,124 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
     const bedCountdown = formatRelativeTimeText(props.bedtimeTimestamp, true);
 
     return (
-      <VStack alignment="leading" spacing={4}>
-        <Text modifiers={[font({ size: 16, weight: 'bold' }), foregroundStyle(text), lineLimit(1)]}>
-          Tonight plan
-        </Text>
-        <Text modifiers={[font({ size: 13, weight: 'semibold' }), foregroundStyle(text), lineLimit(1)]}>
-          Bed {formatClock(props.bedtimeTimestamp)} · Wake {formatClock(props.wakeTimestamp)}
-        </Text>
-        <Text modifiers={[font({ size: 12, weight: 'medium' }), foregroundStyle(subtle), lineLimit(1)]}>
-          {bedCountdown ? `Bed in ${bedCountdown}` : 'Tonight plan'}
-        </Text>
-      </VStack>
+      <LiveActivityExpandedCenterLayout
+        detail={bedCountdown ? `Bed in ${bedCountdown}` : 'Tonight plan'}
+        headline="Tonight plan"
+        schedule={`Bed ${formatClock(props.bedtimeTimestamp)} · Wake ${formatClock(props.wakeTimestamp)}`}
+      />
     );
   }
 
   function LiveActivityExpandedTrailingSleeping() {
-    return <LiveActivityExpandedTrailingMetric />;
+    return (
+      <LiveActivityExpandedTrailingMetric
+        metric={{
+          fallbackColor: sleepAccent,
+          fallbackText: `${sleepProgressValue}`,
+          timerColor: sleepAccent,
+          timerText: formatRelativeTimeText(props.sleepStartTimestamp, false),
+        }}
+      />
+    );
   }
 
   function LiveActivityExpandedTrailingBedtimePassed() {
-    return <LiveActivityExpandedTrailingMetric />;
+    return (
+      <LiveActivityExpandedTrailingMetric
+        metric={{
+          fallbackColor: sleepWarm,
+          fallbackText: '0',
+          timerColor: alert,
+          timerText: formatRelativeTimeText(props.bedtimeTimestamp, false),
+        }}
+      />
+    );
   }
 
   function LiveActivityExpandedTrailingWindDown() {
-    return <LiveActivityExpandedTrailingMetric />;
+    return (
+      <LiveActivityExpandedTrailingMetric
+        metric={{
+          fallbackColor: sleepCyan,
+          fallbackText: 'Now',
+          timerColor: sleepCyan,
+          timerText: formatRelativeTimeText(props.bedtimeTimestamp, true),
+        }}
+      />
+    );
   }
 
   function LiveActivityExpandedTrailingAwake() {
-    return <LiveActivityExpandedTrailingMetric />;
+    return (
+      <LiveActivityExpandedTrailingMetric
+        metric={{
+          fallbackColor: scoreRingColor,
+          fallbackText: formatClock(props.bedtimeTimestamp),
+          timerColor: scoreRingColor,
+          timerText: null,
+        }}
+      />
+    );
   }
 
-  function LiveActivityExpandedTrailingMetric() {
+  function LiveActivityExpandedTrailingMetric({ metric }: { metric: ActivityMetricConfig }) {
     return (
       <VStack alignment="trailing" spacing={4}>
         <Spacer />
-        <ActivityMetric size={26} allowsResizing />
+        <ActivityMetric metric={metric} size={26} allowsResizing />
         <BatteryBadge iconSize={11} textSize={11} />
         <Spacer />
       </VStack>
     );
   }
 
-  const banner = (() => {
-    switch (props.surfaceMode) {
-      case 'sleep':
-        return <LiveActivityBannerSleeping />;
-      case 'bedtime_passed':
-        return <LiveActivityBannerBedtimePassed />;
-      case 'wind_down':
-        return <LiveActivityBannerWindDown />;
-      case 'awake':
-      default:
-        return <LiveActivityBannerAwake />;
-    }
-  })();
-
-  const bannerSmall = (() => {
-    switch (props.surfaceMode) {
-      case 'sleep':
-        return <LiveActivityBannerSmallSleeping />;
-      case 'bedtime_passed':
-        return <LiveActivityBannerSmallBedtimePassed />;
-      case 'wind_down':
-        return <LiveActivityBannerSmallWindDown />;
-      case 'awake':
-      default:
-        return <LiveActivityBannerSmallAwake />;
-    }
-  })();
-
-  const compactLeading = (() => {
-    switch (props.surfaceMode) {
-      case 'sleep':
-        return <LiveActivityCompactLeadingSleeping />;
-      case 'bedtime_passed':
-        return <LiveActivityCompactLeadingBedtimePassed />;
-      case 'wind_down':
-        return <LiveActivityCompactLeadingWindDown />;
-      case 'awake':
-      default:
-        return <LiveActivityCompactLeadingAwake />;
-    }
-  })();
-
-  const compactTrailing = (() => {
-    switch (props.surfaceMode) {
-      case 'sleep':
-        return <LiveActivityCompactTrailingSleeping />;
-      case 'bedtime_passed':
-        return <LiveActivityCompactTrailingBedtimePassed />;
-      case 'wind_down':
-        return <LiveActivityCompactTrailingWindDown />;
-      case 'awake':
-      default:
-        return <LiveActivityCompactTrailingAwake />;
-    }
-  })();
-
-  const minimal = (() => {
-    switch (props.surfaceMode) {
-      case 'sleep':
-        return <LiveActivityMinimalSleeping />;
-      case 'bedtime_passed':
-        return <LiveActivityMinimalBedtimePassed />;
-      case 'wind_down':
-        return <LiveActivityMinimalWindDown />;
-      case 'awake':
-      default:
-        return <LiveActivityMinimalAwake />;
-    }
-  })();
-
-  const expandedLeading = (() => {
-    switch (props.surfaceMode) {
-      case 'sleep':
-        return <LiveActivityExpandedLeadingSleeping />;
-      case 'bedtime_passed':
-        return <LiveActivityExpandedLeadingBedtimePassed />;
-      case 'wind_down':
-        return <LiveActivityExpandedLeadingWindDown />;
-      case 'awake':
-      default:
-        return <LiveActivityExpandedLeadingAwake />;
-    }
-  })();
-
-  const expandedCenter = (() => {
-    switch (props.surfaceMode) {
-      case 'sleep':
-        return <LiveActivityExpandedCenterSleeping />;
-      case 'bedtime_passed':
-        return <LiveActivityExpandedCenterBedtimePassed />;
-      case 'wind_down':
-        return <LiveActivityExpandedCenterWindDown />;
-      case 'awake':
-      default:
-        return <LiveActivityExpandedCenterAwake />;
-    }
-  })();
-
-  const expandedTrailing = (() => {
-    switch (props.surfaceMode) {
-      case 'sleep':
-        return <LiveActivityExpandedTrailingSleeping />;
-      case 'bedtime_passed':
-        return <LiveActivityExpandedTrailingBedtimePassed />;
-      case 'wind_down':
-        return <LiveActivityExpandedTrailingWindDown />;
-      case 'awake':
-      default:
-        return <LiveActivityExpandedTrailingAwake />;
-    }
-  })();
-
-  return {
-    banner,
-    bannerSmall,
-    compactLeading,
-    compactTrailing,
-    minimal,
-    expandedLeading,
-    expandedCenter,
-    expandedTrailing,
-  };
+  switch (props.surfaceMode) {
+    case 'sleep':
+      return {
+        banner: <LiveActivityBannerSleeping />,
+        bannerSmall: <LiveActivityBannerSmallSleeping />,
+        compactLeading: <LiveActivityCompactLeadingSleeping />,
+        compactTrailing: <LiveActivityCompactTrailingSleeping />,
+        minimal: <LiveActivityMinimalSleeping />,
+        expandedLeading: <LiveActivityExpandedLeadingSleeping />,
+        expandedCenter: <LiveActivityExpandedCenterSleeping />,
+        expandedTrailing: <LiveActivityExpandedTrailingSleeping />,
+      };
+    case 'bedtime_passed':
+      return {
+        banner: <LiveActivityBannerBedtimePassed />,
+        bannerSmall: <LiveActivityBannerSmallBedtimePassed />,
+        compactLeading: <LiveActivityCompactLeadingBedtimePassed />,
+        compactTrailing: <LiveActivityCompactTrailingBedtimePassed />,
+        minimal: <LiveActivityMinimalBedtimePassed />,
+        expandedLeading: <LiveActivityExpandedLeadingBedtimePassed />,
+        expandedCenter: <LiveActivityExpandedCenterBedtimePassed />,
+        expandedTrailing: <LiveActivityExpandedTrailingBedtimePassed />,
+      };
+    case 'wind_down':
+      return {
+        banner: <LiveActivityBannerWindDown />,
+        bannerSmall: <LiveActivityBannerSmallWindDown />,
+        compactLeading: <LiveActivityCompactLeadingWindDown />,
+        compactTrailing: <LiveActivityCompactTrailingWindDown />,
+        minimal: <LiveActivityMinimalWindDown />,
+        expandedLeading: <LiveActivityExpandedLeadingWindDown />,
+        expandedCenter: <LiveActivityExpandedCenterWindDown />,
+        expandedTrailing: <LiveActivityExpandedTrailingWindDown />,
+      };
+    case 'awake':
+    default:
+      return {
+        banner: <LiveActivityBannerAwake />,
+        bannerSmall: <LiveActivityBannerSmallAwake />,
+        compactLeading: <LiveActivityCompactLeadingAwake />,
+        compactTrailing: <LiveActivityCompactTrailingAwake />,
+        minimal: <LiveActivityMinimalAwake />,
+        expandedLeading: <LiveActivityExpandedLeadingAwake />,
+        expandedCenter: <LiveActivityExpandedCenterAwake />,
+        expandedTrailing: <LiveActivityExpandedTrailingAwake />,
+      };
+  }
 };
 
 export default createLiveActivity<TonightWidgetProps>('SleepWidgetV2', SleepLiveActivityComponent);

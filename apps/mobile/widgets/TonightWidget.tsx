@@ -93,6 +93,13 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
           ? '#fff8ee'
           : '#fff3f1';
   const sleepProgressValue = Math.max(6, Math.min(96, Math.round(props.sleepProgress * 100)));
+  type SurfaceColor = string | { type: 'hierarchical'; style: 'primary' | 'secondary' };
+  type RingConfig = {
+    color: string;
+    text?: string;
+    textColor?: string;
+    value: number;
+  };
 
   function formatClock(timestamp: number) {
     if (timestamp <= 0) {
@@ -177,57 +184,31 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
     return 'No sleep debt';
   }
 
-  function ringValue() {
-    if (props.surfaceMode === 'sleep') {
-      return sleepProgressValue;
-    }
-
-    if (props.surfaceMode === 'awake') {
-      return scoreValue;
-    }
-
-    return 0;
-  }
-
-  function ringColor() {
-    switch (props.surfaceMode) {
-      case 'sleep':
-        return sleepAccent;
-      case 'wind_down':
-        return sleepCyan;
-      case 'bedtime_passed':
-        return sleepWarm;
-      case 'awake':
-      default:
-        return scoreRingColor;
-    }
-  }
-
-  function ringText() {
-    return props.surfaceMode === 'sleep' ? `${sleepProgressValue}` : scoreText;
-  }
-
-  function ringTextColor() {
-    return props.surfaceMode === 'awake' ? scoreTextColor : sleepText;
-  }
-
-  function showRingIcon() {
-    return props.surfaceMode !== 'awake';
-  }
-
-  function Ring({ size, scoreFontSize }: { size: number; scoreFontSize?: number }) {
+  function Ring({
+    color,
+    scoreFontSize,
+    size,
+    text: ringLabel,
+    textColor: ringLabelColor = sleepText,
+    value,
+  }: {
+    color: string;
+    scoreFontSize?: number;
+    size: number;
+    text?: string;
+    textColor?: string;
+    value: number;
+  }) {
     return (
       <ZStack alignment="center" modifiers={[frame({ width: size, height: size })]}>
         <Gauge
-          value={ringValue()}
+          value={value}
           min={0}
           max={100}
-          modifiers={[gaugeStyle('circularCapacity'), tint(ringColor()), frame({ width: size, height: size })]}
+          modifiers={[gaugeStyle('circularCapacity'), tint(color), frame({ width: size, height: size })]}
         />
 
-        {showRingIcon() ? (
-          <Image color={ringColor()} size={size >= 88 ? 26 : size >= 74 ? 26 : 20} systemName={primaryIcon} />
-        ) : (
+        {ringLabel ? (
           <Text
             modifiers={[
               font({
@@ -235,12 +216,14 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
                 weight: 'bold',
                 design: 'rounded',
               }),
-              foregroundStyle(ringTextColor()),
+              foregroundStyle(ringLabelColor),
               monospacedDigit(),
               lineLimit(1),
             ]}>
-            {ringText()}
+            {ringLabel}
           </Text>
+        ) : (
+          <Image color={color} size={size >= 88 ? 26 : size >= 74 ? 26 : 20} systemName={primaryIcon} />
         )}
       </ZStack>
     );
@@ -292,394 +275,360 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
     );
   }
 
-  function WidgetLockScreenCircularRing() {
+  function WidgetLockScreenCircularRing({ ring }: { ring: RingConfig }) {
     return (
       <ZStack
         alignment="center"
         modifiers={[widgetURL(homeWidgetURL), containerBackground(widgetBackgroundColor, 'widget')]}>
         <Gauge
-          value={ringValue()}
+          value={ring.value}
           min={0}
           max={100}
-          modifiers={[gaugeStyle('circularCapacity'), tint(ringColor())]}
+          modifiers={[gaugeStyle('circularCapacity'), tint(ring.color)]}
         />
 
-        {showRingIcon() ? (
-          <Image color={ringColor()} size={18} systemName={primaryIcon} />
-        ) : (
+        {ring.text ? (
           <Text
             modifiers={[
               font({ size: 18, weight: 'bold', design: 'rounded' }),
-              foregroundStyle(ringTextColor()),
+              foregroundStyle(ring.textColor ?? sleepText),
               monospacedDigit(),
               lineLimit(1),
             ]}>
-            {ringText()}
+            {ring.text}
           </Text>
+        ) : (
+          <Image color={ring.color} size={18} systemName={primaryIcon} />
         )}
       </ZStack>
     );
   }
 
   function WidgetLockScreenCircularSleeping() {
-    return <WidgetLockScreenCircularRing />;
+    return <WidgetLockScreenCircularRing ring={{ color: sleepAccent, value: sleepProgressValue }} />;
   }
 
   function WidgetLockScreenCircularBedtimePassed() {
-    return <WidgetLockScreenCircularRing />;
+    return <WidgetLockScreenCircularRing ring={{ color: sleepWarm, value: 0 }} />;
   }
 
   function WidgetLockScreenCircularWindDown() {
-    return <WidgetLockScreenCircularRing />;
+    return <WidgetLockScreenCircularRing ring={{ color: sleepCyan, value: 0 }} />;
   }
 
   function WidgetLockScreenCircularAwake() {
-    return <WidgetLockScreenCircularRing />;
+    return (
+      <WidgetLockScreenCircularRing
+        ring={{ color: scoreRingColor, text: scoreText, textColor: scoreTextColor, value: scoreValue }}
+      />
+    );
+  }
+
+  function WidgetLockScreenInlineLayout({ text: inlineText }: { text: string }) {
+    return (
+      <ZStack modifiers={[widgetURL(homeWidgetURL), containerBackground(widgetBackgroundColor, 'widget')]}>
+        <Text modifiers={[font({ size: 13, weight: 'semibold' }), lineLimit(1)]}>{inlineText}</Text>
+      </ZStack>
+    );
   }
 
   function WidgetLockScreenInlineSleeping() {
     return (
-      <ZStack modifiers={[widgetURL(homeWidgetURL), containerBackground(widgetBackgroundColor, 'widget')]}>
-        <Text modifiers={[font({ size: 13, weight: 'semibold' }), lineLimit(1)]}>
-          Sleeping · Bed {formatClock(props.sleepStartTimestamp || props.bedtimeTimestamp)} · 100% by {formatClock(props.projectedSleepTimestamp)}
-        </Text>
-      </ZStack>
+      <WidgetLockScreenInlineLayout
+        text={`Sleeping · Bed ${formatClock(props.sleepStartTimestamp || props.bedtimeTimestamp)} · 100% by ${formatClock(props.projectedSleepTimestamp)}`}
+      />
     );
   }
 
   function WidgetLockScreenInlineBedtimePassed() {
     return (
-      <ZStack modifiers={[widgetURL(homeWidgetURL), containerBackground(widgetBackgroundColor, 'widget')]}>
-        <Text modifiers={[font({ size: 13, weight: 'semibold' }), lineLimit(1)]}>
-          Past bedtime · Bed Now! · 100% by {formatClock(props.projectedSleepTimestamp)}
-        </Text>
-      </ZStack>
+      <WidgetLockScreenInlineLayout
+        text={`Past bedtime · Bed Now! · 100% by ${formatClock(props.projectedSleepTimestamp)}`}
+      />
     );
   }
 
   function WidgetLockScreenInlineWindDown() {
     return (
-      <ZStack modifiers={[widgetURL(homeWidgetURL), containerBackground(widgetBackgroundColor, 'widget')]}>
-        <Text modifiers={[font({ size: 13, weight: 'semibold' }), lineLimit(1)]}>
-          Wind down · Bed {formatClock(props.bedtimeTimestamp)} · Wake {formatClock(props.wakeTimestamp)}
-        </Text>
-      </ZStack>
+      <WidgetLockScreenInlineLayout
+        text={`Wind down · Bed ${formatClock(props.bedtimeTimestamp)} · Wake ${formatClock(props.wakeTimestamp)}`}
+      />
     );
   }
 
   function WidgetLockScreenInlineAwake() {
     return (
-      <ZStack modifiers={[widgetURL(homeWidgetURL), containerBackground(widgetBackgroundColor, 'widget')]}>
-        <Text modifiers={[font({ size: 13, weight: 'semibold' }), lineLimit(1)]}>
-          {scoreHeadline} · Bed {formatClock(props.bedtimeTimestamp)} · Wake {formatClock(props.wakeTimestamp)}
-        </Text>
+      <WidgetLockScreenInlineLayout
+        text={`${scoreHeadline} · Bed ${formatClock(props.bedtimeTimestamp)} · Wake ${formatClock(props.wakeTimestamp)}`}
+      />
+    );
+  }
+
+  function WidgetLockScreenWideLayout({
+    detail,
+    headline,
+    headlineColor,
+    ring,
+    schedule,
+  }: {
+    detail: string;
+    headline: string;
+    headlineColor: SurfaceColor;
+    ring: RingConfig;
+    schedule: string;
+  }) {
+    return (
+      <ZStack alignment="topTrailing" modifiers={[widgetURL(homeWidgetURL), containerBackground(widgetBackgroundColor, 'widget')]}>
+        <HStack alignment="center" spacing={8}>
+          <Ring {...ring} size={46} scoreFontSize={21} />
+          <VStack alignment="leading" spacing={0}>
+            <Text modifiers={[font({ size: 10, weight: 'semibold' }), foregroundStyle(headlineColor), lineLimit(1)]}>
+              {headline}
+            </Text>
+            <Text modifiers={[font({ size: 12, weight: 'medium' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
+              {schedule}
+            </Text>
+            <Text modifiers={[font({ size: 12, weight: 'medium' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
+              {detail}
+            </Text>
+          </VStack>
+        </HStack>
       </ZStack>
     );
   }
 
   function WidgetLockScreenWideSleeping() {
     return (
-      <ZStack alignment="topTrailing" modifiers={[widgetURL(homeWidgetURL), containerBackground(widgetBackgroundColor, 'widget')]}>
-        <HStack alignment="center" spacing={8}>
-          <Ring size={46} scoreFontSize={21} />
-          <VStack alignment="leading" spacing={0}>
-            <Text modifiers={[font({ size: 10, weight: 'semibold' }), foregroundStyle(sleepCyan), lineLimit(1)]}>
-              Sleep in progress
-            </Text>
-            <Text modifiers={[font({ size: 12, weight: 'medium' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-              Bed {formatClock(props.sleepStartTimestamp || props.bedtimeTimestamp)}
-            </Text>
-            <Text modifiers={[font({ size: 12, weight: 'medium' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-              100% by {formatClock(props.projectedSleepTimestamp)}
-            </Text>
-          </VStack>
-        </HStack>
-      </ZStack>
+      <WidgetLockScreenWideLayout
+        detail={`100% by ${formatClock(props.projectedSleepTimestamp)}`}
+        headline="Sleep in progress"
+        headlineColor={sleepCyan}
+        ring={{ color: sleepAccent, value: sleepProgressValue }}
+        schedule={`Bed ${formatClock(props.sleepStartTimestamp || props.bedtimeTimestamp)}`}
+      />
     );
   }
 
   function WidgetLockScreenWideBedtimePassed() {
     return (
-      <ZStack alignment="topTrailing" modifiers={[widgetURL(homeWidgetURL), containerBackground(widgetBackgroundColor, 'widget')]}>
-        <HStack alignment="center" spacing={8}>
-          <Ring size={46} scoreFontSize={21} />
-          <VStack alignment="leading" spacing={0}>
-            <Text modifiers={[font({ size: 10, weight: 'semibold' }), foregroundStyle(sleepCyan), lineLimit(1)]}>
-              Bedtime has started
-            </Text>
-            <Text modifiers={[font({ size: 12, weight: 'medium' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-              Bed Now!
-            </Text>
-            <Text modifiers={[font({ size: 12, weight: 'medium' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-              100% by {formatClock(props.projectedSleepTimestamp)}
-            </Text>
-          </VStack>
-        </HStack>
-      </ZStack>
+      <WidgetLockScreenWideLayout
+        detail={`100% by ${formatClock(props.projectedSleepTimestamp)}`}
+        headline="Bedtime has started"
+        headlineColor={sleepCyan}
+        ring={{ color: sleepWarm, value: 0 }}
+        schedule="Bed Now!"
+      />
     );
   }
 
   function WidgetLockScreenWideWindDown() {
     return (
-      <ZStack alignment="topTrailing" modifiers={[widgetURL(homeWidgetURL), containerBackground(widgetBackgroundColor, 'widget')]}>
-        <HStack alignment="center" spacing={8}>
-          <Ring size={46} scoreFontSize={21} />
-          <VStack alignment="leading" spacing={0}>
-            <Text modifiers={[font({ size: 10, weight: 'semibold' }), foregroundStyle(sleepCyan), lineLimit(1)]}>
-              Wind down now
-            </Text>
-            <Text modifiers={[font({ size: 12, weight: 'medium' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-              Bed {formatClock(props.bedtimeTimestamp)}
-            </Text>
-            <Text modifiers={[font({ size: 12, weight: 'medium' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-              Wake {formatClock(props.wakeTimestamp)}
-            </Text>
-          </VStack>
-        </HStack>
-      </ZStack>
+      <WidgetLockScreenWideLayout
+        detail={`Wake ${formatClock(props.wakeTimestamp)}`}
+        headline="Wind down now"
+        headlineColor={sleepCyan}
+        ring={{ color: sleepCyan, value: 0 }}
+        schedule={`Bed ${formatClock(props.bedtimeTimestamp)}`}
+      />
     );
   }
 
   function WidgetLockScreenWideAwake() {
     return (
-      <ZStack alignment="topTrailing" modifiers={[widgetURL(homeWidgetURL), containerBackground(widgetBackgroundColor, 'widget')]}>
-        <HStack alignment="center" spacing={8}>
-          <Ring size={46} scoreFontSize={21} />
-          <VStack alignment="leading" spacing={0}>
-            <Text modifiers={[font({ size: 10, weight: 'semibold' }), foregroundStyle(success), lineLimit(1)]}>
-              Tonight plan
-            </Text>
-            <Text modifiers={[font({ size: 12, weight: 'medium' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-              Bed {formatClock(props.bedtimeTimestamp)}
-            </Text>
-            <Text modifiers={[font({ size: 12, weight: 'medium' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-              Wake {formatClock(props.wakeTimestamp)}
-            </Text>
-          </VStack>
-        </HStack>
+      <WidgetLockScreenWideLayout
+        detail={`Wake ${formatClock(props.wakeTimestamp)}`}
+        headline="Tonight plan"
+        headlineColor={success}
+        ring={{ color: scoreRingColor, text: scoreText, textColor: scoreTextColor, value: scoreValue }}
+        schedule={`Bed ${formatClock(props.bedtimeTimestamp)}`}
+      />
+    );
+  }
+
+  function WidgetHomeScreenMediumLayout({
+    detail,
+    headline,
+    headlineColor,
+    ring,
+    ringCaption,
+    schedule,
+    subdetail,
+    value,
+    valueColor,
+    valueSize = 26,
+  }: {
+    detail: string;
+    headline: string;
+    headlineColor: SurfaceColor;
+    ring: RingConfig;
+    ringCaption: string;
+    schedule: string;
+    subdetail: string;
+    value: string;
+    valueColor: SurfaceColor;
+    valueSize?: number;
+  }) {
+    return (
+      <ZStack
+        alignment="topTrailing"
+        modifiers={[
+          padding({ all: 4 }),
+          widgetURL(homeWidgetURL),
+          containerBackground(widgetBackgroundColor, 'widget'),
+        ]}>
+        <VStack alignment="leading" spacing={6}>
+          <Text modifiers={[font({ size: 12, weight: 'bold' }), foregroundStyle(headlineColor), lineLimit(1)]}>
+            {headline}
+          </Text>
+          <HStack alignment="center" spacing={14}>
+            <VStack alignment="center" spacing={4}>
+              <Ring {...ring} size={88} />
+              <Text modifiers={[font({ size: 10, weight: 'semibold' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
+                {ringCaption}
+              </Text>
+            </VStack>
+            <VStack alignment="leading" spacing={4}>
+              <Text modifiers={[font({ size: 11, weight: 'medium' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
+                {schedule}
+              </Text>
+              <Text
+                modifiers={[
+                  font({ size: valueSize, weight: 'bold', design: 'rounded' }),
+                  foregroundStyle(valueColor),
+                  monospacedDigit(),
+                  lineLimit(1),
+                ]}>
+                {value}
+              </Text>
+              <Text modifiers={[font({ size: 12, weight: 'semibold' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
+                {detail}
+              </Text>
+              <Text modifiers={[font({ size: 11, weight: 'medium' }), foregroundStyle(resolvedSubtle), lineLimit(1)]}>
+                {subdetail}
+              </Text>
+            </VStack>
+            <Spacer />
+            <VStack alignment="leading" spacing={2}>
+              <SleepNeedMetric />
+              <Text modifiers={[font({ size: 10, weight: 'medium' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
+                {sleepDebtLabel()}
+              </Text>
+            </VStack>
+          </HStack>
+        </VStack>
+        <VStack alignment="trailing" spacing={0} modifiers={[padding({ top: 2, trailing: 6 })]}>
+          <BatteryBadge />
+        </VStack>
       </ZStack>
     );
   }
 
   function WidgetHomeScreenMediumSleeping() {
     return (
-      <ZStack
-        alignment="topTrailing"
-        modifiers={[
-          padding({ all: 4 }),
-          widgetURL(homeWidgetURL),
-          containerBackground(widgetBackgroundColor, 'widget'),
-        ]}>
-        <VStack alignment="leading" spacing={6}>
-          <Text modifiers={[font({ size: 12, weight: 'bold' }), foregroundStyle(sleepCyan), lineLimit(1)]}>
-            Sleep in progress
-          </Text>
-          <HStack alignment="center" spacing={14}>
-            <VStack alignment="center" spacing={4}>
-              <Ring size={88} />
-              <Text modifiers={[font({ size: 10, weight: 'semibold' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-                Progress
-              </Text>
-            </VStack>
-            <VStack alignment="leading" spacing={4}>
-              <Text modifiers={[font({ size: 11, weight: 'medium' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-                Sleep started
-              </Text>
-              <Text
-                modifiers={[
-                  font({ size: 26, weight: 'bold', design: 'rounded' }),
-                  foregroundStyle(sleepWarm),
-                  monospacedDigit(),
-                  lineLimit(1),
-                ]}>
-                {formatClock(props.sleepStartTimestamp || props.bedtimeTimestamp)}
-              </Text>
-              <Text modifiers={[font({ size: 12, weight: 'semibold' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-                100% by {formatClock(props.projectedSleepTimestamp)}
-              </Text>
-              <Text modifiers={[font({ size: 11, weight: 'medium' }), foregroundStyle(resolvedSubtle), lineLimit(1)]}>
-                Sleep in progress
-              </Text>
-            </VStack>
-            <Spacer />
-            <VStack alignment="leading" spacing={2}>
-              <SleepNeedMetric />
-              <Text modifiers={[font({ size: 10, weight: 'medium' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-                {sleepDebtLabel()}
-              </Text>
-            </VStack>
-          </HStack>
-        </VStack>
-        <VStack alignment="trailing" spacing={0} modifiers={[padding({ top: 2, trailing: 6 })]}>
-          <BatteryBadge />
-        </VStack>
-      </ZStack>
+      <WidgetHomeScreenMediumLayout
+        detail={`100% by ${formatClock(props.projectedSleepTimestamp)}`}
+        headline="Sleep in progress"
+        headlineColor={sleepCyan}
+        ring={{ color: sleepAccent, value: sleepProgressValue }}
+        ringCaption="Progress"
+        schedule="Sleep started"
+        subdetail="Sleep in progress"
+        value={formatClock(props.sleepStartTimestamp || props.bedtimeTimestamp)}
+        valueColor={sleepWarm}
+      />
     );
   }
 
   function WidgetHomeScreenMediumBedtimePassed() {
     return (
-      <ZStack
-        alignment="topTrailing"
-        modifiers={[
-          padding({ all: 4 }),
-          widgetURL(homeWidgetURL),
-          containerBackground(widgetBackgroundColor, 'widget'),
-        ]}>
-        <VStack alignment="leading" spacing={6}>
-          <Text modifiers={[font({ size: 12, weight: 'bold' }), foregroundStyle(sleepCyan), lineLimit(1)]}>
-            Bedtime has started
-          </Text>
-          <HStack alignment="center" spacing={14}>
-            <VStack alignment="center" spacing={4}>
-              <Ring size={88} />
-              <Text modifiers={[font({ size: 10, weight: 'semibold' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-                Bedtime
-              </Text>
-            </VStack>
-            <VStack alignment="leading" spacing={4}>
-              <Text modifiers={[font({ size: 11, weight: 'medium' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-                Past bedtime
-              </Text>
-              <Text
-                modifiers={[
-                  font({ size: 28, weight: 'bold', design: 'rounded' }),
-                  foregroundStyle(alert),
-                  monospacedDigit(),
-                  lineLimit(1),
-                ]}>
-                Now
-              </Text>
-              <Text modifiers={[font({ size: 12, weight: 'semibold' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-                100% by {formatClock(props.projectedSleepTimestamp)}
-              </Text>
-              <Text modifiers={[font({ size: 11, weight: 'medium' }), foregroundStyle(resolvedSubtle), lineLimit(1)]}>
-                Wake in {formatCountdown(props.wakeTimestamp)}
-              </Text>
-            </VStack>
-            <Spacer />
-            <VStack alignment="leading" spacing={2}>
-              <SleepNeedMetric />
-              <Text modifiers={[font({ size: 10, weight: 'medium' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-                {sleepDebtLabel()}
-              </Text>
-            </VStack>
-          </HStack>
-        </VStack>
-        <VStack alignment="trailing" spacing={0} modifiers={[padding({ top: 2, trailing: 6 })]}>
-          <BatteryBadge />
-        </VStack>
-      </ZStack>
+      <WidgetHomeScreenMediumLayout
+        detail={`100% by ${formatClock(props.projectedSleepTimestamp)}`}
+        headline="Bedtime has started"
+        headlineColor={sleepCyan}
+        ring={{ color: sleepWarm, value: 0 }}
+        ringCaption="Bedtime"
+        schedule="Past bedtime"
+        subdetail={`Wake in ${formatCountdown(props.wakeTimestamp)}`}
+        value="Now"
+        valueColor={alert}
+        valueSize={28}
+      />
     );
   }
 
   function WidgetHomeScreenMediumWindDown() {
     return (
-      <ZStack
-        alignment="topTrailing"
-        modifiers={[
-          padding({ all: 4 }),
-          widgetURL(homeWidgetURL),
-          containerBackground(widgetBackgroundColor, 'widget'),
-        ]}>
-        <VStack alignment="leading" spacing={6}>
-          <Text modifiers={[font({ size: 12, weight: 'bold' }), foregroundStyle(sleepCyan), lineLimit(1)]}>
-            Time to wind down
-          </Text>
-          <HStack alignment="center" spacing={14}>
-            <VStack alignment="center" spacing={4}>
-              <Ring size={88} />
-              <Text modifiers={[font({ size: 10, weight: 'semibold' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-                Wind down
-              </Text>
-            </VStack>
-            <VStack alignment="leading" spacing={4}>
-              <Text modifiers={[font({ size: 11, weight: 'medium' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-                Tonight's bedtime
-              </Text>
-              <Text
-                modifiers={[
-                  font({ size: 26, weight: 'bold', design: 'rounded' }),
-                  foregroundStyle(primaryColor),
-                  monospacedDigit(),
-                  lineLimit(1),
-                ]}>
-                {formatClock(props.bedtimeTimestamp)}
-              </Text>
-              <Text modifiers={[font({ size: 12, weight: 'semibold' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-                Wake {formatClock(props.wakeTimestamp)}
-              </Text>
-              <Text modifiers={[font({ size: 11, weight: 'medium' }), foregroundStyle(resolvedSubtle), lineLimit(1)]}>
-                Bedtime in {formatCountdown(props.bedtimeTimestamp)}
-              </Text>
-            </VStack>
-            <Spacer />
-            <VStack alignment="leading" spacing={2}>
-              <SleepNeedMetric />
-              <Text modifiers={[font({ size: 10, weight: 'medium' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-                {sleepDebtLabel()}
-              </Text>
-            </VStack>
-          </HStack>
-        </VStack>
-        <VStack alignment="trailing" spacing={0} modifiers={[padding({ top: 2, trailing: 6 })]}>
-          <BatteryBadge />
-        </VStack>
-      </ZStack>
+      <WidgetHomeScreenMediumLayout
+        detail={`Wake ${formatClock(props.wakeTimestamp)}`}
+        headline="Time to wind down"
+        headlineColor={sleepCyan}
+        ring={{ color: sleepCyan, value: 0 }}
+        ringCaption="Wind down"
+        schedule="Tonight's bedtime"
+        subdetail={`Bedtime in ${formatCountdown(props.bedtimeTimestamp)}`}
+        value={formatClock(props.bedtimeTimestamp)}
+        valueColor={primaryColor}
+      />
     );
   }
 
   function WidgetHomeScreenMediumAwake() {
     return (
+      <WidgetHomeScreenMediumLayout
+        detail={`Wake ${formatClock(props.wakeTimestamp)}`}
+        headline="Tonight plan"
+        headlineColor={success}
+        ring={{ color: scoreRingColor, text: scoreText, textColor: scoreTextColor, value: scoreValue }}
+        ringCaption="Last sleep"
+        schedule="Tonight's bedtime"
+        subdetail={`Bedtime in ${formatCountdown(props.bedtimeTimestamp)}`}
+        value={formatClock(props.bedtimeTimestamp)}
+        valueColor={primaryColor}
+      />
+    );
+  }
+
+  function WidgetHomeScreenSmallLayout({
+    detail,
+    ring,
+    title,
+    value,
+    valueColor,
+  }: {
+    detail: string;
+    ring: RingConfig;
+    title: string;
+    value: string;
+    valueColor: string | { type: 'hierarchical'; style: 'primary' };
+  }) {
+    return (
       <ZStack
-        alignment="topTrailing"
-        modifiers={[
-          padding({ all: 4 }),
-          widgetURL(homeWidgetURL),
-          containerBackground(widgetBackgroundColor, 'widget'),
-        ]}>
-        <VStack alignment="leading" spacing={6}>
-          <Text modifiers={[font({ size: 12, weight: 'bold' }), foregroundStyle(success), lineLimit(1)]}>
-            Tonight plan
-          </Text>
-          <HStack alignment="center" spacing={14}>
-            <VStack alignment="center" spacing={4}>
-              <Ring size={88} />
-              <Text modifiers={[font({ size: 10, weight: 'semibold' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-                Last sleep
-              </Text>
-            </VStack>
-            <VStack alignment="leading" spacing={4}>
-              <Text modifiers={[font({ size: 11, weight: 'medium' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-                Tonight's bedtime
-              </Text>
-              <Text
-                modifiers={[
-                  font({ size: 26, weight: 'bold', design: 'rounded' }),
-                  foregroundStyle(primaryColor),
-                  monospacedDigit(),
-                  lineLimit(1),
-                ]}>
-                {formatClock(props.bedtimeTimestamp)}
-              </Text>
-              <Text modifiers={[font({ size: 12, weight: 'semibold' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-                Wake {formatClock(props.wakeTimestamp)}
-              </Text>
-              <Text modifiers={[font({ size: 11, weight: 'medium' }), foregroundStyle(resolvedSubtle), lineLimit(1)]}>
-                Bedtime in {formatCountdown(props.bedtimeTimestamp)}
-              </Text>
-            </VStack>
-            <Spacer />
-            <VStack alignment="leading" spacing={2}>
-              <SleepNeedMetric />
-              <Text modifiers={[font({ size: 10, weight: 'medium' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-                {sleepDebtLabel()}
-              </Text>
-            </VStack>
-          </HStack>
-        </VStack>
-        <VStack alignment="trailing" spacing={0} modifiers={[padding({ top: 2, trailing: 6 })]}>
+        alignment="top"
+        modifiers={[widgetURL(homeWidgetURL), containerBackground(widgetBackgroundColor, 'widget')]}>
+        <HStack alignment="center" spacing={0} modifiers={[frame({ width: 134 }), padding({ top: 8 })]}>
+          <Spacer />
           <BatteryBadge />
+        </HStack>
+
+        <VStack alignment="center" spacing={5} modifiers={[frame({ width: 134, height: 154 }), padding({ top: 8 })]}>
+          <Ring {...ring} size={76} />
+          <VStack alignment="center" spacing={1}>
+            <Text modifiers={[font({ size: 10, weight: 'semibold' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
+              {title}
+            </Text>
+            <Text
+              modifiers={[
+                font({ size: 22, weight: 'bold', design: 'rounded' }),
+                foregroundStyle(valueColor),
+                monospacedDigit(),
+                lineLimit(1),
+              ]}>
+              {value}
+            </Text>
+            <Text modifiers={[font({ size: 11, weight: 'medium' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
+              {detail}
+            </Text>
+          </VStack>
         </VStack>
       </ZStack>
     );
@@ -687,137 +636,49 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
 
   function WidgetHomeScreenSmallSleeping() {
     return (
-      <ZStack
-        alignment="top"
-        modifiers={[widgetURL(homeWidgetURL), containerBackground(widgetBackgroundColor, 'widget')]}>
-        <HStack alignment="center" spacing={0} modifiers={[frame({ width: 134 }), padding({ top: 8 })]}>
-          <Spacer />
-          <BatteryBadge />
-        </HStack>
-
-        <VStack alignment="center" spacing={5} modifiers={[frame({ width: 134, height: 154 }), padding({ top: 8 })]}>
-          <Ring size={76} />
-          <VStack alignment="center" spacing={1}>
-            <Text modifiers={[font({ size: 10, weight: 'semibold' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-              Sleep in progress
-            </Text>
-            <Text
-              modifiers={[
-                font({ size: 22, weight: 'bold', design: 'rounded' }),
-                foregroundStyle(sleepWarm),
-                monospacedDigit(),
-                lineLimit(1),
-              ]}>
-              {formatClock(props.sleepStartTimestamp || props.bedtimeTimestamp)}
-            </Text>
-            <Text modifiers={[font({ size: 11, weight: 'medium' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-              100% by {formatClock(props.projectedSleepTimestamp)}
-            </Text>
-          </VStack>
-        </VStack>
-      </ZStack>
+      <WidgetHomeScreenSmallLayout
+        detail={`100% by ${formatClock(props.projectedSleepTimestamp)}`}
+        ring={{ color: sleepAccent, value: sleepProgressValue }}
+        title="Sleep in progress"
+        value={formatClock(props.sleepStartTimestamp || props.bedtimeTimestamp)}
+        valueColor={sleepWarm}
+      />
     );
   }
 
   function WidgetHomeScreenSmallBedtimePassed() {
     return (
-      <ZStack
-        alignment="top"
-        modifiers={[widgetURL(homeWidgetURL), containerBackground(widgetBackgroundColor, 'widget')]}>
-        <HStack alignment="center" spacing={0} modifiers={[frame({ width: 134 }), padding({ top: 8 })]}>
-          <Spacer />
-          <BatteryBadge />
-        </HStack>
-
-        <VStack alignment="center" spacing={5} modifiers={[frame({ width: 134, height: 154 }), padding({ top: 8 })]}>
-          <Ring size={76} />
-          <VStack alignment="center" spacing={1}>
-            <Text modifiers={[font({ size: 10, weight: 'semibold' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-              Bedtime has started
-            </Text>
-            <Text
-              modifiers={[
-                font({ size: 22, weight: 'bold', design: 'rounded' }),
-                foregroundStyle(alert),
-                monospacedDigit(),
-                lineLimit(1),
-              ]}>
-              Now
-            </Text>
-            <Text modifiers={[font({ size: 11, weight: 'medium' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-              100% by {formatClock(props.projectedSleepTimestamp)}
-            </Text>
-          </VStack>
-        </VStack>
-      </ZStack>
+      <WidgetHomeScreenSmallLayout
+        detail={`100% by ${formatClock(props.projectedSleepTimestamp)}`}
+        ring={{ color: sleepWarm, value: 0 }}
+        title="Bedtime has started"
+        value="Now"
+        valueColor={alert}
+      />
     );
   }
 
   function WidgetHomeScreenSmallWindDown() {
     return (
-      <ZStack
-        alignment="top"
-        modifiers={[widgetURL(homeWidgetURL), containerBackground(widgetBackgroundColor, 'widget')]}>
-        <HStack alignment="center" spacing={0} modifiers={[frame({ width: 134 }), padding({ top: 8 })]}>
-          <Spacer />
-          <BatteryBadge />
-        </HStack>
-
-        <VStack alignment="center" spacing={5} modifiers={[frame({ width: 134, height: 154 }), padding({ top: 8 })]}>
-          <Ring size={76} />
-          <VStack alignment="center" spacing={1}>
-            <Text modifiers={[font({ size: 10, weight: 'semibold' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-              Time to wind down
-            </Text>
-            <Text
-              modifiers={[
-                font({ size: 22, weight: 'bold', design: 'rounded' }),
-                foregroundStyle(primaryColor),
-                monospacedDigit(),
-                lineLimit(1),
-              ]}>
-              {formatClock(props.bedtimeTimestamp)}
-            </Text>
-            <Text modifiers={[font({ size: 11, weight: 'medium' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-              Wake {formatClock(props.wakeTimestamp)}
-            </Text>
-          </VStack>
-        </VStack>
-      </ZStack>
+      <WidgetHomeScreenSmallLayout
+        detail={`Wake ${formatClock(props.wakeTimestamp)}`}
+        ring={{ color: sleepCyan, value: 0 }}
+        title="Time to wind down"
+        value={formatClock(props.bedtimeTimestamp)}
+        valueColor={primaryColor}
+      />
     );
   }
 
   function WidgetHomeScreenSmallAwake() {
     return (
-      <ZStack
-        alignment="top"
-        modifiers={[widgetURL(homeWidgetURL), containerBackground(widgetBackgroundColor, 'widget')]}>
-        <HStack alignment="center" spacing={0} modifiers={[frame({ width: 134 }), padding({ top: 8 })]}>
-          <Spacer />
-          <BatteryBadge />
-        </HStack>
-
-        <VStack alignment="center" spacing={5} modifiers={[frame({ width: 134, height: 154 }), padding({ top: 8 })]}>
-          <Ring size={76} />
-          <VStack alignment="center" spacing={1}>
-            <Text modifiers={[font({ size: 10, weight: 'semibold' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-              Tonight's bedtime
-            </Text>
-            <Text
-              modifiers={[
-                font({ size: 22, weight: 'bold', design: 'rounded' }),
-                foregroundStyle(primaryColor),
-                monospacedDigit(),
-                lineLimit(1),
-              ]}>
-              {formatClock(props.bedtimeTimestamp)}
-            </Text>
-            <Text modifiers={[font({ size: 11, weight: 'medium' }), foregroundStyle(secondaryColor), lineLimit(1)]}>
-              Wake {formatClock(props.wakeTimestamp)}
-            </Text>
-          </VStack>
-        </VStack>
-      </ZStack>
+      <WidgetHomeScreenSmallLayout
+        detail={`Wake ${formatClock(props.wakeTimestamp)}`}
+        ring={{ color: scoreRingColor, text: scoreText, textColor: scoreTextColor, value: scoreValue }}
+        title="Tonight's bedtime"
+        value={formatClock(props.bedtimeTimestamp)}
+        valueColor={primaryColor}
+      />
     );
   }
 
