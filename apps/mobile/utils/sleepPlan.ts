@@ -117,7 +117,11 @@ export function buildTimeOfDayGreeting(now = new Date()) {
     return 'Good afternoon';
   }
 
-  return 'Good evening';
+  if (hour < 22) {
+    return 'Good evening';
+  }
+
+  return 'Good night';
 }
 
 function parseFutureDate(value: string | null, now: Date) {

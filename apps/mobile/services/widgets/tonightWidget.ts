@@ -4,20 +4,16 @@ import type { SQLiteDatabase } from 'expo-sqlite';
 
 import { SQLiteHealthRepository } from '@/data/sqlite/SQLiteHealthRepository';
 import type { SleepHistoryData, SleepPlan } from '@/types/health';
-import { formatClock } from '@/utils/dateTime';
 import { describeSleepScore } from '@/utils/formatters';
 import { resolveSleepPlanWindow, resolveTonightSurfaceState } from '@/utils/sleepPlan';
 import SleepLiveActivity from '@/widgets/SleepLiveActivity';
 import TonightWidget from '@/widgets/TonightWidget';
 import type { TonightWidgetProps } from '@/widgets/TonightWidget';
 
-const TIMELINE_WINDOW_MS = 30 * 60 * 60 * 1000;
 const LIVE_ACTIVITY_URL = 'btwearable://';
 const LIVE_ACTIVITY_WIND_DOWN_PREVIEW_MINUTES = 30;
 const LIVE_ACTIVITY_SLEEP_PREVIEW_MINUTES = 120;
 const LIVE_ACTIVITY_REFRESH_INTERVAL_MS = 60_000;
-const LIVE_ACTIVITY_SCHEDULED_START_MIN_IOS_VERSION = 26;
-const LIVE_ACTIVITY_SCHEDULED_WIND_DOWN_ALERT_TITLE = 'Time to wind down';
 const PREVIEW_TIMELINE_HOLD_MS = 24 * 60 * 60 * 1000;
 type TonightWidgetSnapshot = Pick<
   SleepHistoryData,
@@ -27,14 +23,6 @@ type TonightWidgetSnapshot = Pick<
   chargingStatus?: 'charging' | 'not_charging' | null;
 };
 export type SleepSurfacePreviewMode = 'wind_down' | 'sleep_in_progress';
-type TonightWidgetUpdateOptions = {
-  allowLiveActivityScheduling?: boolean;
-};
-type SleepLiveActivityStartOptions = {
-  alertBody?: string;
-  alertTitle?: string;
-  startDate?: Date;
-};
 type ExpoWidgetsModule = {
   reloadAllWidgets(): void;
 };
@@ -44,29 +32,10 @@ let lastKnownBatteryPercent: number | null = null;
 let lastSnapshot: TonightWidgetSnapshot | null = null;
 let sleepSurfacePreviewProps: TonightWidgetProps | null = null;
 let sleepSurfacePreviewTimeline: { date: Date; props: TonightWidgetProps }[] | null = null;
-let lastWidgetTimelineKey: string | null = null;
-let lastLiveActivityPropsKey: string | null = null;
-let lastLiveActivityInstanceCount = 0;
 let liveActivityRefreshTimeout: ReturnType<typeof setTimeout> | null = null;
-let scheduledLiveActivityPropsKey: string | null = null;
-let scheduledLiveActivityStartAtMs: number | null = null;
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
-}
-
-function getCurrentIOSVersion() {
-  if (Platform.OS !== 'ios') {
-    return null;
-  }
-
-  const rawVersion = typeof Platform.Version === 'string' ? Number.parseFloat(Platform.Version) : Platform.Version;
-  return Number.isFinite(rawVersion) ? rawVersion : null;
-}
-
-function supportsScheduledSleepLiveActivityStart() {
-  const version = getCurrentIOSVersion();
-  return version !== null && version >= LIVE_ACTIVITY_SCHEDULED_START_MIN_IOS_VERSION;
 }
 
 function warnSleepLiveActivityFailure(action: string, error: unknown) {
@@ -147,55 +116,11 @@ export function buildTonightWidgetProps(snapshot: TonightWidgetSnapshot, now = n
   };
 }
 
-function buildTimelineDates(snapshot: TonightWidgetSnapshot, now: Date) {
-  const plan = snapshot.sleepPlan;
-  const { bedtimeDate, previewStartDate, prepStartDate, wakeDate } = resolveSleepPlanWindow(plan, now);
-  const surfaceState = resolveTonightSurfaceState(snapshot, now);
-  const candidates = [
-    now,
-    previewStartDate,
-    prepStartDate,
-    bedtimeDate,
-    wakeDate,
-    new Date(wakeDate.getTime() + 60_000),
-  ];
-  const latestDate = new Date(now.getTime() + TIMELINE_WINDOW_MS);
-  const uniqueDates = new Map<number, Date>();
-
-  if (surfaceState.mode === 'sleep') {
-    const sleepEndEstimate = surfaceState.sleepStartDate
-      ? new Date(surfaceState.sleepStartDate.getTime() + plan.sleepNeedMinutes * 60_000)
-      : wakeDate;
-    const progressTimelineEnd = new Date(Math.min(latestDate.getTime(), sleepEndEstimate.getTime() + 60 * 60_000));
-    const nextHalfHour = new Date(Math.ceil(now.getTime() / (30 * 60_000)) * 30 * 60_000);
-
-    candidates.push(sleepEndEstimate);
-
-    for (
-      let time = nextHalfHour.getTime();
-      time <= progressTimelineEnd.getTime();
-      time += 30 * 60_000
-    ) {
-      candidates.push(new Date(time));
-    }
-  }
-
-  for (const date of candidates) {
-    if (date.getTime() < now.getTime() || date.getTime() > latestDate.getTime()) {
-      continue;
-    }
-
-    uniqueDates.set(Math.round(date.getTime() / 60_000), date);
-  }
-
-  return [...uniqueDates.values()].sort((left, right) => left.getTime() - right.getTime());
-}
-
 export function buildTonightWidgetTimeline(snapshot: TonightWidgetSnapshot, now = new Date()) {
-  return buildTimelineDates(snapshot, now).map((date) => ({
-    date,
-    props: buildTonightWidgetProps(snapshot, date),
-  }));
+  return [{
+    date: now,
+    props: buildTonightWidgetProps(snapshot, now),
+  }];
 }
 
 function buildPreviewWidgetTimeline(props: TonightWidgetProps, now = new Date()) {
@@ -225,15 +150,6 @@ function getPreviewWidgetTimeline() {
   return sleepSurfacePreviewTimeline;
 }
 
-function buildWidgetTimelineKey(entries: { date: Date; props: TonightWidgetProps }[]) {
-  return JSON.stringify(
-    entries.map((entry) => ({
-      timestamp: entry.date.getTime(),
-      props: entry.props,
-    })),
-  );
-}
-
 function syncTonightWidgetPreviewOrLive(snapshot?: TonightWidgetSnapshot) {
   if (!sleepSurfacePreviewProps && !snapshot) {
     return;
@@ -242,18 +158,10 @@ function syncTonightWidgetPreviewOrLive(snapshot?: TonightWidgetSnapshot) {
   const entries = sleepSurfacePreviewProps
     ? getPreviewWidgetTimeline() ?? buildPreviewWidgetTimeline(sleepSurfacePreviewProps)
     : buildTonightWidgetTimeline(snapshot as TonightWidgetSnapshot);
-  const nextKey = buildWidgetTimelineKey(entries);
-
-  if (nextKey === lastWidgetTimelineKey) {
-    return;
-  }
 
   try {
     TonightWidget.updateTimeline(entries);
-    lastWidgetTimelineKey = nextKey;
-  } catch {
-    lastWidgetTimelineKey = null;
-  }
+  } catch {}
 }
 
 function getSleepLiveActivityInstances() {
@@ -332,10 +240,6 @@ async function endSleepLiveActivities() {
     }),
   );
 
-  lastLiveActivityPropsKey = null;
-  lastLiveActivityInstanceCount = 0;
-  scheduledLiveActivityPropsKey = null;
-  scheduledLiveActivityStartAtMs = null;
 }
 
 async function endPendingSleepLiveActivities() {
@@ -369,37 +273,23 @@ async function endPendingSleepLiveActivities() {
     }),
   );
 
-  lastLiveActivityPropsKey = null;
-  lastLiveActivityInstanceCount = 0;
-  scheduledLiveActivityPropsKey = null;
-  scheduledLiveActivityStartAtMs = null;
   return true;
 }
 
 async function startOrUpdateSleepLiveActivity(
   props: TonightWidgetProps,
-  options: SleepLiveActivityStartOptions = {},
 ) {
   const instances = getSleepLiveActivityInstances();
-  const nextPropsKey = JSON.stringify(props);
 
   if (instances.length === 0) {
     try {
-      SleepLiveActivity.start(props, LIVE_ACTIVITY_URL, options);
-      lastLiveActivityPropsKey = nextPropsKey;
-      lastLiveActivityInstanceCount = 1;
+      SleepLiveActivity.start(props, LIVE_ACTIVITY_URL);
       return true;
     } catch (error) {
-      lastLiveActivityPropsKey = null;
-      lastLiveActivityInstanceCount = 0;
-      warnSleepLiveActivityFailure(options.startDate ? 'schedule' : 'start', error);
+      warnSleepLiveActivityFailure('start', error);
     }
 
     return false;
-  }
-
-  if (nextPropsKey === lastLiveActivityPropsKey && instances.length === lastLiveActivityInstanceCount) {
-    return true;
   }
 
   const updateFailures: unknown[] = [];
@@ -417,12 +307,7 @@ async function startOrUpdateSleepLiveActivity(
   );
 
   if (updateResults.some(Boolean)) {
-    lastLiveActivityPropsKey = nextPropsKey;
-    lastLiveActivityInstanceCount = instances.length;
     return true;
-  } else {
-    lastLiveActivityPropsKey = null;
-    lastLiveActivityInstanceCount = instances.length;
   }
 
   if (updateFailures[0]) {
@@ -430,57 +315,6 @@ async function startOrUpdateSleepLiveActivity(
   }
 
   return false;
-}
-
-async function scheduleSleepLiveActivityAtWindDown(snapshot: TonightWidgetSnapshot, now = new Date()) {
-  if (!supportsScheduledSleepLiveActivityStart()) {
-    return false;
-  }
-
-  let { prepStartDate, wakeDate } = resolveSleepPlanWindow(snapshot.sleepPlan, now);
-
-  if (prepStartDate.getTime() <= now.getTime()) {
-    ({ prepStartDate, wakeDate } = resolveSleepPlanWindow(
-      snapshot.sleepPlan,
-      new Date(wakeDate.getTime() + 60_000),
-    ));
-  }
-
-  if (prepStartDate.getTime() <= now.getTime()) {
-    return false;
-  }
-
-  const props = buildTonightWidgetProps(snapshot, prepStartDate);
-  const nextPropsKey = JSON.stringify(props);
-  const instances = getSleepLiveActivityInstances();
-
-  if (
-    instances.length > 0 &&
-    scheduledLiveActivityStartAtMs === prepStartDate.getTime() &&
-    scheduledLiveActivityPropsKey === nextPropsKey
-  ) {
-    return true;
-  }
-
-  clearSleepLiveActivityRefreshTimer();
-
-  if (instances.length > 0) {
-    await endSleepLiveActivities();
-  }
-
-  const scheduled = await startOrUpdateSleepLiveActivity(props, {
-    alertBody: `Bed ${formatClock(prepStartDate)}, wake ${formatClock(wakeDate)}`,
-    alertTitle: LIVE_ACTIVITY_SCHEDULED_WIND_DOWN_ALERT_TITLE,
-    startDate: prepStartDate,
-  });
-
-  if (!scheduled) {
-    return false;
-  }
-
-  scheduledLiveActivityStartAtMs = prepStartDate.getTime();
-  scheduledLiveActivityPropsKey = nextPropsKey;
-  return true;
 }
 
 function buildSleepSurfacePreviewProps(
@@ -521,30 +355,16 @@ function buildSleepSurfacePreviewProps(
   } satisfies TonightWidgetProps;
 }
 
-async function syncSleepLiveActivity(
-  snapshot: TonightWidgetSnapshot,
-  options: TonightWidgetUpdateOptions = {},
-) {
+async function syncSleepLiveActivity(snapshot: TonightWidgetSnapshot) {
   const now = new Date();
   const props = sleepSurfacePreviewProps ?? buildTonightWidgetProps(snapshot, now);
-  const allowLiveActivityScheduling = options.allowLiveActivityScheduling ?? true;
 
   if (props.surfaceMode === 'awake') {
-    if (
-      allowLiveActivityScheduling &&
-      !sleepSurfacePreviewProps &&
-      (await scheduleSleepLiveActivityAtWindDown(snapshot, now))
-    ) {
-      return;
-    }
-
     await endSleepLiveActivities();
     return;
   }
 
   await endPendingSleepLiveActivities();
-  scheduledLiveActivityPropsKey = null;
-  scheduledLiveActivityStartAtMs = null;
 
   if (await startOrUpdateSleepLiveActivity(props)) {
     scheduleSleepLiveActivityRefresh();
@@ -567,7 +387,6 @@ export async function previewSleepSurfaces(
 
   sleepSurfacePreviewProps = buildSleepSurfacePreviewProps(lastSnapshot, mode);
   sleepSurfacePreviewTimeline = buildPreviewWidgetTimeline(sleepSurfacePreviewProps);
-  lastWidgetTimelineKey = null;
   syncTonightWidgetPreviewOrLive(lastSnapshot);
   await startOrUpdateSleepLiveActivity(sleepSurfacePreviewProps);
   scheduleSleepLiveActivityRefresh();
@@ -580,7 +399,6 @@ export async function restoreSleepSurfacePreview() {
 
   sleepSurfacePreviewProps = null;
   sleepSurfacePreviewTimeline = null;
-  lastWidgetTimelineKey = null;
 
   if (lastSnapshot) {
     await applyTonightWidgetSnapshot(lastSnapshot);
@@ -590,10 +408,7 @@ export async function restoreSleepSurfacePreview() {
   await endSleepLiveActivities();
 }
 
-async function applyTonightWidgetSnapshot(
-  snapshot: TonightWidgetSnapshot,
-  options: TonightWidgetUpdateOptions = {},
-) {
+async function applyTonightWidgetSnapshot(snapshot: TonightWidgetSnapshot) {
   lastSnapshot = {
     ...snapshot,
     batteryPercent: snapshot.batteryPercent ?? lastSnapshot?.batteryPercent,
@@ -603,7 +418,7 @@ async function applyTonightWidgetSnapshot(
   syncTonightWidgetPreviewOrLive(lastSnapshot);
   reloadAllWidgetSnapshots();
 
-  await syncSleepLiveActivity(lastSnapshot, options).catch(() => {});
+  await syncSleepLiveActivity(lastSnapshot).catch(() => {});
 }
 
 export async function registerTonightWidgetLayout() {
@@ -616,9 +431,6 @@ export async function registerTonightWidgetLayout() {
   } catch {}
 
   getSleepLiveActivityInstances();
-  lastWidgetTimelineKey = null;
-  lastLiveActivityPropsKey = null;
-  lastLiveActivityInstanceCount = 0;
 
   if (lastSnapshot) {
     await applyTonightWidgetSnapshot(lastSnapshot).catch(() => {});
@@ -632,15 +444,12 @@ export async function registerTonightWidgetLayout() {
   reloadAllWidgetSnapshots();
 }
 
-export async function updateTonightWidgetFromSleepHistory(
-  snapshot: TonightWidgetSnapshot,
-  options: TonightWidgetUpdateOptions = {},
-) {
+export async function updateTonightWidgetFromSleepHistory(snapshot: TonightWidgetSnapshot) {
   if (Platform.OS !== 'ios') {
     return;
   }
 
-  await applyTonightWidgetSnapshot(snapshot, options);
+  await applyTonightWidgetSnapshot(snapshot);
 }
 
 export async function updateTonightWidgetPowerState(powerState: {
@@ -692,10 +501,7 @@ async function loadLatestPowerState(db: SQLiteDatabase) {
   };
 }
 
-export async function updateTonightWidgetFromDatabase(
-  db: SQLiteDatabase,
-  options: TonightWidgetUpdateOptions = {},
-) {
+export async function updateTonightWidgetFromDatabase(db: SQLiteDatabase) {
   const repository = new SQLiteHealthRepository(db);
   const sleep = await repository.getSleepHistory('14d');
   const powerState = await loadLatestPowerState(db).catch(() => ({
@@ -706,5 +512,5 @@ export async function updateTonightWidgetFromDatabase(
     ...sleep,
     batteryPercent: powerState.batteryPercent,
     chargingStatus: powerState.chargingStatus,
-  }, options);
+  });
 }

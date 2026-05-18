@@ -34,6 +34,24 @@ export interface TonightWidgetProps {
 const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: WidgetEnvironment) => {
   'widget';
 
+  function buildTimeOfDayGreeting(now = new Date()) {
+    const hour = now.getHours();
+
+    if (hour < 12) {
+      return 'Good morning';
+    }
+
+    if (hour < 18) {
+      return 'Good afternoon';
+    }
+
+    if (hour < 22) {
+      return 'Good evening';
+    }
+
+    return 'Good night';
+  }
+
   const accent = '#52D8E8';
   const caution = '#ffd26b';
   const alert = '#ff7d70';
@@ -413,7 +431,7 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
     return (
       <WidgetLockScreenWideLayout
         detail={`100% by ${formatClock(props.projectedSleepTimestamp)}`}
-        headline="Bedtime has started"
+        headline="Past bedtime"
         headlineColor={sleepCyan}
         ring={{ color: sleepWarm, value: 0 }}
         schedule="Bed Now!"
@@ -434,10 +452,12 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
   }
 
   function WidgetLockScreenWideAwake() {
+    const headline = buildTimeOfDayGreeting();
+
     return (
       <WidgetLockScreenWideLayout
         detail={`Wake ${formatClock(props.wakeTimestamp)}`}
-        headline="Tonight plan"
+        headline={headline}
         headlineColor={success}
         ring={{ color: scoreRingColor, text: scoreText, textColor: scoreTextColor, value: scoreValue }}
         schedule={`Bed ${formatClock(props.bedtimeTimestamp)}`}
@@ -527,7 +547,7 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
     return (
       <WidgetHomeScreenMediumLayout
         detail={`100% by ${formatClock(props.projectedSleepTimestamp)}`}
-        headline="Sleep in progress"
+        headline="Sweet dreams"
         headlineColor={sleepCyan}
         ring={{ color: sleepAccent, value: sleepProgressValue }}
         ringCaption="Progress"
@@ -543,7 +563,7 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
     return (
       <WidgetHomeScreenMediumLayout
         detail={`100% by ${formatClock(props.projectedSleepTimestamp)}`}
-        headline="Bedtime has started"
+        headline="Go to bed!"
         headlineColor={sleepCyan}
         ring={{ color: sleepWarm, value: 0 }}
         ringCaption="Bedtime"
@@ -573,10 +593,12 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
   }
 
   function WidgetHomeScreenMediumAwake() {
+    const headline = buildTimeOfDayGreeting();
+
     return (
       <WidgetHomeScreenMediumLayout
         detail={`Wake ${formatClock(props.wakeTimestamp)}`}
-        headline="Tonight plan"
+        headline={headline}
         headlineColor={success}
         ring={{ color: scoreRingColor, text: scoreText, textColor: scoreTextColor, value: scoreValue }}
         ringCaption="Last sleep"
@@ -651,7 +673,7 @@ const TonightWidgetComponent = (rawProps: TonightWidgetProps, environment: Widge
       <WidgetHomeScreenSmallLayout
         detail={`100% by ${formatClock(props.projectedSleepTimestamp)}`}
         ring={{ color: sleepWarm, value: 0 }}
-        title="Bedtime has started"
+        title="Past bedtime"
         value="Now"
         valueColor={alert}
       />

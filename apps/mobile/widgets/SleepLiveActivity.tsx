@@ -327,7 +327,7 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
     return (
       <LiveActivityBannerLayout
         detail={wakeCountdown ? `Wake in ${wakeCountdown}` : 'Wake soon'}
-        headline="Bedtime has started"
+        headline="It is past your bedtime"
         metric={{
           fallbackColor: sleepWarm,
           fallbackText: '0',
@@ -389,7 +389,7 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
   }
 
   function LiveActivityBannerSmallBedtimePassed() {
-    return <LiveActivityBannerSmallLayout headline="Bedtime has started" />;
+    return <LiveActivityBannerSmallLayout headline="It is past your bedtime" />;
   }
 
   function LiveActivityBannerSmallWindDown() {
@@ -554,7 +554,7 @@ const SleepLiveActivityComponent = (rawProps: TonightWidgetProps) => {
     return (
       <LiveActivityExpandedCenterLayout
         detail={wakeCountdown ? `Wake in ${wakeCountdown}` : 'Wake soon'}
-        headline="Bedtime has started"
+        headline="It is past your bedtime"
         schedule={`100% by ${formatClock(props.projectedSleepTimestamp)}`}
       />
     );
