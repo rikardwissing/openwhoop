@@ -683,7 +683,7 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
             : result.status === 'no_device'
               ? 'Local data refreshed'
               : result.status === 'skipped'
-                ? 'Sync already running'
+                ? result.message
                 : 'Fully synced',
           result.status === 'failed'
             ? BACKGROUND_SYNC_REFRESH_ERROR_HOLD_MS

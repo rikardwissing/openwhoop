@@ -981,7 +981,8 @@ export class WearableSyncService {
       throw new Error('Select a wearable before syncing.');
     }
 
-    const startedAt = formatSqliteDateTime(new Date());
+    const nowMs = Date.now();
+    const startedAt = formatSqliteDateTime(new Date(nowMs));
     await recordBackgroundRunStart(this.db, {
       deviceId: selected.id,
       source,

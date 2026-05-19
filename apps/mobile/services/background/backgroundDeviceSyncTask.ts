@@ -23,6 +23,12 @@ import {
   syncMissingDeviceDataReminderNotificationsAsync,
 } from '@/services/notifications/missingDeviceDataReminders';
 import { updateTonightWidgetFromDatabase } from '@/services/widgets/tonightWidget';
+import {
+  recordSyncCooldownStarted,
+  recordSyncCooldownSuccess,
+  resolveSyncCooldown,
+  type SyncCooldownSkipReason,
+} from '@/services/background/syncCooldown';
 
 export const BACKGROUND_DEVICE_SYNC_TASK_NAME = 'unstrap-background-device-sync-task';
 export const BACKGROUND_DEVICE_SYNC_INTERVAL_MINUTES = 15;
@@ -75,6 +81,34 @@ function formatAppleHealthExportSuffix(result: AppleHealthExportResult | null) {
 
   const count = result.totals.exported;
   return ` Wrote ${count} Apple Health ${count === 1 ? 'sample' : 'samples'}.`;
+}
+
+function formatSkippedSyncMessage(reason?: string) {
+  if (reason === 'sync-success-cooldown') {
+    return 'Skipped because the last successful sync was less than 10 minutes ago.';
+  }
+
+  if (reason === 'sync-started-cooldown') {
+    return 'Skipped because another sync started less than 2 minutes ago.';
+  }
+
+  return 'Skipped because another sync is already running.';
+}
+
+function buildSkippedRunResult(
+  reason: SyncCooldownSkipReason,
+  notificationPermissionGranted: boolean,
+): BackgroundDeviceSyncManualRunResult {
+  return {
+    appleHealthExport: null,
+    detectionNotifications: EMPTY_DETECTION_NOTIFICATION_RESULT,
+    error: null,
+    importedReadings: 0,
+    message: formatSkippedSyncMessage(reason),
+    notificationPermissionGranted,
+    processedDerivedRefresh: false,
+    status: 'skipped',
+  };
 }
 
 function errorMessage(error: unknown) {
@@ -167,6 +201,13 @@ async function executeBackgroundDeviceSyncAsync(options: {
   );
   await ensureBackgroundDeviceSyncNotificationChannelAsync();
 
+  const cooldownSkip = await resolveSyncCooldown(runStartedAtMs);
+  if (cooldownSkip) {
+    return buildSkippedRunResult(cooldownSkip.reason, notificationPermissionGranted);
+  }
+
+  await recordSyncCooldownStarted(runStartedAtMs);
+
   try {
     db = options.db ?? await openAppDatabaseAsync();
     service = options.service ?? new WearableSyncService(db);
@@ -208,6 +249,9 @@ async function executeBackgroundDeviceSyncAsync(options: {
     const outcome = await (options.syncRunner
       ? options.syncRunner(service, syncOptions)
       : service.syncInBackground(syncOptions));
+    if (outcome.status === 'success') {
+      await recordSyncCooldownSuccess(Date.now());
+    }
     const readings = formatImportedReadings(outcome.importedReadings);
     const pausedSafely = outcome.reason === 'time-budget' || outcome.reason === 'expiration';
     const status = pausedSafely ? 'paused' : outcome.status === 'skipped' ? 'skipped' : 'completed';
@@ -251,7 +295,7 @@ async function executeBackgroundDeviceSyncAsync(options: {
         : outcome.reason === 'time-budget'
           ? `Paused safely after ${elapsed} with ${readings} imported. Sync will continue in a later background window.`
           : outcome.status === 'skipped'
-            ? 'Skipped because another sync is already running.'
+            ? formatSkippedSyncMessage(outcome.reason)
             : `Completed background sync in ${elapsed} with ${readings} imported.${appleHealthSuffix}`;
 
     await scheduleBackgroundDeviceSyncNotificationAsync({
