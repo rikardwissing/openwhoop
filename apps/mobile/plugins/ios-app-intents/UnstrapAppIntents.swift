@@ -41,15 +41,6 @@ enum UnstrapSleepStateValue: String, AppEnum {
   ]
 }
 
-@available(iOS 17.0, *)
-struct UnstrapExternalAppIntentsPackage: AppIntentsPackage {
-  static var includedPackages: [any AppIntentsPackage.Type] {
-    [
-      UnstrapLiveActivityIntentsPackage.self,
-    ]
-  }
-}
-
 @available(iOS 16.0, *)
 struct GetLatestUnstrapEventIntent: AppIntent {
   static var title: LocalizedStringResource = "Get Latest Unstrap Event"
@@ -183,6 +174,25 @@ struct GetCurrentUnstrapSleepStateIntent: AppIntent {
 }
 
 @available(iOS 16.0, *)
+struct ShowUnstrapSleepLiveActivityIntent: AppIntent {
+  static var title: LocalizedStringResource = "Show Unstrap Live Activity"
+  static var description = IntentDescription("Starts or updates the Unstrap sleep Live Activity.")
+
+  static var parameterSummary: some ParameterSummary {
+    Summary("Show Unstrap Live Activity")
+  }
+
+  func perform() async throws -> some IntentResult {
+    guard #available(iOS 17.0, *) else {
+      throw UnstrapAppIntentError.liveActivitiesUnavailable
+    }
+
+    try await UnstrapSleepLiveActivity.start()
+    return .result()
+  }
+}
+
+@available(iOS 16.0, *)
 struct UnstrapAppShortcuts: AppShortcutsProvider {
   static var appShortcuts: [AppShortcut] {
     AppShortcut(
@@ -228,6 +238,26 @@ struct UnstrapAppShortcuts: AppShortcutsProvider {
       shortTitle: "Sleep State",
       systemImageName: "bed.double"
     )
+    AppShortcut(
+      intent: ShowUnstrapSleepLiveActivityIntent(),
+      phrases: [
+        "Show \(.applicationName) live activity",
+        "Start \(.applicationName) live activity",
+      ],
+      shortTitle: "Show Live Activity",
+      systemImageName: "livephoto"
+    )
+  }
+}
+
+private enum UnstrapAppIntentError: LocalizedError {
+  case liveActivitiesUnavailable
+
+  var errorDescription: String? {
+    switch self {
+    case .liveActivitiesUnavailable:
+      return "Unstrap Live Activities require iOS 17 or later."
+    }
   }
 }
 

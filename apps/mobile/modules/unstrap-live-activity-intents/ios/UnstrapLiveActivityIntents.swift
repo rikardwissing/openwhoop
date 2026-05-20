@@ -20,6 +20,7 @@ private enum UnstrapLiveActivityConstants {
 public struct StartUnstrapSleepLiveActivityIntent: LiveActivityIntent {
   public static var title: LocalizedStringResource = "Start Unstrap Live Activity"
   public static var description = IntentDescription("Starts the Unstrap wind-down or sleep Live Activity.")
+  public static var isDiscoverable: Bool = false
 
   private var notificationPropsJSON: String?
 
@@ -36,13 +37,17 @@ public struct StartUnstrapSleepLiveActivityIntent: LiveActivityIntent {
   }
 
   public func perform() async throws -> some IntentResult {
-    try await UnstrapSleepLiveActivityStarter.start(propsJSON: notificationPropsJSON)
+    try await UnstrapSleepLiveActivity.start(propsJSON: notificationPropsJSON)
     return .result()
   }
 }
 
 @available(iOS 17.0, *)
-public struct UnstrapLiveActivityIntentsPackage: AppIntentsPackage {}
+public enum UnstrapSleepLiveActivity {
+  public static func start(propsJSON: String? = nil) async throws {
+    try await UnstrapSleepLiveActivityStarter.start(propsJSON: propsJSON)
+  }
+}
 
 public final class UnstrapLiveActivityIntentsAppDelegateSubscriber: ExpoAppDelegateSubscriber, NotificationDelegate {
   public func application(
