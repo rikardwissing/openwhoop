@@ -31,7 +31,7 @@ import {
   cancelMissingDeviceDataReminderNotificationsAsync,
   syncMissingDeviceDataReminderNotificationsAsync,
 } from '@/services/notifications/missingDeviceDataReminders';
-import { updateTonightWidgetPowerState } from '@/services/widgets/tonightWidget';
+import { updateTonightWidget } from '@/services/widgets/tonightWidget';
 import {
   isBlockingSyncStatus,
   type BackgroundSyncState,
@@ -494,15 +494,12 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
           (nextState.batteryPercent !== previousState.batteryPercent ||
             nextState.chargingStatus !== previousState.chargingStatus)
         ) {
-          void updateTonightWidgetPowerState({
-            batteryPercent: nextState.batteryPercent,
-            chargingStatus: nextState.chargingStatus,
-          });
+          void updateTonightWidget(db);
         }
       },
       appendLiveEventAndHandleSyncTrigger,
     );
-  }, [appendLiveEventAndHandleSyncTrigger, service]);
+  }, [appendLiveEventAndHandleSyncTrigger, db, service]);
 
   useEffect(() => {
     let cancelled = false;
@@ -608,10 +605,7 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
               (nextState.batteryPercent !== previousState.batteryPercent ||
                 nextState.chargingStatus !== previousState.chargingStatus)
             ) {
-              void updateTonightWidgetPowerState({
-                batteryPercent: nextState.batteryPercent,
-                chargingStatus: nextState.chargingStatus,
-              });
+              void updateTonightWidget(db);
             }
           }
         },
@@ -623,7 +617,7 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
       cancelled = true;
       void service.stopLiveUpdates();
     };
-  }, [appendLiveEventAndHandleSyncTrigger, deviceState.id, service]);
+  }, [appendLiveEventAndHandleSyncTrigger, db, deviceState.id, service]);
 
   const runBackgroundSync = useCallback(
     async (options?: WearableBackgroundSyncOptions) => {

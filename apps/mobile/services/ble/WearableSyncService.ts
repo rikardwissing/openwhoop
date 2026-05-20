@@ -26,7 +26,7 @@ import {
   notifyForWearableBatteryLevelAsync,
   notifyForWearableEventAsync,
 } from '@/services/notifications/wearableEventNotifications';
-import { updateTonightWidgetFromDatabase } from '@/services/widgets/tonightWidget';
+import { updateTonightWidget } from '@/services/widgets/tonightWidget';
 import type {
   BackgroundSyncResult,
   ChargingState,
@@ -546,8 +546,8 @@ export class WearableSyncService {
     );
   }
 
-  private async updateTonightWidgetPowerFromDatabase() {
-    await updateTonightWidgetFromDatabase(this.db).catch(() => {});
+  private async refreshTonightWidgetFromDatabase() {
+    await updateTonightWidget(this.db).catch(() => {});
   }
 
   private clearLiveHeartRate() {
@@ -759,7 +759,7 @@ export class WearableSyncService {
         bodyStatus: update.bodyStatus,
       });
       if (update.batteryPercent !== undefined || update.chargingStatus !== undefined) {
-        await this.updateTonightWidgetPowerFromDatabase();
+        await this.refreshTonightWidgetFromDatabase();
       }
       onDeviceState(await this.getDeviceState());
     };
@@ -1761,7 +1761,7 @@ export class WearableSyncService {
       formatSqliteDateTime(new Date()),
       deviceId,
     );
-    await this.updateTonightWidgetPowerFromDatabase();
+    await this.refreshTonightWidgetFromDatabase();
 
     return batteryPercent;
   }

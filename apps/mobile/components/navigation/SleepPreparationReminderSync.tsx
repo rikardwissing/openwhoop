@@ -1,15 +1,15 @@
 import { useEffect, useState } from 'react';
 import { AppState } from 'react-native';
+import { useSQLiteContext } from 'expo-sqlite';
 
 import { useHealthDataVersion, useHealthRepository } from '@/providers/HealthDataProvider';
-import { useWearableSyncState } from '@/providers/WearableSyncProvider';
 import { syncSleepPreparationReminder } from '@/services/notifications/sleepPreparationReminder';
-import { updateTonightWidgetFromSleepHistory } from '@/services/widgets/tonightWidget';
+import { updateTonightWidget } from '@/services/widgets/tonightWidget';
 
 export function SleepPreparationReminderSync() {
+  const db = useSQLiteContext();
   const repository = useHealthRepository();
   const version = useHealthDataVersion('sleep');
-  const { deviceState } = useWearableSyncState();
   const [resumeTick, setResumeTick] = useState(0);
 
   useEffect(() => {
@@ -38,11 +38,7 @@ export function SleepPreparationReminderSync() {
         syncSleepPreparationReminder(snapshot.sleepPlan, {
           requestPermission: false,
         }),
-        updateTonightWidgetFromSleepHistory({
-          ...snapshot,
-          batteryPercent: deviceState.batteryPercent,
-          chargingStatus: deviceState.chargingStatus,
-        }),
+        updateTonightWidget(db),
       ]);
     };
 
@@ -51,7 +47,7 @@ export function SleepPreparationReminderSync() {
     return () => {
       cancelled = true;
     };
-  }, [deviceState.batteryPercent, deviceState.chargingStatus, repository, resumeTick, version]);
+  }, [db, repository, resumeTick, version]);
 
   return null;
 }

@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
+import { useSQLiteContext } from 'expo-sqlite';
 
-import { updateTonightWidgetFromSleepHistory } from '@/services/widgets/tonightWidget';
+import { updateTonightWidget } from '@/services/widgets/tonightWidget';
 import type { SleepHistoryData } from '@/types/health';
 
 type TonightWidgetSyncData = Pick<
@@ -68,30 +69,12 @@ function widgetSyncKey({
 }
 
 export function TonightWidgetPlanSync(props: TonightWidgetSyncData) {
-  const {
-    batteryPercent,
-    chargingStatus,
-    completionStatus,
-    headlineLabel,
-    headlineScore,
-    isInProgress,
-    sessions,
-    sleepPlan,
-  } = props;
+  const db = useSQLiteContext();
   const syncKey = widgetSyncKey(props);
 
   useEffect(() => {
-    void updateTonightWidgetFromSleepHistory({
-      batteryPercent,
-      chargingStatus,
-      completionStatus,
-      headlineLabel,
-      headlineScore,
-      isInProgress,
-      sessions,
-      sleepPlan,
-    });
-  }, [syncKey]);
+    void updateTonightWidget(db);
+  }, [db, syncKey]);
 
   return null;
 }

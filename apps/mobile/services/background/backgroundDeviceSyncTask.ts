@@ -22,7 +22,7 @@ import {
   cancelMissingDeviceDataReminderNotificationsAsync,
   syncMissingDeviceDataReminderNotificationsAsync,
 } from '@/services/notifications/missingDeviceDataReminders';
-import { updateTonightWidgetFromDatabase } from '@/services/widgets/tonightWidget';
+import { updateTonightWidget } from '@/services/widgets/tonightWidget';
 import {
   recordSyncCooldownStarted,
   recordSyncCooldownSuccess,
@@ -313,7 +313,7 @@ async function executeBackgroundDeviceSyncAsync(options: {
         dismissDelivered: outcome.importedReadings > 0,
         deviceName,
       }).catch(() => null);
-      await updateTonightWidgetFromDatabase(db).catch(() => null);
+      await updateTonightWidget(db).catch(() => null);
     }
 
     return {

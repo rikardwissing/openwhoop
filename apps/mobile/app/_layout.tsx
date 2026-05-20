@@ -17,7 +17,6 @@ import { AppDatabaseProvider } from '@/providers/AppDatabaseProvider';
 import { HealthDataProvider } from '@/providers/HealthDataProvider';
 import { WearableSyncProvider, useWearableSyncState } from '@/providers/WearableSyncProvider';
 import { routeFromNotificationData } from '@/services/notifications/notificationRouting';
-import { registerTonightWidgetLayout } from '@/services/widgets/tonightWidget';
 
 export {
   ErrorBoundary,
@@ -56,10 +55,6 @@ export default function RootLayout() {
 }
 
 function RootLayoutNav() {
-  useEffect(() => {
-    void registerTonightWidgetLayout();
-  }, []);
-
   return (
     <GestureHandlerRootView style={styles.root}>
       <ThemeProvider value={navTheme}>
