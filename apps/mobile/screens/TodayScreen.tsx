@@ -14,6 +14,7 @@ import { TonightPlanCard } from '@/components/dashboard/TonightPlanCard';
 import { ScreenShell } from '@/components/layout/ScreenShell';
 import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
 import { colors, typography } from '@/constants/theme';
+import { useGraphQLHeartTimelineWindow } from '@/hooks/useGraphQLHeartTimelineWindow';
 import { useDerivedRefreshState, useTodayOverview } from '@/hooks/useHealthData';
 import { useHealthDataVersion, useHealthRepository, useRefreshHealthData } from '@/providers/HealthDataProvider';
 import {
@@ -23,7 +24,7 @@ import {
 } from '@/providers/WearableSyncProvider';
 import type { ActiveActivity, ManualActivityKind } from '@/data/HealthRepository';
 import { endActivityLiveActivities, startOrUpdateActivityLiveActivity } from '@/services/widgets/activityLiveActivity';
-import type { HeartCardData, HeartTimelineWindow, TodayOverview } from '@/types/health';
+import type { TodayOverview } from '@/types/health';
 import { hasFreshLiveHeartRate } from '@/types/device';
 import {
   getHeartTimelineWindowPointCount,
@@ -32,7 +33,6 @@ import {
   type HeartTimelineZoomLevel,
 } from '@/utils/heartTimelineZoom';
 import { buildHeartCardDataFromWindow } from '@/utils/heartTimeline';
-import { logMobilePerf, logMobilePerfError } from '@/utils/mobilePerf';
 import { getRecoveryMetricTone, getSleepMetricTone, getStrainMetricTone } from '@/utils/metricTone';
 import { resolveTonightSurfaceState } from '@/utils/sleepPlan';
 
@@ -54,21 +54,12 @@ export function TodayScreen() {
   const [retainedOverview, setRetainedOverview] = useState<TodayOverview | null>(null);
   const data = state.data ?? retainedOverview;
   const [selectedHeartZoom, setSelectedHeartZoom] = useState<HeartTimelineZoomLevel>(DEFAULT_HEART_TIMELINE_ZOOM);
-  const [heartTimelineWindow, setHeartTimelineWindow] = useState<HeartTimelineWindow | null>(null);
-  const [heartCardState, setHeartCardState] = useState<{
-    dayKey: string | null;
-    isRefreshing: boolean;
-    cardData: HeartCardData | null;
-    status: 'idle' | 'loading' | 'ready' | 'error';
-  }>({
-    dayKey: null,
-    isRefreshing: false,
-    cardData: null,
-    status: 'idle',
-  });
+  const heartGraphState = useGraphQLHeartTimelineWindow(HEART_PREFETCH_RANGE, heartVersion);
   const [activeActivity, setActiveActivity] = useState<ActiveActivity | null>(null);
   const [activeActivityError, setActiveActivityError] = useState<string | null>(null);
   const [activeActivityVersion, setActiveActivityVersion] = useState(0);
+
+  console.log(heartGraphState.error)
 
   useEffect(() => {
     if (state.data) {
@@ -123,20 +114,14 @@ export function TodayScreen() {
     });
   }, [activeActivity, deviceState.liveHeartRate, showLiveHeartRate]);
 
-  const heartDayKey = data?.day.dayKey ?? null;
   const selectedHeartZoomPreset = useMemo(
     () => getHeartTimelineZoomPreset(selectedHeartZoom),
     [selectedHeartZoom],
   );
-  const fallbackHeartCardData =
-    heartCardState.cardData && heartCardState.dayKey === heartDayKey ? heartCardState.cardData : null;
-  const displayedHeartCardData = useMemo(() => {
-    if (heartTimelineWindow) {
-      return buildHeartCardDataFromWindow(heartTimelineWindow);
-    }
-
-    return fallbackHeartCardData;
-  }, [fallbackHeartCardData, heartTimelineWindow]);
+  const displayedHeartCardData = useMemo(
+    () => (heartGraphState.window ? buildHeartCardDataFromWindow(heartGraphState.window) : null),
+    [heartGraphState.window],
+  );
   const heartPinchZoomSteps = useMemo(
     () =>
       displayedHeartCardData
@@ -147,84 +132,6 @@ export function TodayScreen() {
         : [],
     [displayedHeartCardData],
   );
-
-  useEffect(() => {
-    if (!heartDayKey) {
-      setHeartTimelineWindow(null);
-      setHeartCardState({ dayKey: null, isRefreshing: false, cardData: null, status: 'idle' });
-      return;
-    }
-
-    setHeartTimelineWindow(null);
-    setHeartCardState({
-      dayKey: heartDayKey,
-      isRefreshing: false,
-      cardData: null,
-      status: 'loading',
-    });
-  }, [heartDayKey, heartVersion]);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    if (!heartDayKey) {
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    const loadStartedAt = Date.now();
-
-    setHeartTimelineWindow(null);
-    setHeartCardState({
-      dayKey: heartDayKey,
-      isRefreshing: false,
-      cardData: null,
-      status: 'loading',
-    });
-
-    void repository
-      .getDashboardHeartTimelineWindow(HEART_PREFETCH_RANGE)
-      .then((window) => {
-        if (!cancelled) {
-          const cardData = buildHeartCardDataFromWindow(window);
-
-          logMobilePerf('screen.today.heartGraph.load', loadStartedAt, {
-            day: heartDayKey,
-            markers: window.markers.length,
-            points: cardData.series.length,
-            range: HEART_PREFETCH_RANGE,
-            samples: window.samples.length,
-          });
-          setHeartTimelineWindow(window);
-          setHeartCardState({
-            dayKey: heartDayKey,
-            isRefreshing: false,
-            cardData: cardData,
-            status: 'ready',
-          });
-        }
-      })
-      .catch((error) => {
-        if (!cancelled) {
-          logMobilePerfError('screen.today.heartGraph.load', error, {
-            day: heartDayKey,
-            range: HEART_PREFETCH_RANGE,
-          });
-          setHeartCardState((current) => {
-            if (current.cardData && current.dayKey === heartDayKey) {
-              return { ...current, isRefreshing: false };
-            }
-
-            return { dayKey: heartDayKey, isRefreshing: false, cardData: null, status: 'error' };
-          });
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [heartDayKey, heartVersion, repository]);
 
   const handleHeartZoomChange = useCallback(
     (zoomLevel: string) => {
@@ -339,7 +246,7 @@ export function TodayScreen() {
     return null;
   }
 
-  const isHeartCardRefreshing = heartCardState.dayKey === heartDayKey ? heartCardState.isRefreshing : false;
+  const isHeartCardRefreshing = heartGraphState.isRefreshing;
   const heartChartWindowPointCount = displayedHeartCardData
     ? getHeartTimelineWindowPointCount(
         selectedHeartZoom,
@@ -464,7 +371,7 @@ export function TodayScreen() {
           viewportKey={data.day.dayKey}
           windowPointCount={heartChartWindowPointCount}
         />
-      ) : heartCardState.status === 'error' ? (
+      ) : heartGraphState.status === 'error' ? (
         <HeartCardStatus
           chartTestID="today-heart-chart"
           isLoading={false}

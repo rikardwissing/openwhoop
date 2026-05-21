@@ -21,6 +21,7 @@ import {
 } from '@/db/maintenance';
 import { createResilientDatabase } from '@/db/resilientDatabase';
 import { APP_DATABASE_NAME, initializeDatabase } from '@/db/schema';
+import { LocalGraphQLProvider } from '@/providers/LocalGraphQLProvider';
 
 const AppDatabaseContext = createContext<SQLiteDatabase | null>(null);
 interface AppDatabaseControlsValue {
@@ -301,7 +302,9 @@ function AppDatabaseBridge({
   return (
     <AppDatabaseMigrationGate db={db} onReady={onDatabaseReady}>
       <AppDatabaseContext.Provider value={db}>
-        {children}
+        <LocalGraphQLProvider db={db}>
+          {children}
+        </LocalGraphQLProvider>
       </AppDatabaseContext.Provider>
     </AppDatabaseMigrationGate>
   );

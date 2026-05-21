@@ -305,7 +305,7 @@ interface WellnessDayStatRow {
   avg_skin_temp: number | null;
 }
 
-interface HeartIntradayBucketRow {
+export interface HeartIntradayBucketRow {
   bucket_start: string;
   sample_count: number;
   avg_bpm: number;
@@ -406,7 +406,7 @@ interface RawHeartWindow {
   maxHr: number | null;
 }
 
-interface SleepCycleRow {
+export interface SleepCycleRow {
   id: string;
   sleep_id: string;
   start: string;
@@ -422,7 +422,7 @@ interface SleepCycleRow {
   completion_status: string | null;
 }
 
-interface SleepCycleRecord {
+export interface SleepCycleRecord {
   id: string;
   sleepId: string;
   start: Date;
@@ -441,7 +441,7 @@ interface SleepCycleRecord {
   isInProgress: boolean;
 }
 
-interface ActivityRow {
+export interface ActivityRow {
   id: number;
   period_id: string;
   start: string;
@@ -460,7 +460,7 @@ interface ActiveActivityRow {
   updated_at: string;
 }
 
-interface ActivityRecord {
+export interface ActivityRecord {
   id: string;
   periodId: string;
   start: Date;
@@ -489,7 +489,7 @@ interface ActivityPersonalizationSourceRow {
   end: string;
 }
 
-interface SleepStageRow {
+export interface SleepStageRow {
   id: number;
   sleep_id: string;
   start: string;
@@ -498,7 +498,7 @@ interface SleepStageRow {
   is_estimated: number;
 }
 
-interface SleepStageRecord {
+export interface SleepStageRecord {
   sleepId: string;
   start: Date;
   end: Date;
@@ -506,7 +506,7 @@ interface SleepStageRecord {
   isEstimated: boolean;
 }
 
-interface SleepStageSummary {
+export interface SleepStageSummary {
   stages: SleepStageSegment[];
   timeAsleepMinutes: number;
   timeInBedMinutes: number;
@@ -517,13 +517,13 @@ interface SleepStageSummary {
   inBedEnd: Date;
 }
 
-interface EnrichedSleepCycle {
+export interface EnrichedSleepCycle {
   sleep: SleepCycleRecord;
   stageRecords: SleepStageRecord[];
   summary: SleepStageSummary;
 }
 
-interface EnrichedSleepCycleBundle {
+export interface EnrichedSleepCycleBundle {
   bySleepId: Map<string, EnrichedSleepCycle>;
   completeSleeps: SleepCycleRecord[];
   cycles: EnrichedSleepCycle[];
@@ -888,7 +888,7 @@ function toHeartMetricSample(row: HeartMetricSampleRow): HeartMetricSample {
   };
 }
 
-function toSleepCycleRecord(row: SleepCycleRow): SleepCycleRecord {
+export function toSleepCycleRecord(row: SleepCycleRow): SleepCycleRecord {
   const completionStatus: SleepCompletionStatus =
     row.completion_status === 'in_progress' ? 'in_progress' : 'complete';
 
@@ -916,7 +916,7 @@ function isCompleteSleepCycle(sleep: SleepCycleRecord): boolean {
   return sleep.completionStatus === 'complete';
 }
 
-function completeSleepCycles(sleeps: readonly SleepCycleRecord[]) {
+export function completeSleepCycles(sleeps: readonly SleepCycleRecord[]) {
   return sleeps.filter(isCompleteSleepCycle);
 }
 
@@ -925,7 +925,7 @@ function isPlausibleSleepCycleRecord(sleep: SleepCycleRecord) {
   return durationHours > 0 && durationHours <= MAX_MANUAL_SLEEP_WINDOW_HOURS;
 }
 
-function toActivityRecord(row: ActivityRow): ActivityRecord {
+export function toActivityRecord(row: ActivityRow): ActivityRecord {
   const confidence = typeof row.confidence === 'number' && Number.isFinite(row.confidence)
     ? row.confidence
     : null;
@@ -981,7 +981,7 @@ function toActiveActivity(row: ActiveActivityRow, now = new Date()): ActiveActiv
   };
 }
 
-function activeActivityToRecord(activity: ActiveActivity, end = new Date()): ActivityRecord {
+export function activeActivityToRecord(activity: ActiveActivity, end = new Date()): ActivityRecord {
   return {
     id: activity.id,
     periodId: dateKey(end),
@@ -1212,7 +1212,7 @@ function toHeartDayStatRecord(row: HeartDayStatRow): HeartDayStatRecord {
   };
 }
 
-function toSleepStageRecord(row: SleepStageRow): SleepStageRecord {
+export function toSleepStageRecord(row: SleepStageRow): SleepStageRecord {
   return {
     sleepId: row.sleep_id,
     start: parseSqliteDateTime(row.start),
@@ -2804,7 +2804,7 @@ function resolvedSkinTemp(row: HeartRateRecord): number | null {
   return row.skinTemp ?? calculateSkinTempValue(row);
 }
 
-function personalizeRestingHr(sleeps: SleepCycleRecord[], dailyMinima: number[]): number {
+export function personalizeRestingHr(sleeps: SleepCycleRecord[], dailyMinima: number[]): number {
   const completeSleeps = completeSleepCycles(sleeps);
   const lastFourteen = completeSleeps
     .slice(-14)
@@ -3249,7 +3249,7 @@ function rescoreSleepCyclesWithSummaries(
   );
 }
 
-function buildEnrichedSleepCycleBundle(
+export function buildEnrichedSleepCycleBundle(
   sleepCycles: readonly SleepCycleRecord[],
   stageRecords: readonly SleepStageRecord[],
   naps: readonly ActivityRecord[],
@@ -3294,7 +3294,7 @@ function fallbackEnrichedSleepCycle(sleep: SleepCycleRecord): EnrichedSleepCycle
   };
 }
 
-function buildHeartMarkerSleepDetailsFromEnriched(
+export function buildHeartMarkerSleepDetailsFromEnriched(
   cycles: readonly EnrichedSleepCycle[],
 ): Map<string, HeartIntradayMarkerDetails> {
   return new Map(
@@ -3956,7 +3956,7 @@ function buildHeartIntradayActivityDetails(activity: ActivityRecord): HeartIntra
   };
 }
 
-function buildHeartIntradayMarkers(
+export function buildHeartIntradayMarkers(
   windowStart: Date,
   windowEnd: Date,
   sleepCycles: readonly SleepCycleRecord[],
@@ -4951,7 +4951,7 @@ function buildSleepFeatureBucketRows(
   });
 }
 
-function summarizeBucketWindow(rows: readonly HeartIntradayBucketRow[]) {
+export function summarizeBucketWindow(rows: readonly HeartIntradayBucketRow[]) {
   const rawRowCount = totalBucketSampleCount(rows);
   const weightedAverageBpm =
     rawRowCount === 0
