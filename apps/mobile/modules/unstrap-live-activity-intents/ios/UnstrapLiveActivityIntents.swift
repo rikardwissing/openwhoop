@@ -13,6 +13,7 @@ private enum UnstrapLiveActivityConstants {
   static let actionIdentifier = "start_sleep_live_activity"
   static let liveActivityName = "SleepWidgetV2"
   static let liveActivityPropsKey = "liveActivityProps"
+  static let liveActivityRelevanceScore = 0.0
   static let liveActivityURL = "btwearable://"
 }
 
@@ -97,7 +98,8 @@ private enum UnstrapSleepLiveActivityStarter {
     try await ExpoWidgetsLiveActivityLauncher.startOrUpdate(
       name: UnstrapLiveActivityConstants.liveActivityName,
       props: props,
-      url: url
+      url: url,
+      relevanceScore: UnstrapLiveActivityConstants.liveActivityRelevanceScore
     )
   }
 }

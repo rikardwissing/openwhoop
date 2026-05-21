@@ -1,12 +1,15 @@
 diff --git a/node_modules/expo-widgets/build/Widgets.d.ts b/node_modules/expo-widgets/build/Widgets.d.ts
-index e19ee26..c25a363 100644
+index e19ee26..70880cf 100644
 --- a/node_modules/expo-widgets/build/Widgets.d.ts
 +++ b/node_modules/expo-widgets/build/Widgets.d.ts
-@@ -1,5 +1,12 @@
+@@ -1,5 +1,15 @@
  import { type EventSubscription } from 'expo-modules-core';
  import type { ExpoWidgetsEvents, LiveActivityComponent, LiveActivityDismissalPolicy, NativeLiveActivity, PushTokenEvent, WidgetEnvironment, WidgetTimelineEntry } from './Widgets.types';
 +export type LiveActivityStartStyle = 'standard' | 'transient';
-+export interface LiveActivityStartOptions {
++export interface LiveActivityContentOptions {
++    relevanceScore?: number;
++}
++export interface LiveActivityStartOptions extends LiveActivityContentOptions {
 +    alertBody?: string;
 +    alertTitle?: string;
 +    startDate?: Date;
@@ -15,7 +18,16 @@ index e19ee26..c25a363 100644
  /**
   * Represents a widget instance. Provides methods to manage the widget's timeline.
   */
-@@ -46,6 +53,10 @@ export declare class LiveActivity<T extends object = object> {
+@@ -37,7 +47,7 @@ export declare class LiveActivity<T extends object = object> {
+      * Updates the Live Activity's content. The UI reflects the new properties immediately.
+      * @param props The updated content properties.
+      */
+-    update(props: T): Promise<void>;
++    update(props: T, options?: LiveActivityContentOptions): Promise<void>;
+     /**
+      * Ends the Live Activity.
+      * @param dismissalPolicy Controls when the Live Activity is removed from the Lock Screen after ending.
+@@ -46,6 +56,10 @@ export declare class LiveActivity<T extends object = object> {
       * @param contentDate The time the data in the payload was generated. If this is older than a previous update or push payload, the system ignores this update.
       */
      end(dismissalPolicy?: LiveActivityDismissalPolicy, props?: T, contentDate?: Date): Promise<void>;
@@ -26,7 +38,7 @@ index e19ee26..c25a363 100644
      /**
       * Returns the push token for this Live Activity, used to send push notification updates via APNs.
       * Returns `null` if push notifications are not enabled or the token is not yet available.
-@@ -70,9 +81,10 @@ export declare class LiveActivityFactory<T extends object = object> {
+@@ -70,9 +84,10 @@ export declare class LiveActivityFactory<T extends object = object> {
       * Starts a new Live Activity with the given properties.
       * @param props The initial content properties for the Live Activity.
       * @param url An optional URL to associate with the Live Activity, used for deep linking.
@@ -39,9 +51,20 @@ index e19ee26..c25a363 100644
       * Returns all currently active instances of this Live Activity type.
       */
 diff --git a/node_modules/expo-widgets/build/Widgets.js b/node_modules/expo-widgets/build/Widgets.js
-index cf74d11..be59d7c 100644
+index cf74d11..cfdb171 100644
 --- a/node_modules/expo-widgets/build/Widgets.js
 +++ b/node_modules/expo-widgets/build/Widgets.js
+@@ -51,8 +51,8 @@ export class LiveActivity {
+      * Updates the Live Activity's content. The UI reflects the new properties immediately.
+      * @param props The updated content properties.
+      */
+-    update(props) {
+-        return this.nativeLiveActivity.update(JSON.stringify(props));
++    update(props, options) {
++        return this.nativeLiveActivity.update(JSON.stringify(props), options?.relevanceScore);
+     }
+     /**
+      * Ends the Live Activity.
 @@ -70,6 +70,12 @@ export class LiveActivity {
          }
          return this.nativeLiveActivity.end(dismissalPolicy, undefined, serializedProps, contentDate?.getTime());
@@ -65,12 +88,12 @@ index cf74d11..be59d7c 100644
 -    start(props, url) {
 -        return new LiveActivity(this.nativeLiveActivityFactory.start(JSON.stringify(props), url));
 +    start(props, url, options) {
-+        return new LiveActivity(this.nativeLiveActivityFactory.start(JSON.stringify(props), url, options?.startDate?.getTime(), options?.alertTitle, options?.alertBody, options?.style));
++        return new LiveActivity(this.nativeLiveActivityFactory.start(JSON.stringify(props), url, options?.startDate?.getTime(), options?.alertTitle, options?.alertBody, options?.style, options?.relevanceScore));
      }
      /**
       * Returns all currently active instances of this Live Activity type.
 diff --git a/node_modules/expo-widgets/build/Widgets.types.d.ts b/node_modules/expo-widgets/build/Widgets.types.d.ts
-index 0c8b0c0..33f1d2d 100644
+index 0c8b0c0..272bb7f 100644
 --- a/node_modules/expo-widgets/build/Widgets.types.d.ts
 +++ b/node_modules/expo-widgets/build/Widgets.types.d.ts
 @@ -247,12 +247,13 @@ export declare class NativeWidgetObject extends SharedObject {
@@ -78,11 +101,12 @@ index 0c8b0c0..33f1d2d 100644
  export declare class NativeLiveActivityFactory extends SharedObject {
      constructor(name: string, layout: string);
 -    start(props: string, url?: string): NativeLiveActivity;
-+    start(props: string, url?: string, startDate?: number, alertTitle?: string, alertBody?: string, style?: string): NativeLiveActivity;
++    start(props: string, url?: string, startDate?: number, alertTitle?: string, alertBody?: string, style?: string, relevanceScore?: number): NativeLiveActivity;
      getInstances(): NativeLiveActivity[];
  }
  export declare class NativeLiveActivity extends SharedObject<LiveActivityEvents> {
-     update(props: string): Promise<void>;
+-    update(props: string): Promise<void>;
++    update(props: string, relevanceScore?: number): Promise<void>;
      end(dismissalPolicy?: string, afterDate?: number, state?: string, contentDate?: number): Promise<void>;
 +    getState(): Promise<string>;
      getPushToken(): Promise<string | null>;
@@ -90,10 +114,34 @@ index 0c8b0c0..33f1d2d 100644
  //# sourceMappingURL=Widgets.types.d.ts.map
 \ No newline at end of file
 diff --git a/node_modules/expo-widgets/ios/LiveActivity.swift b/node_modules/expo-widgets/ios/LiveActivity.swift
-index a603765..f14091f 100644
+index a603765..6078dd9 100644
 --- a/node_modules/expo-widgets/ios/LiveActivity.swift
 +++ b/node_modules/expo-widgets/ios/LiveActivity.swift
-@@ -44,6 +44,46 @@ final class LiveActivity: SharedObject {
+@@ -12,7 +12,7 @@ final class LiveActivity: SharedObject {
+     super.init()
+   }
+ 
+-  func update(props: String) async throws {
++  func update(props: String, relevanceScore: Double? = nil) async throws {
+     guard #available(iOS 16.2, *) else { throw LiveActivitiesNotSupportedException() }
+ 
+     guard let activity = Activity<LiveActivityAttributes>.activities.first(where: { $0.id == id }) else {
+@@ -20,7 +20,13 @@ final class LiveActivity: SharedObject {
+     }
+ 
+     let newState = LiveActivityAttributes.ContentState(name: name, props: props)
+-    await activity.update(ActivityContent(state: newState, staleDate: nil))
++    await activity.update(
++      ActivityContent(
++        state: newState,
++        staleDate: nil,
++        relevanceScore: relevanceScore ?? 0.0
++      )
++    )
+   }
+ 
+   func end(dismissalPolicy: LiveActivityDismissalPolicy?, afterDate: Date?, props: String?, contentDate: Date?) async throws {
+@@ -44,6 +50,46 @@ final class LiveActivity: SharedObject {
      await activity.end(content, dismissalPolicy: dismissalPolicy?.toDismissalPolicy(date: afterDate) ?? .default, timestamp: contentDate)
    }
  
@@ -141,7 +189,7 @@ index a603765..f14091f 100644
      guard #available(iOS 16.1, *) else { throw LiveActivitiesNotSupportedException() }
  
 diff --git a/node_modules/expo-widgets/ios/LiveActivityFactory.swift b/node_modules/expo-widgets/ios/LiveActivityFactory.swift
-index caf1e05..4a620c7 100644
+index caf1e05..52b5c89 100644
 --- a/node_modules/expo-widgets/ios/LiveActivityFactory.swift
 +++ b/node_modules/expo-widgets/ios/LiveActivityFactory.swift
 @@ -8,12 +8,17 @@ final class LiveActivityFactory: SharedObject {
@@ -159,7 +207,7 @@ index caf1e05..4a620c7 100644
    }
  
 -  func start(props: String, url: URL?) throws -> LiveActivity {
-+  func start(props: String, url: URL?, startDate: Date? = nil, alertTitle: String? = nil, alertBody: String? = nil, style: String? = nil) throws -> LiveActivity {
++  func start(props: String, url: URL?, startDate: Date? = nil, alertTitle: String? = nil, alertBody: String? = nil, style: String? = nil, relevanceScore: Double? = nil) throws -> LiveActivity {
      guard #available(iOS 16.2, *) else { throw LiveActivitiesNotSupportedException() }
      guard ActivityAuthorizationInfo().areActivitiesEnabled else {
        throw LiveActivitiesNotSupportedException()
@@ -188,7 +236,7 @@ index caf1e05..4a620c7 100644
 +
 +        activity = try Activity.request(
 +          attributes: LiveActivityAttributes(),
-+          content: .init(state: initialState, staleDate: nil),
++          content: .init(state: initialState, staleDate: nil, relevanceScore: relevanceScore ?? 0.0),
 +          pushType: LiveActivityFactory.pushNotificationsEnabled ? .token : nil,
 +          style: activityStyle,
 +          alertConfiguration: alertConfiguration,
@@ -197,22 +245,36 @@ index caf1e05..4a620c7 100644
 +      } else {
 +        activity = try Activity.request(
 +          attributes: LiveActivityAttributes(),
-+          content: .init(state: initialState, staleDate: nil),
++          content: .init(state: initialState, staleDate: nil, relevanceScore: relevanceScore ?? 0.0),
 +          pushType: LiveActivityFactory.pushNotificationsEnabled ? .token : nil
 +        )
 +      }
  
        let instance = LiveActivity(id: activity.id, name: name)
        instance.observePushTokenUpdates(for: activity, pushNotificationsEnabled: LiveActivityFactory.pushNotificationsEnabled)
-@@ -47,3 +76,56 @@ final class LiveActivityFactory: SharedObject {
-     }
+@@ -40,10 +69,71 @@ final class LiveActivityFactory: SharedObject {
    }
- }
+ 
+   func getInstances() throws -> [LiveActivity] {
+-    guard #available(iOS 16.1, *) else { throw LiveActivitiesNotSupportedException() }
++    guard #available(iOS 16.2, *) else { throw LiveActivitiesNotSupportedException() }
+ 
+-    return Activity<LiveActivityAttributes>.activities.map { activity in
+-      LiveActivity(id: activity.id, name: name)
++    return Activity<LiveActivityAttributes>.activities
++      .filter { activity in
++        activity.content.state.name == name
++      }
++      .map { activity in
++        LiveActivity(id: activity.id, name: name)
++      }
++  }
++}
 +
 +public enum ExpoWidgetsLiveActivityLauncher {
 +  @available(iOS 16.2, *)
 +  @discardableResult
-+  public static func startOrUpdate(name: String, props: String, url: URL? = nil) async throws -> String {
++  public static func startOrUpdate(name: String, props: String, url: URL? = nil, relevanceScore: Double? = nil) async throws -> String {
 +    guard ActivityAuthorizationInfo().areActivitiesEnabled else {
 +      throw LiveActivitiesNotSupportedException()
 +    }
@@ -222,7 +284,11 @@ index caf1e05..4a620c7 100644
 +    }
 +
 +    let state = LiveActivityAttributes.ContentState(name: name, props: props)
-+    let content = ActivityContent(state: state, staleDate: nil)
++    let content = ActivityContent(
++      state: state,
++      staleDate: nil,
++      relevanceScore: relevanceScore ?? 0.0
++    )
 +    let matchingActivities = Activity<LiveActivityAttributes>.activities.filter { activity in
 +      activity.content.state.name == name
 +    }
@@ -258,9 +324,9 @@ index caf1e05..4a620c7 100644
 +      return activity.id
 +    } catch {
 +      throw StartLiveActivityException(error.localizedDescription)
-+    }
-+  }
-+}
+     }
+   }
+ }
 diff --git a/node_modules/expo-widgets/ios/Widgets/EntryView.swift b/node_modules/expo-widgets/ios/Widgets/EntryView.swift
 index 947fc2e..af4b567 100644
 --- a/node_modules/expo-widgets/ios/Widgets/EntryView.swift
@@ -307,28 +373,39 @@ index 68ff52a..ffc9acd 100644
    return context
  }
 diff --git a/node_modules/expo-widgets/ios/WidgetsModule.swift b/node_modules/expo-widgets/ios/WidgetsModule.swift
-index 9620b9a..163e916 100644
+index 9620b9a..d94c41b 100644
 --- a/node_modules/expo-widgets/ios/WidgetsModule.swift
 +++ b/node_modules/expo-widgets/ios/WidgetsModule.swift
-@@ -72,8 +72,15 @@ public final class WidgetsModule: Module {
+@@ -72,8 +72,16 @@ public final class WidgetsModule: Module {
          LiveActivityFactory(name: name, layout: layout)
        }
  
 -      Function("start") { (liveActivity: LiveActivityFactory, props: String, url: URL?) in
 -        try liveActivity.start(props: props, url: url)
-+      Function("start") { (liveActivity: LiveActivityFactory, props: String, url: URL?, startDate: Date?, alertTitle: String?, alertBody: String?, style: String?) in
++      Function("start") { (liveActivity: LiveActivityFactory, props: String, url: URL?, startDate: Date?, alertTitle: String?, alertBody: String?, style: String?, relevanceScore: Double?) in
 +        try liveActivity.start(
 +          props: props,
 +          url: url,
 +          startDate: startDate,
 +          alertTitle: alertTitle,
 +          alertBody: alertBody,
-+          style: style
++          style: style,
++          relevanceScore: relevanceScore
 +        )
        }
  
        Function("getInstances") { (liveActivity: LiveActivityFactory) in
-@@ -90,6 +97,10 @@ public final class WidgetsModule: Module {
+@@ -82,14 +90,18 @@ public final class WidgetsModule: Module {
+     }
+ 
+     Class("LiveActivity", LiveActivity.self) {
+-      AsyncFunction("update") { (instance: LiveActivity, props: String) in
+-        try await instance.update(props: props)
++      AsyncFunction("update") { (instance: LiveActivity, props: String, relevanceScore: Double?) in
++        try await instance.update(props: props, relevanceScore: relevanceScore)
+       }
+ 
+       AsyncFunction("end") { (instance: LiveActivity, dismissalPolicy: LiveActivityDismissalPolicy?, afterDate: Date?, props: String?, contentDate: Date?) in
          try await instance.end(dismissalPolicy: dismissalPolicy, afterDate: afterDate, props: props, contentDate: contentDate)
        }
  
@@ -339,17 +416,61 @@ index 9620b9a..163e916 100644
        AsyncFunction("getPushToken") { (instance: LiveActivity) in
          try instance.getPushToken()
        }
+diff --git a/node_modules/expo-widgets/ios/WidgetsStorage.swift b/node_modules/expo-widgets/ios/WidgetsStorage.swift
+index 74c905a..be43d2e 100644
+--- a/node_modules/expo-widgets/ios/WidgetsStorage.swift
++++ b/node_modules/expo-widgets/ios/WidgetsStorage.swift
+@@ -6,24 +6,28 @@ enum WidgetsStorage {
+     guard let defaults else { return }
+ 
+     defaults.set(value, forKey: key)
++    defaults.synchronize()
+   }
+ 
+   static func set(_ value: [[String: Any]], forKey key: String) {
+     guard let defaults else { return }
+ 
+     defaults.set(value, forKey: key)
++    defaults.synchronize()
+   }
+ 
+   static func set(_ value: String, forKey key: String) {
+     guard let defaults else { return }
+ 
+     defaults.set(value, forKey: key)
++    defaults.synchronize()
+   }
+ 
+   static func set(_ value: Data, forKey key: String) {
+     guard let defaults else { return }
+ 
+     defaults.set(value, forKey: key)
++    defaults.synchronize()
+   }
+ 
+   static func getDictionary(forKey key: String) -> [String: Any]? {
+@@ -54,5 +58,6 @@ enum WidgetsStorage {
+     guard let defaults else { return }
+ 
+     defaults.removeObject(forKey: key)
++    defaults.synchronize()
+   }
+ }
 diff --git a/node_modules/expo-widgets/src/Widgets.ts b/node_modules/expo-widgets/src/Widgets.ts
-index dc1d852..537006f 100644
+index dc1d852..84d2a68 100644
 --- a/node_modules/expo-widgets/src/Widgets.ts
 +++ b/node_modules/expo-widgets/src/Widgets.ts
-@@ -13,6 +13,15 @@ import type {
+@@ -13,6 +13,19 @@ import type {
    WidgetTimelineEntry,
  } from './Widgets.types';
  
 +export type LiveActivityStartStyle = 'standard' | 'transient';
 +
-+export interface LiveActivityStartOptions {
++export interface LiveActivityContentOptions {
++  relevanceScore?: number;
++}
++
++export interface LiveActivityStartOptions extends LiveActivityContentOptions {
 +  alertBody?: string;
 +  alertTitle?: string;
 +  startDate?: Date;
@@ -359,7 +480,21 @@ index dc1d852..537006f 100644
  /**
   * Represents a widget instance. Provides methods to manage the widget's timeline.
   */
-@@ -109,6 +118,13 @@ export class LiveActivity<T extends object = object> {
+@@ -76,8 +89,11 @@ export class LiveActivity<T extends object = object> {
+    * Updates the Live Activity's content. The UI reflects the new properties immediately.
+    * @param props The updated content properties.
+    */
+-  update(props: T): Promise<void> {
+-    return this.nativeLiveActivity.update(JSON.stringify(props));
++  update(props: T, options?: LiveActivityContentOptions): Promise<void> {
++    return this.nativeLiveActivity.update(
++      JSON.stringify(props),
++      options?.relevanceScore
++    );
+   }
+ 
+   /**
+@@ -109,6 +125,13 @@ export class LiveActivity<T extends object = object> {
      );
    }
  
@@ -373,7 +508,7 @@ index dc1d852..537006f 100644
    /**
     * Returns the push token for this Live Activity, used to send push notification updates via APNs.
     * Returns `null` if push notifications are not enabled or the token is not yet available.
-@@ -145,10 +161,20 @@ export class LiveActivityFactory<T extends object = object> {
+@@ -145,10 +168,21 @@ export class LiveActivityFactory<T extends object = object> {
     * Starts a new Live Activity with the given properties.
     * @param props The initial content properties for the Live Activity.
     * @param url An optional URL to associate with the Live Activity, used for deep linking.
@@ -390,17 +525,18 @@ index dc1d852..537006f 100644
 +        options?.startDate?.getTime(),
 +        options?.alertTitle,
 +        options?.alertBody,
-+        options?.style
++        options?.style,
++        options?.relevanceScore
 +      )
 +    );
    }
  
    /**
 diff --git a/node_modules/expo-widgets/src/Widgets.types.ts b/node_modules/expo-widgets/src/Widgets.types.ts
-index e576432..32499a0 100644
+index e576432..795134e 100644
 --- a/node_modules/expo-widgets/src/Widgets.types.ts
 +++ b/node_modules/expo-widgets/src/Widgets.types.ts
-@@ -276,7 +276,14 @@ export declare class NativeWidgetObject extends SharedObject {
+@@ -276,17 +276,26 @@ export declare class NativeWidgetObject extends SharedObject {
  
  export declare class NativeLiveActivityFactory extends SharedObject {
    constructor(name: string, layout: string);
@@ -411,12 +547,18 @@ index e576432..32499a0 100644
 +    startDate?: number,
 +    alertTitle?: string,
 +    alertBody?: string,
-+    style?: string
++    style?: string,
++    relevanceScore?: number
 +  ): NativeLiveActivity;
    getInstances(): NativeLiveActivity[];
  }
  
-@@ -288,5 +295,6 @@ export declare class NativeLiveActivity extends SharedObject<LiveActivityEvents>
+ export declare class NativeLiveActivity extends SharedObject<LiveActivityEvents> {
+-  update(props: string): Promise<void>;
++  update(props: string, relevanceScore?: number): Promise<void>;
+   end(
+     dismissalPolicy?: string,
+     afterDate?: number,
      state?: string,
      contentDate?: number
    ): Promise<void>;

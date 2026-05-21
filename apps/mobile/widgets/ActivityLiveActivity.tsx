@@ -11,6 +11,8 @@ import {
 } from '@expo/ui/swift-ui/modifiers';
 import { createLiveActivity } from 'expo-widgets';
 
+import { getActivityIconSemanticFromLabel } from '../utils/activityIconSemantics';
+
 export interface ActivityLiveActivityProps {
   activityId?: string;
   activityName?: string;
@@ -22,11 +24,12 @@ export interface ActivityLiveActivityProps {
 const ActivityLiveActivityComponent = (rawProps: ActivityLiveActivityProps) => {
   'widget';
 
-  const accent = '#FF6B7A';
+  const activityAccent = '#FFD26B';
   const cyan = '#6DE7F2';
   const success = '#8DFFB3';
   const text = '#F8F4FF';
   const subtle = '#9793B8';
+  const stopAccent = '#FF7D70';
   const stopBackground = '#30151B';
   const startTimestamp = rawProps.startTimestamp && rawProps.startTimestamp > 0
     ? rawProps.startTimestamp
@@ -46,8 +49,24 @@ const ActivityLiveActivityComponent = (rawProps: ActivityLiveActivityProps) => {
     return `${Math.round(liveHeartRate)} bpm`;
   }
 
+  function activityIconName() {
+    switch (getActivityIconSemanticFromLabel(activityName)) {
+      case 'running':
+        return 'figure.run';
+      case 'walk':
+        return 'figure.walk';
+      case 'workout':
+        return 'dumbbell.fill';
+      case 'nap':
+        return 'clock.fill';
+      case 'activity':
+      default:
+        return 'waveform.path.ecg';
+    }
+  }
+
   function ActivityIcon({ color, size }: { color: string; size: number }) {
-    return <Image color={color} size={size} systemName="figure.run" />;
+    return <Image color={color} size={size} systemName={activityIconName()} />;
   }
 
   function ElapsedTimer({ color, size }: { color: string; size: number }) {
@@ -74,7 +93,7 @@ const ActivityLiveActivityComponent = (rawProps: ActivityLiveActivityProps) => {
           background(stopBackground),
           cornerRadius(13),
           font({ size: 13, weight: 'bold' }),
-          foregroundStyle(accent),
+          foregroundStyle(stopAccent),
           padding({ horizontal: 12, vertical: 7 }),
         ]}
       />
@@ -84,7 +103,7 @@ const ActivityLiveActivityComponent = (rawProps: ActivityLiveActivityProps) => {
   function CompactLeading() {
     return (
       <HStack alignment="center" spacing={4}>
-        <ActivityIcon color={accent} size={15} />
+        <ActivityIcon color={activityAccent} size={15} />
         <Text modifiers={[font({ size: 10, weight: 'semibold' }), foregroundStyle(cyan), monospacedDigit(), lineLimit(1)]}>
           {heartRateLabel()}
         </Text>
@@ -112,7 +131,7 @@ const ActivityLiveActivityComponent = (rawProps: ActivityLiveActivityProps) => {
     return (
       <HStack alignment="center" spacing={12} modifiers={[padding({ all: 14 })]}>
         <ZStack alignment="center" modifiers={[frame({ width: 50, height: 50 })]}>
-          <ActivityIcon color={accent} size={28} />
+          <ActivityIcon color={activityAccent} size={28} />
         </ZStack>
         <VStack alignment="leading" spacing={3}>
           <Text modifiers={[font({ size: 16, weight: 'bold' }), foregroundStyle(text), lineLimit(1)]}>
@@ -137,7 +156,7 @@ const ActivityLiveActivityComponent = (rawProps: ActivityLiveActivityProps) => {
   function BannerSmall() {
     return (
       <HStack alignment="center" spacing={8} modifiers={[padding({ all: 10 })]}>
-        <ActivityIcon color={accent} size={15} />
+        <ActivityIcon color={activityAccent} size={15} />
         <Text modifiers={[font({ size: 13, weight: 'semibold' }), foregroundStyle(text), lineLimit(1)]}>
           {activityName} in progress
         </Text>
@@ -151,7 +170,7 @@ const ActivityLiveActivityComponent = (rawProps: ActivityLiveActivityProps) => {
     return (
       <VStack alignment="leading" spacing={4}>
         <Spacer />
-        <ActivityIcon color={accent} size={34} />
+        <ActivityIcon color={activityAccent} size={34} />
         <Spacer />
       </VStack>
     );
@@ -189,7 +208,7 @@ const ActivityLiveActivityComponent = (rawProps: ActivityLiveActivityProps) => {
     bannerSmall: <BannerSmall />,
     compactLeading: <CompactLeading />,
     compactTrailing: <CompactTrailing />,
-    minimal: <ActivityIcon color={accent} size={15} />,
+    minimal: <ActivityIcon color={activityAccent} size={15} />,
     expandedLeading: <ExpandedLeading />,
     expandedCenter: <ExpandedCenter />,
     expandedTrailing: <ExpandedTrailing />,

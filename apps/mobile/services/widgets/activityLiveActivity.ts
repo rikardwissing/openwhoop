@@ -4,6 +4,7 @@ import type { ActiveActivity } from '@/data/HealthRepository';
 import ActivityLiveActivity, { type ActivityLiveActivityProps } from '@/widgets/ActivityLiveActivity';
 
 const ACTIVITY_LIVE_ACTIVITY_URL = 'btwearable://';
+const ACTIVITY_LIVE_ACTIVITY_RELEVANCE_SCORE = 1;
 export const ACTIVITY_STOP_URL = 'btwearable://activity-stop?source=live-activity';
 
 export type ActivityLiveActivityResult =
@@ -51,7 +52,9 @@ export async function startOrUpdateActivityLiveActivity(
 
   if (instances.length === 0) {
     try {
-      ActivityLiveActivity.start(props, ACTIVITY_LIVE_ACTIVITY_URL);
+      ActivityLiveActivity.start(props, ACTIVITY_LIVE_ACTIVITY_URL, {
+        relevanceScore: ACTIVITY_LIVE_ACTIVITY_RELEVANCE_SCORE,
+      });
       return { ok: true };
     } catch (error) {
       return { ok: false, message: activityLiveActivityFailureMessage(error) };
@@ -62,7 +65,9 @@ export async function startOrUpdateActivityLiveActivity(
   const updateResults = await Promise.all(
     instances.map(async (instance) => {
       try {
-        await instance.update(props);
+        await instance.update(props, {
+          relevanceScore: ACTIVITY_LIVE_ACTIVITY_RELEVANCE_SCORE,
+        });
         return true;
       } catch (error) {
         failures.push(error);

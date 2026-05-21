@@ -6,29 +6,17 @@ import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-nati
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { colors, spacing, typography } from '@/constants/theme';
-import type { ActiveActivity, ManualActivityKind } from '@/data/HealthRepository';
+import type { ActiveActivity } from '@/data/HealthRepository';
 import { useGraphQLActiveActivity } from '@/hooks/useGraphQLActiveActivity';
 import { useHealthDataVersion, useHealthRepository, useRefreshHealthData } from '@/providers/HealthDataProvider';
 import { useWearableSyncState } from '@/providers/WearableSyncProvider';
 import { endActivityLiveActivities, startOrUpdateActivityLiveActivity } from '@/services/widgets/activityLiveActivity';
+import { getManualActivityIconName } from '@/utils/activityIcons';
 import { hasFreshLiveHeartRate } from '@/types/device';
 import { formatClock } from '@/utils/dateTime';
 import { formatShortDuration } from '@/utils/formatters';
 
 const ACTIVE_ACTIVITY_REFRESH_SCOPES = ['dashboard', 'sleep', 'heart', 'wellness', 'trends'] as const;
-
-function activityIconName(activity: ManualActivityKind) {
-  switch (activity) {
-    case 'Running':
-      return 'walk';
-    case 'Workout':
-      return 'barbell';
-    case 'Walk':
-      return 'footsteps';
-    default:
-      return 'radio-button-on';
-  }
-}
 
 export function ActiveActivityTakeover() {
   const repository = useHealthRepository();
@@ -169,7 +157,7 @@ export function ActiveActivityTakeover() {
 
           <View style={styles.hero}>
             <View style={styles.iconBadge}>
-              <Ionicons color={colors.heart} name={activityIconName(activeActivity.activity)} size={34} />
+              <Ionicons color={colors.heart} name={getManualActivityIconName(activeActivity.activity)} size={34} />
             </View>
             <Text numberOfLines={1} adjustsFontSizeToFit style={styles.title}>
               {activeActivity.activity}

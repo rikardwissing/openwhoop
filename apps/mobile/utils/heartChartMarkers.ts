@@ -1,6 +1,7 @@
 import type { TrendChartMarker } from '@/components/charts/TrendChart';
 import { colors } from '@/constants/theme';
 import type { HeartIntradayMarker } from '@/types/health';
+import { getActivityIconNameFromLabel } from '@/utils/activityIcons';
 
 export type HeartIntradayMarkerTrustState = 'suggested' | 'trusted';
 
@@ -27,21 +28,7 @@ function iconNameForHeartMarker(marker: HeartIntradayMarker): TrendChartMarker['
     return 'time-outline';
   }
 
-  const normalizedLabel = marker.label.toLowerCase();
-  if (normalizedLabel.includes('walk') || normalizedLabel.includes('run')) {
-    return 'walk';
-  }
-
-  if (
-    normalizedLabel.includes('mobility') ||
-    normalizedLabel.includes('strength') ||
-    normalizedLabel.includes('lift') ||
-    normalizedLabel.includes('workout')
-  ) {
-    return 'barbell';
-  }
-
-  return 'pulse';
+  return getActivityIconNameFromLabel(marker.label);
 }
 
 function paletteForHeartMarker(marker: HeartIntradayMarker) {

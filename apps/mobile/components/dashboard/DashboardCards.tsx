@@ -49,6 +49,7 @@ import type {
 } from '@/types/health';
 import { addMinutes, dateKey, formatClock } from '@/utils/dateTime';
 import { formatCompactDuration, formatMetricValue, formatShortDuration } from '@/utils/formatters';
+import { getManualActivityIconName } from '@/utils/activityIcons';
 import {
   canManageHeartIntradayMarker,
   getHeartIntradayMarkerPresentation,
@@ -3063,7 +3064,7 @@ export function ActivityCard({
     <GlassCard accentColor={colors.aqua}>
       <View style={styles.cardHeader}>
         <View style={styles.cardHeaderLeft}>
-          <Ionicons color={colors.aqua} name="walk-outline" size={20} />
+          <Ionicons color={colors.aqua} name={getManualActivityIconName('Activity')} size={20} />
           <Text style={styles.cardTitle}>Activity</Text>
         </View>
         <CardAction label={trailingLabel} onPress={onOpen} testID={openTestID} />

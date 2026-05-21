@@ -55,6 +55,7 @@ const SHOULD_LOG_MOBILE_SYNC_PERF =
 type PerformanceLogValue = string | number | boolean | null;
 
 interface WearableBackgroundSyncOptions {
+  ignoreCooldown?: boolean;
   showOverlay?: boolean;
   triggerLabel?: string;
   useExistingBleService?: boolean;
@@ -620,6 +621,7 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
 
   const runBackgroundSync = useCallback(
     async (options?: WearableBackgroundSyncOptions) => {
+      const ignoreCooldown = options?.ignoreCooldown ?? false;
       const showOverlay = options?.showOverlay ?? true;
       const triggerLabel = options?.triggerLabel ?? 'manual trigger';
       const useExistingBleService = options?.useExistingBleService ?? true;
@@ -638,11 +640,17 @@ export function WearableSyncProvider({ children }: { children: ReactNode }) {
       try {
         let result: BackgroundDeviceSyncManualRunResult;
         if (useExistingBleService) {
-          result = await runBackgroundDeviceSyncWithServiceAsync(db, service, { triggerLabel });
+          result = await runBackgroundDeviceSyncWithServiceAsync(db, service, {
+            ignoreCooldown,
+            triggerLabel,
+          });
         } else {
           await service.stopLiveUpdates().catch(() => {});
           stoppedLiveUpdates = true;
-          result = await runBackgroundDeviceSyncNowAsync({ triggerLabel });
+          result = await runBackgroundDeviceSyncNowAsync({
+            ignoreCooldown,
+            triggerLabel,
+          });
         }
 
         setDeviceState(await service.getDeviceState());

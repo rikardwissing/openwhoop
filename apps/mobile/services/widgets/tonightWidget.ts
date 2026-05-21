@@ -12,6 +12,7 @@ import TonightWidget from '@/widgets/TonightWidget';
 import type { TonightWidgetProps } from '@/widgets/TonightWidget';
 
 const LIVE_ACTIVITY_URL = 'btwearable://';
+const SLEEP_LIVE_ACTIVITY_RELEVANCE_SCORE = 0;
 const LIVE_ACTIVITY_REFRESH_INTERVAL_MS = 60_000;
 const WIDGET_TIMELINE_HOLD_MS = 24 * 60 * 60 * 1000;
 type TonightWidgetSnapshot = Pick<
@@ -239,7 +240,9 @@ async function startOrUpdateSleepLiveActivity(
 
   if (instances.length === 0) {
     try {
-      SleepLiveActivity.start(props, LIVE_ACTIVITY_URL);
+      SleepLiveActivity.start(props, LIVE_ACTIVITY_URL, {
+        relevanceScore: SLEEP_LIVE_ACTIVITY_RELEVANCE_SCORE,
+      });
       return true;
     } catch (error) {
       warnSleepLiveActivityFailure('start', error);
@@ -252,7 +255,9 @@ async function startOrUpdateSleepLiveActivity(
   const updateResults = await Promise.all(
     instances.map(async (instance) => {
       try {
-        await instance.update(props);
+        await instance.update(props, {
+          relevanceScore: SLEEP_LIVE_ACTIVITY_RELEVANCE_SCORE,
+        });
         return true;
       } catch (error) {
         updateFailures.push(error);

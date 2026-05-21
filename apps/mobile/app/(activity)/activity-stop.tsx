@@ -11,8 +11,9 @@ import type { ActiveActivityFinishSummary } from '@/data/HealthRepository';
 import { fetchGraphQLActiveActivity } from '@/hooks/useGraphQLActiveActivity';
 import { useAppDatabase } from '@/providers/AppDatabaseProvider';
 import { useHealthRepository, useRefreshHealthData } from '@/providers/HealthDataProvider';
-import { useWearableSyncActions } from '@/providers/WearableSyncProvider';
+import { useWearableSyncActions, useWearableSyncState } from '@/providers/WearableSyncProvider';
 import { endActivityLiveActivities } from '@/services/widgets/activityLiveActivity';
+import { getManualActivityIconName } from '@/utils/activityIcons';
 import { formatClock } from '@/utils/dateTime';
 import { formatMetricValue, formatShortDuration } from '@/utils/formatters';
 
@@ -23,6 +24,7 @@ export default function ActivityStopScreen() {
   const db = useAppDatabase();
   const repository = useHealthRepository();
   const refreshHealthData = useRefreshHealthData();
+  const { isReady } = useWearableSyncState();
   const { runBackgroundSync } = useWearableSyncActions();
   const [summary, setSummary] = useState<ActiveActivityFinishSummary | null>(null);
   const [status, setStatus] = useState<'loading' | 'ready' | 'empty' | 'error'>('loading');
@@ -30,6 +32,10 @@ export default function ActivityStopScreen() {
   const [syncWarningMessage, setSyncWarningMessage] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!isReady) {
+      return;
+    }
+
     let cancelled = false;
 
     void (async () => {
@@ -41,6 +47,7 @@ export default function ActivityStopScreen() {
         if (activeActivity) {
           try {
             const syncResult = await runBackgroundSync({
+              ignoreCooldown: true,
               showOverlay: false,
               triggerLabel: 'activity stop',
             });
@@ -75,7 +82,7 @@ export default function ActivityStopScreen() {
     return () => {
       cancelled = true;
     };
-  }, [db, refreshHealthData, repository, runBackgroundSync]);
+  }, [db, isReady, refreshHealthData, repository, runBackgroundSync]);
 
   const goToday = useCallback(() => {
     router.replace('/' as never);
@@ -138,7 +145,7 @@ export default function ActivityStopScreen() {
       <StatusPill color={colors.success} label="Activity saved" />
       <View style={styles.hero}>
         <View style={styles.iconBadge}>
-          <Ionicons color={colors.heart} name="walk" size={34} />
+          <Ionicons color={colors.heart} name={getManualActivityIconName(summary.activity)} size={34} />
         </View>
         <Text numberOfLines={1} adjustsFontSizeToFit style={styles.title}>
           {summary.activity}

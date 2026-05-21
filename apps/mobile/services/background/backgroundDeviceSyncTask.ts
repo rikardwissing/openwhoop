@@ -24,6 +24,7 @@ import {
 } from '@/services/notifications/missingDeviceDataReminders';
 import { updateTonightWidget } from '@/services/widgets/tonightWidget';
 import {
+  recordSyncCooldownStarted,
   recordSyncCooldownSuccess,
   reserveSyncCooldownStart,
   type SyncCooldownSkipReason,
@@ -179,6 +180,7 @@ async function runBackgroundDeviceSyncTaskAsync() {
 
 async function executeBackgroundDeviceSyncAsync(options: {
   db?: Awaited<ReturnType<typeof openAppDatabaseAsync>>;
+  ignoreCooldown?: boolean;
   requestNotificationPermission: boolean;
   service?: WearableSyncService;
   syncRunner?: (
@@ -200,9 +202,13 @@ async function executeBackgroundDeviceSyncAsync(options: {
   );
   await ensureBackgroundDeviceSyncNotificationChannelAsync();
 
-  const cooldownSkip = await reserveSyncCooldownStart(runStartedAtMs);
-  if (cooldownSkip) {
-    return buildSkippedRunResult(cooldownSkip.reason, notificationPermissionGranted);
+  if (!options.ignoreCooldown) {
+    const cooldownSkip = await reserveSyncCooldownStart(runStartedAtMs);
+    if (cooldownSkip) {
+      return buildSkippedRunResult(cooldownSkip.reason, notificationPermissionGranted);
+    }
+  } else {
+    await recordSyncCooldownStarted(runStartedAtMs);
   }
 
   try {
@@ -376,6 +382,7 @@ export async function isBackgroundDeviceSyncTaskRegisteredAsync() {
 }
 
 export async function runBackgroundDeviceSyncNowAsync(options?: {
+  ignoreCooldown?: boolean;
   triggerLabel?: string;
 }) {
   await registerBackgroundDeviceSyncTaskAsync({
@@ -383,6 +390,7 @@ export async function runBackgroundDeviceSyncNowAsync(options?: {
   });
 
   return executeBackgroundDeviceSyncAsync({
+    ignoreCooldown: options?.ignoreCooldown,
     requestNotificationPermission: true,
     triggerLabel: options?.triggerLabel ?? 'manual trigger',
     useExpirationListener: false,
@@ -393,6 +401,7 @@ export async function runBackgroundDeviceSyncWithServiceAsync(
   db: Awaited<ReturnType<typeof openAppDatabaseAsync>>,
   service: WearableSyncService,
   options?: {
+    ignoreCooldown?: boolean;
     triggerLabel?: string;
   },
 ) {
@@ -402,6 +411,7 @@ export async function runBackgroundDeviceSyncWithServiceAsync(
 
   return executeBackgroundDeviceSyncAsync({
     db,
+    ignoreCooldown: options?.ignoreCooldown,
     requestNotificationPermission: true,
     service,
     syncRunner: (activeService, syncOptions) => activeService.syncInBackground(syncOptions),
