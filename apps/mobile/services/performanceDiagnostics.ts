@@ -1,7 +1,11 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 
-import type { HealthRepository } from '@/data/HealthRepository';
 import { rebuildAggregateTablesForDebug, refreshDerivedData } from '@/data/sqlite/SQLiteHealthRepository';
+import { fetchGraphQLHistoryOverview, fetchGraphQLTodayOverview } from '@/hooks/useGraphQLDashboardOverview';
+import { fetchGraphQLDerivedRefreshState } from '@/hooks/useGraphQLDerivedRefreshState';
+import { fetchGraphQLHeartHistory } from '@/hooks/useGraphQLHeartHistory';
+import { fetchGraphQLSleepHistory } from '@/hooks/useGraphQLSleepHistory';
+import { fetchGraphQLWellnessData } from '@/hooks/useGraphQLWellnessData';
 import type {
   DerivedRefreshState,
   HeartHistoryData,
@@ -80,7 +84,6 @@ interface CountRow {
 
 export interface RunFullPerformanceSweepParams {
   db: SQLiteDatabase;
-  repository: HealthRepository;
   historyRange?: HistoryRange;
 }
 
@@ -387,14 +390,13 @@ async function runRepeatedReadPair<T>(params: {
 
 export async function runFullPerformanceSweep({
   db,
-  repository,
   historyRange = DEFAULT_HISTORY_RANGE,
 }: RunFullPerformanceSweepParams): Promise<PerformanceDiagnosticRun> {
   const startedAtDate = new Date();
   const startedAt = formatSqliteDateTime(startedAtDate);
   const steps: PerformanceDiagnosticStep[] = [];
   const heartRowCount = await countHeartRows(db);
-  const derivedState = await repository.getDerivedRefreshState();
+  const derivedState = await fetchGraphQLDerivedRefreshState(db);
   let latestDayKey: string | null = null;
 
   try {
@@ -419,14 +421,14 @@ export async function runFullPerformanceSweep({
       coldKey: 'today.read.cold',
       coldLabel: 'Today overview second repeat read',
       read: async () => {
-        const overview = await repository.getTodayOverview();
+        const overview = await fetchGraphQLTodayOverview(db);
         latestDayKey = overview.day.dayKey;
         return overview;
       },
       summarize: summarizeTodayOverview,
     });
 
-    const historyDayKey = latestDayKey ?? (await repository.getTodayOverview()).day.dayKey;
+    const historyDayKey = latestDayKey ?? (await fetchGraphQLTodayOverview(db)).day.dayKey;
 
     await runRepeatedReadPair({
       steps,
@@ -434,7 +436,7 @@ export async function runFullPerformanceSweep({
       warmLabel: 'History overview first repeat read',
       coldKey: 'history.read.cold',
       coldLabel: 'History overview second repeat read',
-      read: () => repository.getHistoryOverview(historyDayKey),
+      read: () => fetchGraphQLHistoryOverview(db, historyDayKey),
       summarize: summarizeHistoryOverview,
     });
 
@@ -444,7 +446,7 @@ export async function runFullPerformanceSweep({
       warmLabel: 'Sleep first repeat read',
       coldKey: 'sleep.read.cold',
       coldLabel: 'Sleep second repeat read',
-      read: () => repository.getSleepHistory(historyRange),
+      read: () => fetchGraphQLSleepHistory(db, historyRange),
       summarize: summarizeSleepHistory,
     });
 
@@ -454,7 +456,7 @@ export async function runFullPerformanceSweep({
       warmLabel: 'Heart first repeat read',
       coldKey: 'heart.read.cold',
       coldLabel: 'Heart second repeat read',
-      read: () => repository.getHeartHistory(historyRange),
+      read: () => fetchGraphQLHeartHistory(db, historyRange),
       summarize: summarizeHeartHistory,
     });
 
@@ -464,7 +466,7 @@ export async function runFullPerformanceSweep({
       warmLabel: 'Wellness first repeat read',
       coldKey: 'wellness.read.cold',
       coldLabel: 'Wellness second repeat read',
-      read: () => repository.getWellnessData(historyRange),
+      read: () => fetchGraphQLWellnessData(db, historyRange),
       summarize: summarizeWellnessData,
     });
 
@@ -479,28 +481,28 @@ export async function runFullPerformanceSweep({
       steps,
       'today.read.after_aggregate',
       'Today overview read after aggregate rebuild',
-      () => repository.getTodayOverview(),
+      () => fetchGraphQLTodayOverview(db),
       summarizeTodayOverview,
     );
     await measureReadStep(
       steps,
       'history.read.after_aggregate',
       'History overview read after aggregate rebuild',
-      () => repository.getHistoryOverview(historyDayKey),
+      () => fetchGraphQLHistoryOverview(db, historyDayKey),
       summarizeHistoryOverview,
     );
     await measureReadStep(
       steps,
       'heart.read.after_aggregate',
       'Heart read after aggregate rebuild',
-      () => repository.getHeartHistory(historyRange),
+      () => fetchGraphQLHeartHistory(db, historyRange),
       summarizeHeartHistory,
     );
     await measureReadStep(
       steps,
       'wellness.read.after_aggregate',
       'Wellness read after aggregate rebuild',
-      () => repository.getWellnessData(historyRange),
+      () => fetchGraphQLWellnessData(db, historyRange),
       summarizeWellnessData,
     );
 

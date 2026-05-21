@@ -29,6 +29,7 @@ import {
 const DEFAULT_QUERY_LIMIT = 100;
 const MAX_QUERY_LIMIT = 10_000;
 const GRAPHQL_NAME_PATTERN = /^[_A-Za-z][_0-9A-Za-z]*$/;
+const sqliteApolloClients = new WeakMap<SQLiteDatabase, Promise<ApolloClient>>();
 
 interface PragmaTableListRow {
   schema: string;
@@ -553,4 +554,15 @@ export async function createSQLiteApolloClient(db: SQLiteDatabase): Promise<Apol
     }),
     link: createSQLiteGraphQLLink(schema),
   });
+}
+
+export function getSQLiteApolloClient(db: SQLiteDatabase): Promise<ApolloClient> {
+  const existing = sqliteApolloClients.get(db);
+  if (existing) {
+    return existing;
+  }
+
+  const next = createSQLiteApolloClient(db);
+  sqliteApolloClients.set(db, next);
+  return next;
 }

@@ -841,14 +841,13 @@ export class MockHealthRepository implements HealthRepository {
 
   async getActiveActivity(): Promise<ActiveActivity | null> {
     await this.wait();
-    if (!this.activeActivity) {
-      return null;
-    }
 
-    return {
-      ...this.activeActivity,
-      elapsedMinutes: Math.max(0, Math.round((Date.now() - this.activeActivity.start.getTime()) / 60000)),
-    };
+    return this.activeActivity
+      ? {
+          ...this.activeActivity,
+          elapsedMinutes: Math.max(0, Math.round((Date.now() - this.activeActivity.start.getTime()) / 60000)),
+        }
+      : null;
   }
 
   async startActiveActivity(activity: ManualActivityKind, start: Date): Promise<ActiveActivity> {

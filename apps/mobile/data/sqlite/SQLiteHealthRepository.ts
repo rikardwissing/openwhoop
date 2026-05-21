@@ -261,7 +261,7 @@ interface HeartMetricSampleRow {
   skin_temp: number | null;
 }
 
-interface HeartMetricSample {
+export interface HeartMetricSample {
   bpm: number;
   time: string;
   date: Date;
@@ -349,7 +349,7 @@ interface IntradayMetricBucketStateRow {
   refreshed_at: string;
 }
 
-interface SleepFeatureBucketRow {
+export interface SleepFeatureBucketRow {
   bucket_seconds: number;
   bucket_start: string;
   sample_count: number;
@@ -380,7 +380,7 @@ interface SleepFeatureBucketStateRow {
   refreshed_at: string;
 }
 
-interface SleepFeatureMetricSample {
+export interface SleepFeatureMetricSample {
   bpm: number;
   date: Date;
   rr: number[];
@@ -531,7 +531,7 @@ export interface EnrichedSleepCycleBundle {
   summariesBySleepId: Map<string, SleepStageSummary>;
 }
 
-interface DeviceStateRow {
+export interface DeviceStateRow {
   id: string;
   name: string | null;
   last_seen_at: string | null;
@@ -543,7 +543,7 @@ interface DeviceStateRow {
   sync_error: string | null;
 }
 
-interface SleepPreferenceRow {
+export interface SleepPreferenceRow {
   alarm_enabled: number | null;
   alarm_minutes: number | null;
   alarm_one_off_at: string | null;
@@ -553,7 +553,7 @@ interface SleepPreferenceRow {
   target_wake_minutes: number;
 }
 
-interface SleepPreferences {
+export interface SleepPreferences {
   alarmOneOffAt: string | null;
   alarmEnabled: boolean;
   alarmScheduleKind: AlarmScheduleKind;
@@ -620,7 +620,7 @@ interface DailyMinimaRow {
   min_bpm: number;
 }
 
-interface HeartDayStatRow {
+export interface HeartDayStatRow {
   day: string;
   min_bpm: number;
   avg_bpm: number;
@@ -628,7 +628,7 @@ interface HeartDayStatRow {
   strain_score: number | null;
 }
 
-interface HeartDayStatRecord {
+export interface HeartDayStatRecord {
   day: string;
   minBpm: number;
   avgBpm: number;
@@ -1202,7 +1202,7 @@ async function rebuildActivityDetectorPersonalization(db: SQLiteDatabase): Promi
   return built.personalization;
 }
 
-function toHeartDayStatRecord(row: HeartDayStatRow): HeartDayStatRecord {
+export function toHeartDayStatRecord(row: HeartDayStatRow): HeartDayStatRecord {
   return {
     day: row.day,
     minBpm: row.min_bpm,
@@ -1234,7 +1234,7 @@ function greetingForHour(hour: number): string {
   return 'Good evening';
 }
 
-function rangeDays(range: HistoryRange): number {
+export function rangeDays(range: HistoryRange): number {
   switch (range) {
     case '24h':
       return 1;
@@ -1259,7 +1259,7 @@ function sleepClockMinutes(date: Date) {
   return date.getHours() * 60 + date.getMinutes();
 }
 
-function calculateSleepConsistencyScore(sleeps: readonly SleepCycleRecord[]) {
+export function calculateSleepConsistencyScore(sleeps: readonly SleepCycleRecord[]) {
   const completeSleeps = completeSleepCycles(sleeps);
   if (completeSleeps.length < MIN_SLEEP_CONSISTENCY_NIGHTS) {
     return null;
@@ -1275,7 +1275,7 @@ function calculateSleepConsistencyScore(sleeps: readonly SleepCycleRecord[]) {
   return Math.round((bedtimeConsistency + wakeConsistency) / 2);
 }
 
-function buildSleepCycleTrendSeries(options: {
+export function buildSleepCycleTrendSeries(options: {
   sleeps: readonly SleepCycleRecord[];
   range: HistoryRange;
   endDate: Date;
@@ -1308,7 +1308,7 @@ function previousSeriesValue(series: readonly TrendPoint[]) {
   return null;
 }
 
-function buildTrendMetricSeries(options: {
+export function buildTrendMetricSeries(options: {
   title: string;
   unit: string;
   accent: MetricSeries['accent'];
@@ -1342,7 +1342,7 @@ function buildTrendMetricSeries(options: {
   } satisfies MetricSeries;
 }
 
-function describeSkinTemperatureDeviation(delta: number | null) {
+export function describeSkinTemperatureDeviation(delta: number | null) {
   if (delta === null) {
     return BUILDING_TEMPERATURE_BASELINE_REASON;
   }
@@ -1375,7 +1375,7 @@ function trendValues(points: TrendPoint[]): number[] {
     .filter((value): value is number => value !== null);
 }
 
-function buildFilledDailySeries(
+export function buildFilledDailySeries(
   range: HistoryRange,
   endDate: Date,
   valueForDay: (dayKey: string) => number | null,
@@ -1394,7 +1394,7 @@ function buildFilledDailySeries(
   });
 }
 
-function createTimeBuckets<T extends { bpm: number; date: Date }>(
+export function createTimeBuckets<T extends { bpm: number; date: Date }>(
   points: T[],
   bucketMinutes: number,
   startDate?: Date,
@@ -1485,7 +1485,7 @@ function createMetricTimeBuckets<T extends { date: Date }>(
   return series;
 }
 
-function buildDashboardWindowMetricSeries<T extends { date: Date }>(options: {
+export function buildDashboardWindowMetricSeries<T extends { date: Date }>(options: {
   title: string;
   accent: MetricSeries['accent'];
   unit: string;
@@ -1525,7 +1525,7 @@ function buildDashboardWindowMetricSeries<T extends { date: Date }>(options: {
   } satisfies MetricSeries;
 }
 
-function endOfDashboardDayWindow(dayKey: string, isToday: boolean, latestHeartDate: Date | null) {
+export function endOfDashboardDayWindow(dayKey: string, isToday: boolean, latestHeartDate: Date | null) {
   if (isToday && latestHeartDate) {
     return latestHeartDate;
   }
@@ -1791,7 +1791,7 @@ function minutesForClock(date: Date) {
   return date.getHours() * 60 + date.getMinutes();
 }
 
-function inferTargetWakeMinutes(sleeps: SleepCycleRecord[]) {
+export function inferTargetWakeMinutes(sleeps: SleepCycleRecord[]) {
   const wakeTimes = completeSleepCycles(sleeps).slice(-RECENT_WAKE_INFERENCE_DAYS).map((sleep) => minutesForClock(sleep.end));
   if (wakeTimes.length === 0) {
     return DEFAULT_TARGET_WAKE_MINUTES;
@@ -1800,7 +1800,7 @@ function inferTargetWakeMinutes(sleeps: SleepCycleRecord[]) {
   return roundClockMinutes(mean(wakeTimes), SLEEP_TARGET_STEP_MINUTES);
 }
 
-function normalizeSleepPreferences(
+export function normalizeSleepPreferences(
   row: SleepPreferenceRow | null,
   fallbackTargetWakeMinutes: number,
 ): SleepPreferences {
@@ -1897,7 +1897,7 @@ async function persistSleepPreferences(db: SQLiteDatabase, preferences: SleepPre
   );
 }
 
-function buildSleepPlan(
+export function buildSleepPlan(
   preferences: SleepPreferences,
   sleeps: SleepCycleRecord[],
   activities: ActivityRecord[],
@@ -1990,7 +1990,7 @@ function toSleepStageInputRowFromFeatureBucket(row: SleepFeatureBucketRow): Slee
   };
 }
 
-function toSleepFeatureMetricSample(row: SleepFeatureBucketRow): SleepFeatureMetricSample | null {
+export function toSleepFeatureMetricSample(row: SleepFeatureBucketRow): SleepFeatureMetricSample | null {
   const bpm = row.avg_bpm ?? row.min_bpm ?? row.max_bpm;
   if (bpm === null || sanitizeRecordedBpm(Math.round(bpm)) === null) {
     return null;
@@ -2449,7 +2449,7 @@ function calculateStrain<T extends { bpm: number; date: Date }>(rows: T[], maxHr
   return strainScoreFromTrimp(trimp);
 }
 
-function buildCumulativeStrainSeries<T extends { bpm: number; date: Date }>(
+export function buildCumulativeStrainSeries<T extends { bpm: number; date: Date }>(
   rows: readonly T[],
   startDate: Date,
   endDate: Date,
@@ -2830,22 +2830,22 @@ function personalizeMaxHr(bpms: number[], restingHr: number): number {
   return clamp(Math.max(observed, restingHr + 100), 180, 205);
 }
 
-function personalizeMaxHrFromObservedPeak(observedPeakBpm: number | null, restingHr: number): number {
+export function personalizeMaxHrFromObservedPeak(observedPeakBpm: number | null, restingHr: number): number {
   const observed = (sanitizeRecordedBpm(observedPeakBpm) ?? 175) + 5;
   return clamp(Math.max(observed, restingHr + 100), 180, 205);
 }
 
-function dateFromDayKey(dayKey: string) {
+export function dateFromDayKey(dayKey: string) {
   const [year, month, day] = dayKey.split('-').map(Number);
   return new Date(year, month - 1, day, 12, 0, 0, 0);
 }
 
-function startOfDayFromDayKey(dayKey: string) {
+export function startOfDayFromDayKey(dayKey: string) {
   const [year, month, day] = dayKey.split('-').map(Number);
   return new Date(year, month - 1, day, 0, 0, 0, 0);
 }
 
-function nextDayFromDayKey(dayKey: string) {
+export function nextDayFromDayKey(dayKey: string) {
   const date = startOfDayFromDayKey(dayKey);
   return new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1, 0, 0, 0, 0);
 }
@@ -2869,7 +2869,7 @@ function emptyDashboardMetricSeries(
   };
 }
 
-function buildDashboardDayState(dayKey: string, availableDayKeys: readonly string[]): DashboardDayState {
+export function buildDashboardDayState(dayKey: string, availableDayKeys: readonly string[]): DashboardDayState {
   const selectedDate = dateFromDayKey(dayKey);
   const selectedIndex = availableDayKeys.indexOf(dayKey);
   const todayKey = dateKey(new Date());
@@ -2904,7 +2904,7 @@ function buildDashboardDayState(dayKey: string, availableDayKeys: readonly strin
   };
 }
 
-function buildTrendMetric(metric: MetricSeries, id: TrendMetric['id']): TrendMetric {
+export function buildTrendMetric(metric: MetricSeries, id: TrendMetric['id']): TrendMetric {
   return {
     ...metric,
     id,
@@ -2916,7 +2916,7 @@ function averageNullable(values: Array<number | null>) {
   return valid.length === 0 ? null : mean(valid);
 }
 
-function buildDashboardInsights(options: {
+export function buildDashboardInsights(options: {
   recoveryScore: number | null;
   sleepCard: SleepCardData;
   selectedStrain: number | null;
@@ -2967,7 +2967,7 @@ function buildDashboardInsights(options: {
   return insights.slice(0, 3);
 }
 
-function buildEmptyHistoryOverview(now: Date): HistoryOverview {
+export function buildEmptyHistoryOverview(now: Date): HistoryOverview {
   const dayKey = dateKey(now);
   return {
     dateLabel: formatLongDate(now),
@@ -3013,7 +3013,7 @@ function buildEmptyHistoryOverview(now: Date): HistoryOverview {
   };
 }
 
-function buildEmptyTodayOverview(now: Date, _deviceState: DeviceStateRow | null): TodayOverview {
+export function buildEmptyTodayOverview(now: Date, _deviceState: DeviceStateRow | null): TodayOverview {
   const emptyHistory = buildEmptyHistoryOverview(now);
   const defaultSleepNeedMinutes = BASE_SLEEP_NEED_MINUTES;
   const defaultOptimalBedtimeMinutes = calculateOptimalBedtimeMinutes(
@@ -3286,7 +3286,7 @@ async function loadEnrichedSleepCycleBundle(
   return buildEnrichedSleepCycleBundle(sleepCycles, stageRecords, scoreNapActivities);
 }
 
-function fallbackEnrichedSleepCycle(sleep: SleepCycleRecord): EnrichedSleepCycle {
+export function fallbackEnrichedSleepCycle(sleep: SleepCycleRecord): EnrichedSleepCycle {
   return {
     sleep,
     stageRecords: [],
@@ -3419,7 +3419,7 @@ function latestValue(values: number[]): number | null {
   return values.length === 0 ? null : values.at(-1) ?? null;
 }
 
-function estimateRecoveryScoreFromSleeps(
+export function estimateRecoveryScoreFromSleeps(
   latestSleep: SleepCycleRecord | null,
   sleeps: SleepCycleRecord[],
   latestStress: number | null,
@@ -3525,7 +3525,7 @@ function buildDailyTrend<T extends { date: Date }>(range: HistoryRange, rows: T[
   });
 }
 
-function buildWellnessMetricSeries(options: {
+export function buildWellnessMetricSeries(options: {
   title: string;
   unit: string;
   accent: MetricSeries['accent'];
@@ -5065,7 +5065,7 @@ function totalBucketSampleCount(rows: readonly HeartIntradayBucketRow[]) {
   return rows.reduce((sum, row) => sum + row.sample_count, 0);
 }
 
-function calculateStrainFromBucketRows(
+export function calculateStrainFromBucketRows(
   rows: readonly HeartIntradayBucketRow[],
   maxHr: number,
   restingHr: number,
@@ -5086,7 +5086,7 @@ function calculateStrainFromBucketRows(
   return strainScoreFromTrimp(trimp);
 }
 
-function estimateCaloriesFromBucketRows(
+export function estimateCaloriesFromBucketRows(
   rows: readonly HeartIntradayBucketRow[],
   maxHr: number,
   restingHr: number,
@@ -7410,7 +7410,7 @@ function buildEmptyDashboardSleepCard(): SleepCardData {
   };
 }
 
-function buildDashboardSleepCardFromEnriched(enriched: EnrichedSleepCycle | null): SleepCardData {
+export function buildDashboardSleepCardFromEnriched(enriched: EnrichedSleepCycle | null): SleepCardData {
   if (!enriched) {
     return buildEmptyDashboardSleepCard();
   }
@@ -7676,129 +7676,6 @@ export class SQLiteHealthRepository implements HealthRepository {
     return loader();
   }
 
-  async getDashboardHeartTimelineWindow(range: HistoryRange): Promise<HeartTimelineWindow> {
-    return this.readSnapshot(`heart:dashboard:window:${range}`, async () => {
-      const startedAt = Date.now();
-
-      try {
-        await this.waitForRepositoryMutations();
-        await this.ensurePrepared();
-        await waitForAggregateMutations(this.db);
-
-        const [latestHeartDate, dailyMinimaRows, sleepCycles] = await Promise.all([
-          this.loadLatestHeartDate(),
-          this.loadDailyHeartMinima(),
-          this.loadRecentSleepCycles(Math.max(rangeDays(range), 14)),
-        ]);
-
-        if (!latestHeartDate || dailyMinimaRows.length === 0) {
-          logMobilePerf('repository.getDashboardHeartTimelineWindow.empty', startedAt, {
-            range,
-          });
-          return {
-            restingHr: null,
-            averageHr: null,
-            maxHr: null,
-            latestHeartDate: null,
-            intradayStart: null,
-            samples: [],
-            markers: [],
-            missingReason: NO_HISTORY_REASON,
-          } satisfies HeartTimelineWindow;
-        }
-
-        const windowHours = rangeDays(range) * 24;
-        const intradayWindowStart = new Date(latestHeartDate.getTime() - windowHours * 3600000);
-        const latestHeartTime = formatSqliteDateTime(latestHeartDate);
-        const windowStartedAt = Date.now();
-
-        const bucketWindow = await loadIntradayHeartWindow(this.db, latestHeartTime, {
-          bucketSeconds: HEART_INTRADAY_BUCKET_SECONDS,
-          windowHours,
-        });
-        const rawWindow = {
-          latestHeartDate: bucketWindow.latestHeartDate,
-          intradayStart: bucketWindow.intradayStart,
-          rawRowCount: bucketWindow.rawRowCount,
-          samples: bucketWindow.bucketSamples,
-          averageHr: bucketWindow.averageBpm,
-          maxHr: bucketWindow.sustainedPeakBpm,
-        } satisfies RawHeartWindow;
-
-        logMobilePerf('repository.getDashboardHeartTimelineWindow.window', windowStartedAt, {
-          range,
-          rows: rawWindow.rawRowCount,
-        });
-
-        const enrichedSleep = await loadEnrichedSleepCycleBundle(this.db, sleepCycles);
-        const heartMarkerSleepDetails = buildHeartMarkerSleepDetailsFromEnriched(enrichedSleep.cycles);
-        const intradayMarkers = buildHeartIntradayMarkers(
-          intradayWindowStart,
-          latestHeartDate,
-          enrichedSleep.sleeps,
-          await this.loadActivitiesOverlapping(intradayWindowStart, latestHeartDate),
-          heartMarkerSleepDetails,
-          enrichedSleep.summariesBySleepId,
-        );
-        const sanitizedDailyMinimaRows = dailyMinimaRows.map((row) => ({
-          day: row.day,
-          min_bpm: sanitizeRecordedBpm(row.min_bpm),
-        }));
-        const dailyMinima = sanitizedDailyMinimaRows
-          .map((row) => row.min_bpm)
-          .filter((value): value is number => value !== null);
-        const restingHr = personalizeRestingHr(enrichedSleep.completeSleeps, dailyMinima);
-
-        const snapshot = {
-          restingHr,
-          averageHr: rawWindow.averageHr,
-          maxHr: rawWindow.maxHr,
-          latestHeartDate: rawWindow.latestHeartDate,
-          intradayStart: rawWindow.intradayStart,
-          samples: rawWindow.samples,
-          markers: intradayMarkers,
-          missingReason: rawWindow.samples.length === 0 ? NO_HISTORY_REASON : null,
-        } satisfies HeartTimelineWindow;
-
-        logMobilePerf('repository.getDashboardHeartTimelineWindow', startedAt, {
-          range,
-          rows: snapshot.samples.length,
-        });
-
-        return snapshot;
-      } catch (error) {
-        logMobilePerfError('repository.getDashboardHeartTimelineWindow', error, {
-          range,
-        });
-        throw error;
-      }
-    });
-  }
-
-  async getTodayOverview(): Promise<TodayOverview> {
-    return this.readSnapshot('dashboard:todayOverview', async () => {
-      const startedAt = Date.now();
-
-      try {
-        await this.waitForRepositoryMutations();
-        await this.ensurePrepared();
-        await waitForAggregateMutations(this.db);
-
-        const overview = await buildTodayOverview(this.db);
-        logMobilePerf('repository.getTodayOverview', startedAt, {
-          activities: overview.activitySummary.length,
-          day: overview.day.dayKey,
-          insights: overview.insights.length,
-        });
-
-        return overview;
-      } catch (error) {
-        logMobilePerfError('repository.getTodayOverview', error);
-        throw error;
-      }
-    });
-  }
-
   private async ensurePrepared() {
     if (this.preparePromise) {
       await this.preparePromise;
@@ -7806,48 +7683,16 @@ export class SQLiteHealthRepository implements HealthRepository {
     }
 
     this.preparePromise = (async () => {
-      const ensureStartedAt = Date.now();
       try {
         if (await shouldRefreshDerivedData(this.db)) {
           await processPendingDerivedRefresh(this.db);
         }
-        logMobilePerf('repository.ensurePrepared', ensureStartedAt);
-      } catch (error) {
-        logMobilePerfError('repository.ensurePrepared', error);
-        throw error;
       } finally {
         this.preparePromise = null;
       }
     })();
 
     await this.preparePromise;
-  }
-
-  async getDerivedRefreshState(): Promise<DerivedRefreshState> {
-    return this.readQuery('derived:state', async () => {
-      await this.waitForRepositoryMutations();
-
-      const state = await loadDerivedDataStateRow(this.db);
-
-      if (state) {
-        return derivedRefreshStateFromRow(state);
-      }
-
-      const heartCount = await countHeartRows(this.db);
-      if (heartCount === 0) {
-        return derivedRefreshStateFromRow(null);
-      }
-
-      return {
-        status: 'pending',
-        pendingFromTime: null,
-        pendingToTime: null,
-        lastProcessedFromTime: null,
-        lastProcessedToTime: null,
-        lastError: null,
-        isFirstSync: true,
-      };
-    });
   }
 
   async processPendingDerivedRefresh(): Promise<boolean> {
@@ -9005,80 +8850,6 @@ export class SQLiteHealthRepository implements HealthRepository {
       } catch (error) {
         logMobilePerfError('repository.getHeartHistory', error, {
           range,
-        });
-        throw error;
-      }
-    });
-  }
-
-  async getDashboardHeartTimeline(range: HistoryRange): Promise<HeartCardData> {
-    return this.readSnapshot(`heart:dashboard:${range}`, async () => {
-      const window = await this.getDashboardHeartTimelineWindow(range);
-      return buildHeartCardDataFromWindow(window);
-    });
-  }
-
-  async getFocusedHeartDetail(marker: HeartIntradayMarker): Promise<FocusedHeartDetail> {
-    const startTimeMs = marker.startTimeMs ?? null;
-    const endTimeMs = marker.endTimeMs ?? null;
-    const readKey = `heart:focus:${marker.id}:${startTimeMs ?? 'missing'}:${endTimeMs ?? 'missing'}`;
-
-    return this.readSnapshot(readKey, async () => {
-      const startedAt = Date.now();
-
-      try {
-        await this.waitForRepositoryMutations();
-        await this.ensurePrepared();
-        await waitForAggregateMutations(this.db);
-        await ensureHeartIntradayBucketsReady(this.db);
-
-        if (startTimeMs === null || endTimeMs === null || endTimeMs <= startTimeMs) {
-          return {
-            averageHr: null,
-            maxHr: null,
-            pointIntervalMinutes: HEART_INTRADAY_BUCKET_MINUTES,
-            series: [],
-            marker: buildFocusedHeartDetailMarker(marker),
-            missingReason: NO_HISTORY_REASON,
-          } satisfies FocusedHeartDetail;
-        }
-
-        const startDate = new Date(startTimeMs);
-        const endDate = new Date(endTimeMs);
-        const bucketRows = await loadHeartBucketRowsBetweenRange(
-          this.db,
-          startDate,
-          endDate,
-          HEART_INTRADAY_BUCKET_SECONDS,
-        );
-        const bucketSamples = bucketRows.map(toHeartIntradayBucketSample);
-        const summary = summarizeBucketWindow(bucketRows);
-        const series = createTimeBuckets(
-          bucketSamples,
-          HEART_INTRADAY_BUCKET_MINUTES,
-          startDate,
-          endDate,
-        );
-
-        const snapshot = {
-          averageHr: summary.averageBpm,
-          maxHr: summary.sustainedPeakBpm,
-          pointIntervalMinutes: HEART_INTRADAY_BUCKET_MINUTES,
-          series,
-          marker: buildFocusedHeartDetailMarker(marker),
-          missingReason: series.length === 0 ? NO_HISTORY_REASON : null,
-        } satisfies FocusedHeartDetail;
-
-        logMobilePerf('repository.getFocusedHeartDetail', startedAt, {
-          markerId: marker.id,
-          points: snapshot.series.length,
-          pointIntervalMinutes: snapshot.pointIntervalMinutes,
-        });
-
-        return snapshot;
-      } catch (error) {
-        logMobilePerfError('repository.getFocusedHeartDetail', error, {
-          markerId: marker.id,
         });
         throw error;
       }

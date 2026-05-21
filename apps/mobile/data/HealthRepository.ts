@@ -1,17 +1,3 @@
-import type {
-  DerivedRefreshState,
-  FocusedHeartDetail,
-  HeartCardData,
-  HeartHistoryData,
-  HeartIntradayMarker,
-  HeartTimelineWindow,
-  HistoryOverview,
-  HistoryRange,
-  SleepHistoryData,
-  TodayOverview,
-  TrendData,
-  WellnessData,
-} from '@/types/health';
 import type { AlarmSettingsInput } from '@/utils/sleepPlan';
 
 export type HealthDataScope = 'all' | 'sleep' | 'heart' | 'dashboard' | 'wellness' | 'trends' | 'derived';
@@ -42,16 +28,6 @@ export interface ActiveActivityFinishSummary {
 }
 
 export interface HealthRepository {
-  getTodayOverview(): Promise<TodayOverview>;
-  getHistoryOverview(dayKey: string): Promise<HistoryOverview>;
-  getDashboardHeartTimelineWindow(range: HistoryRange): Promise<HeartTimelineWindow>;
-  getDashboardHeartTimeline(range: HistoryRange): Promise<HeartCardData>;
-  getFocusedHeartDetail(marker: HeartIntradayMarker): Promise<FocusedHeartDetail>;
-  getSleepHistory(range: HistoryRange): Promise<SleepHistoryData>;
-  getHeartHistory(range: HistoryRange): Promise<HeartHistoryData>;
-  getWellnessData(range: HistoryRange): Promise<WellnessData>;
-  getTrendData(range: HistoryRange): Promise<TrendData>;
-  getDerivedRefreshState(): Promise<DerivedRefreshState>;
   processPendingDerivedRefresh(): Promise<boolean>;
   rescanActivities(): Promise<ActivityRescanResult>;
   getActiveActivity(): Promise<ActiveActivity | null>;

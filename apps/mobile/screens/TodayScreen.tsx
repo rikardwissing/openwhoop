@@ -14,6 +14,7 @@ import { TonightPlanCard } from '@/components/dashboard/TonightPlanCard';
 import { ScreenShell } from '@/components/layout/ScreenShell';
 import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
 import { colors, typography } from '@/constants/theme';
+import { useGraphQLActiveActivity } from '@/hooks/useGraphQLActiveActivity';
 import { useGraphQLHeartTimelineWindow } from '@/hooks/useGraphQLHeartTimelineWindow';
 import { useDerivedRefreshState, useTodayOverview } from '@/hooks/useHealthData';
 import { useHealthDataVersion, useHealthRepository, useRefreshHealthData } from '@/providers/HealthDataProvider';
@@ -23,7 +24,7 @@ import {
   useWearableSyncState,
 } from '@/providers/WearableSyncProvider';
 import type { ActiveActivity, ManualActivityKind } from '@/data/HealthRepository';
-import { endActivityLiveActivities, startOrUpdateActivityLiveActivity } from '@/services/widgets/activityLiveActivity';
+import { startOrUpdateActivityLiveActivity } from '@/services/widgets/activityLiveActivity';
 import type { TodayOverview } from '@/types/health';
 import { hasFreshLiveHeartRate } from '@/types/device';
 import {
@@ -54,12 +55,10 @@ export function TodayScreen() {
   const [retainedOverview, setRetainedOverview] = useState<TodayOverview | null>(null);
   const data = state.data ?? retainedOverview;
   const [selectedHeartZoom, setSelectedHeartZoom] = useState<HeartTimelineZoomLevel>(DEFAULT_HEART_TIMELINE_ZOOM);
-  const heartGraphState = useGraphQLHeartTimelineWindow(HEART_PREFETCH_RANGE, heartVersion);
   const [activeActivity, setActiveActivity] = useState<ActiveActivity | null>(null);
-  const [activeActivityError, setActiveActivityError] = useState<string | null>(null);
   const [activeActivityVersion, setActiveActivityVersion] = useState(0);
-
-  console.log(heartGraphState.error)
+  const heartGraphState = useGraphQLHeartTimelineWindow(HEART_PREFETCH_RANGE, heartVersion);
+  const activeActivityState = useGraphQLActiveActivity(heartVersion + activeActivityVersion);
 
   useEffect(() => {
     if (state.data) {
@@ -68,51 +67,15 @@ export function TodayScreen() {
   }, [state.data]);
 
   useEffect(() => {
-    let cancelled = false;
-
-    const loadActiveActivity = () => {
-      void repository
-        .getActiveActivity()
-        .then((activity) => {
-          if (!cancelled) {
-            setActiveActivity(activity);
-          }
-        })
-        .catch((error) => {
-          if (!cancelled) {
-            setActiveActivityError(error instanceof Error ? error.message : 'Unable to load the active activity.');
-          }
-        });
-    };
-
-    loadActiveActivity();
-    const interval = setInterval(loadActiveActivity, 30_000);
-
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  }, [activeActivityVersion, heartVersion, repository]);
+    if (activeActivityState.status === 'ready') {
+      setActiveActivity(activeActivityState.data);
+      return;
+    }
+  }, [activeActivityState.data, activeActivityState.status]);
 
   const showLiveHeartRate = data?.day.isToday ? hasFreshLiveHeartRate(deviceState) : false;
   const liveHeartRateLabel =
     showLiveHeartRate && deviceState.liveHeartRate !== null ? `${deviceState.liveHeartRate} bpm` : null;
-
-  useEffect(() => {
-    if (!activeActivity) {
-      return;
-    }
-
-    void startOrUpdateActivityLiveActivity(activeActivity, {
-      liveHeartRate: showLiveHeartRate ? deviceState.liveHeartRate : null,
-    }).then((result) => {
-      if (!result.ok) {
-        setActiveActivityError(result.message);
-      } else {
-        setActiveActivityError(null);
-      }
-    });
-  }, [activeActivity, deviceState.liveHeartRate, showLiveHeartRate]);
 
   const selectedHeartZoomPreset = useMemo(
     () => getHeartTimelineZoomPreset(selectedHeartZoom),
@@ -180,20 +143,14 @@ export function TodayScreen() {
     refreshAfterActivityMutation();
   }, [refreshAfterActivityMutation, repository]);
   const handleStartActiveHeartActivity = useCallback(async (activity: ManualActivityKind, start: Date) => {
-    setActiveActivityError(null);
-
     const nextActiveActivity = await repository.startActiveActivity(activity, start);
     setActiveActivity(nextActiveActivity);
     setActiveActivityVersion((current) => current + 1);
     refreshAfterActivityMutation();
 
-    const result = await startOrUpdateActivityLiveActivity(nextActiveActivity, {
+    void startOrUpdateActivityLiveActivity(nextActiveActivity, {
       liveHeartRate: showLiveHeartRate ? deviceState.liveHeartRate : null,
     });
-
-    if (!result.ok) {
-      setActiveActivityError(result.message);
-    }
 
     return nextActiveActivity;
   }, [
@@ -202,17 +159,6 @@ export function TodayScreen() {
     repository,
     showLiveHeartRate,
   ]);
-  const handleStopActiveHeartActivity = useCallback(() => {
-    router.push('/activity-stop?source=today' as never);
-  }, [router]);
-  const handleCancelActiveHeartActivity = useCallback(async () => {
-    setActiveActivityError(null);
-    await repository.cancelActiveActivity();
-    await endActivityLiveActivities();
-    setActiveActivity(null);
-    setActiveActivityVersion((current) => current + 1);
-    refreshAfterActivityMutation();
-  }, [refreshAfterActivityMutation, repository]);
   const handleRefreshToday = useCallback(async () => {
     if (backgroundSyncRefreshIndicator.active || backgroundSyncRefreshIndicator.showStatus) {
       return;
@@ -352,13 +298,10 @@ export function TodayScreen() {
             dismissActivity: handleDismissHeartActivity,
             relabelActivity: handleRelabelHeartActivity,
             startActiveActivity: handleStartActiveHeartActivity,
-            stopActiveActivity: handleStopActiveHeartActivity,
-            cancelActiveActivity: handleCancelActiveHeartActivity,
             updateActivity: handleUpdateHeartActivity,
             updateSleep: handleUpdateHeartSleep,
           }}
           activeActivity={activeActivity}
-          activeActivityError={activeActivityError}
           chartTestID="today-heart-chart"
           isRefreshing={isHeartCardRefreshing}
           liveHeartRateLabel={liveHeartRateLabel}

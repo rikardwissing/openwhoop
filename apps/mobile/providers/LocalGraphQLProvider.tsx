@@ -2,9 +2,9 @@ import { ApolloProvider } from '@apollo/client/react';
 import type { SQLiteDatabase } from 'expo-sqlite';
 import { useEffect, useState, type ReactNode } from 'react';
 
-import { createSQLiteApolloClient } from '@/services/graphql/sqliteApolloClient';
+import { getSQLiteApolloClient } from '@/services/graphql/sqliteApolloClient';
 
-type LocalGraphQLClient = Awaited<ReturnType<typeof createSQLiteApolloClient>>;
+type LocalGraphQLClient = Awaited<ReturnType<typeof getSQLiteApolloClient>>;
 
 export function LocalGraphQLProvider({
   children,
@@ -22,7 +22,7 @@ export function LocalGraphQLProvider({
     setClient(null);
     setError(null);
 
-    void createSQLiteApolloClient(db)
+    void getSQLiteApolloClient(db)
       .then((nextClient) => {
         if (!cancelled) {
           setClient(nextClient);

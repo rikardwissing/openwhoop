@@ -687,7 +687,6 @@ export function SettingsScreen() {
     try {
       const run = await runFullPerformanceSweep({
         db,
-        repository,
       });
       await refreshPerformanceRuns();
       refreshHealthData(['dashboard', 'sleep', 'heart', 'wellness', 'trends']);

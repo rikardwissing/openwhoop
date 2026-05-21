@@ -1,16 +1,17 @@
 import { useEffect, useState } from 'react';
 import { AppState } from 'react-native';
 
+import { useGraphQLSleepHistory } from '@/hooks/useGraphQLSleepHistory';
 import { useAppDatabase } from '@/providers/AppDatabaseProvider';
-import { useHealthDataVersion, useHealthRepository } from '@/providers/HealthDataProvider';
+import { useHealthDataVersion } from '@/providers/HealthDataProvider';
 import { syncSleepPreparationReminder } from '@/services/notifications/sleepPreparationReminder';
 import { updateTonightWidget } from '@/services/widgets/tonightWidget';
 
 export function SleepPreparationReminderSync() {
   const db = useAppDatabase();
-  const repository = useHealthRepository();
   const version = useHealthDataVersion('sleep');
   const [resumeTick, setResumeTick] = useState(0);
+  const sleepHistory = useGraphQLSleepHistory('14d', version + resumeTick);
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextState) => {
@@ -26,10 +27,13 @@ export function SleepPreparationReminderSync() {
 
   useEffect(() => {
     let cancelled = false;
+    const snapshot = sleepHistory.data;
+
+    if (!snapshot) {
+      return undefined;
+    }
 
     const refreshSleepSurfaces = async () => {
-      const snapshot = await repository.getSleepHistory('14d');
-
       if (cancelled) {
         return;
       }
@@ -47,7 +51,7 @@ export function SleepPreparationReminderSync() {
     return () => {
       cancelled = true;
     };
-  }, [db, repository, resumeTick, version]);
+  }, [db, sleepHistory.data]);
 
   return null;
 }

@@ -11,6 +11,7 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { StatusBar } from 'expo-status-bar';
 
 import { SleepPreparationReminderSync } from '@/components/navigation/SleepPreparationReminderSync';
+import { ActiveActivityTakeover } from '@/components/navigation/ActiveActivityTakeover';
 import { WearableProgressOverlay } from '@/components/ui/WearableProgressOverlay';
 import { navTheme } from '@/constants/theme';
 import { AppDatabaseProvider } from '@/providers/AppDatabaseProvider';
@@ -71,6 +72,7 @@ function RootLayoutNav() {
                 <Stack.Screen name="+not-found" options={{ title: 'Not Found' }} />
               </Stack>
               <WearableProgressOverlay />
+              <ActiveActivityTakeover />
             </WearableSyncProvider>
           </HealthDataProvider>
         </AppDatabaseProvider>

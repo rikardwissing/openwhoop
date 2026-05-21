@@ -4,7 +4,8 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import { initializeDatabase } from '@/db/schema';
-import { SQLiteHealthRepository, refreshDerivedData } from '@/data/sqlite/SQLiteHealthRepository';
+import { refreshDerivedData } from '@/data/sqlite/SQLiteHealthRepository';
+import { fetchGraphQLSleepHistory } from '@/hooks/useGraphQLSleepHistory';
 
 type SqlArg = string | number | null;
 
@@ -110,8 +111,7 @@ describe('sleep replay script', () => {
       await initializeDatabase(adapter as never);
       await refreshDerivedData(adapter as never);
 
-      const repository = new SQLiteHealthRepository(adapter as never);
-      const sleepHistory = await repository.getSleepHistory('14d');
+      const sleepHistory = await fetchGraphQLSleepHistory(adapter as never, '14d');
       const sessions = requestedSleepId
         ? sleepHistory.sessions.filter((session) => session.id === requestedSleepId)
         : sleepHistory.sessions.slice(0, replayLimit);

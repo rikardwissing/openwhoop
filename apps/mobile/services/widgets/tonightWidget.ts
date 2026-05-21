@@ -1,8 +1,10 @@
+import { gql } from '@apollo/client';
 import { requireNativeModule } from 'expo';
 import { Platform } from 'react-native';
 import type { SQLiteDatabase } from 'expo-sqlite';
 
-import { SQLiteHealthRepository } from '@/data/sqlite/SQLiteHealthRepository';
+import { fetchGraphQLSleepHistory } from '@/hooks/useGraphQLSleepHistory';
+import { getSQLiteApolloClient } from '@/services/graphql/sqliteApolloClient';
 import type { SleepHistoryData } from '@/types/health';
 import { resolveSleepPlanWindow, resolveTonightSurfaceState } from '@/utils/sleepPlan';
 import SleepLiveActivity from '@/widgets/SleepLiveActivity';
@@ -22,6 +24,15 @@ type TonightWidgetSnapshot = Pick<
 type ExpoWidgetsModule = {
   reloadAllWidgets(): void;
 };
+const TONIGHT_WIDGET_POWER_QUERY = gql`
+  query TonightWidgetPowerState {
+    device_state(order_by: [{ last_seen_at: desc }], limit: 1) {
+      id
+      battery_percent
+      charging_status
+    }
+  }
+`;
 
 let expoWidgetsModule: ExpoWidgetsModule | null = null;
 let lastKnownBatteryPercent: number | null = null;
@@ -294,26 +305,33 @@ async function buildAndPublishTonightWidget() {
 }
 
 async function loadLatestPowerState(db: SQLiteDatabase) {
-  const rows = await db.getAllAsync<{
-    battery_percent: number | null;
-    charging_status: 'charging' | 'not_charging' | null;
-  }>(
-    'SELECT battery_percent, charging_status FROM device_state ORDER BY last_seen_at DESC LIMIT 1',
-  );
+  const client = await getSQLiteApolloClient(db);
+  const result = await client.query<{
+    device_state: Array<{
+      battery_percent: number | null;
+      charging_status: 'charging' | 'not_charging' | null;
+      id: number;
+    }>;
+  }>({
+    fetchPolicy: 'network-only',
+    query: TONIGHT_WIDGET_POWER_QUERY,
+  });
+  const row = result.data?.device_state[0] ?? null;
 
   return {
-    batteryPercent: rows[0]?.battery_percent ?? null,
-    chargingStatus: rows[0]?.charging_status ?? null,
+    batteryPercent: row?.battery_percent ?? null,
+    chargingStatus: row?.charging_status ?? null,
   };
 }
 
 async function rememberDatabaseSnapshot(db: SQLiteDatabase) {
-  const repository = new SQLiteHealthRepository(db);
-  const sleep = await repository.getSleepHistory('14d');
-  const powerState = await loadLatestPowerState(db).catch(() => ({
-    batteryPercent: null,
-    chargingStatus: null,
-  }));
+  const [sleep, powerState] = await Promise.all([
+    fetchGraphQLSleepHistory(db, '14d'),
+    loadLatestPowerState(db).catch(() => ({
+      batteryPercent: null,
+      chargingStatus: null,
+    })),
+  ]);
 
   currentSnapshot = {
     ...sleep,

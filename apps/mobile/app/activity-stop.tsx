@@ -9,6 +9,8 @@ import { GlassCard } from '@/components/ui/GlassCard';
 import { StatChip } from '@/components/ui/StatChip';
 import { colors, typography } from '@/constants/theme';
 import type { ActiveActivityFinishSummary } from '@/data/HealthRepository';
+import { fetchGraphQLActiveActivity } from '@/hooks/useGraphQLActiveActivity';
+import { useAppDatabase } from '@/providers/AppDatabaseProvider';
 import { useHealthRepository, useRefreshHealthData } from '@/providers/HealthDataProvider';
 import { useWearableSyncActions } from '@/providers/WearableSyncProvider';
 import { endActivityLiveActivities } from '@/services/widgets/activityLiveActivity';
@@ -19,6 +21,7 @@ const ACTIVITY_STOP_REFRESH_SCOPES = ['dashboard', 'sleep', 'heart', 'wellness',
 
 export default function ActivityStopScreen() {
   const router = useRouter();
+  const db = useAppDatabase();
   const repository = useHealthRepository();
   const refreshHealthData = useRefreshHealthData();
   const { runBackgroundSync } = useWearableSyncActions();
@@ -33,7 +36,7 @@ export default function ActivityStopScreen() {
     void (async () => {
       try {
         const stoppedAt = new Date();
-        const activeActivity = await repository.getActiveActivity();
+        const activeActivity = await fetchGraphQLActiveActivity(db);
         let syncWarning: string | null = null;
 
         if (activeActivity) {
@@ -73,7 +76,7 @@ export default function ActivityStopScreen() {
     return () => {
       cancelled = true;
     };
-  }, [refreshHealthData, repository, runBackgroundSync]);
+  }, [db, refreshHealthData, repository, runBackgroundSync]);
 
   const goToday = useCallback(() => {
     router.replace('/' as never);
