@@ -32,6 +32,8 @@ const ActivityLiveActivityComponent = (rawProps: ActivityLiveActivityProps) => {
     ? rawProps.startTimestamp
     : Date.now();
   const startDate = new Date(startTimestamp);
+  const compactTrailingElapsedMs = Math.max(0, Date.now() - startDate.getTime());
+  const compactTrailingTimerWidth = compactTrailingElapsedMs >= 60 * 60 * 1000 ? 55 : 41;
   const activityName = rawProps.activityName ?? 'Running';
   const liveHeartRate = rawProps.liveHeartRate ?? null;
   const stopUrl = rawProps.stopUrl ?? 'btwearable://activity-stop?source=live-activity';
@@ -76,6 +78,33 @@ const ActivityLiveActivityComponent = (rawProps: ActivityLiveActivityProps) => {
           padding({ horizontal: 12, vertical: 7 }),
         ]}
       />
+    );
+  }
+
+  function CompactLeading() {
+    return (
+      <HStack alignment="center" spacing={4}>
+        <ActivityIcon color={accent} size={15} />
+        <Text modifiers={[font({ size: 10, weight: 'semibold' }), foregroundStyle(cyan), monospacedDigit(), lineLimit(1)]}>
+          {heartRateLabel()}
+        </Text>
+      </HStack>
+    );
+  }
+
+  function CompactTrailing() {
+    return (
+        <Text
+          date={startDate}
+          dateStyle="timer"
+          modifiers={[
+            font({ size: 13, weight: 'bold', design: 'rounded' }),
+            foregroundStyle(success),
+            monospacedDigit(),
+            lineLimit(1),
+            frame({ width: compactTrailingTimerWidth })
+          ]}
+        />
     );
   }
 
@@ -158,8 +187,8 @@ const ActivityLiveActivityComponent = (rawProps: ActivityLiveActivityProps) => {
   return {
     banner: <Banner />,
     bannerSmall: <BannerSmall />,
-    compactLeading: <ActivityIcon color={accent} size={16} />,
-    compactTrailing: <ElapsedTimer color={success} size={14} />,
+    compactLeading: <CompactLeading />,
+    compactTrailing: <CompactTrailing />,
     minimal: <ActivityIcon color={accent} size={15} />,
     expandedLeading: <ExpandedLeading />,
     expandedCenter: <ExpandedCenter />,
