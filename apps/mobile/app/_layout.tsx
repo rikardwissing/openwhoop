@@ -66,6 +66,7 @@ function RootLayoutNav() {
               <SleepPreparationReminderSync />
               <Stack>
                 <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+                <Stack.Screen name="activity-stop" options={{ headerShown: false }} />
                 <Stack.Screen name="live-events" options={{ headerShown: false }} />
                 <Stack.Screen name="+not-found" options={{ title: 'Not Found' }} />
               </Stack>

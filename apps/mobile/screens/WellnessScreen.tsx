@@ -16,7 +16,7 @@ import { formatClock, formatSqliteDateTime } from '@/utils/dateTime';
 import { formatMetricNumber, formatMetricValue, formatNullablePercent, formatSignedValue } from '@/utils/formatters';
 import { getMetricToneColor, getRecoveryMetricTone } from '@/utils/metricTone';
 
-const MANUAL_ACTIVITY_OPTIONS: ManualActivityKind[] = ['Activity', 'Walk', 'Workout', 'Nap'];
+const MANUAL_ACTIVITY_OPTIONS: ManualActivityKind[] = ['Activity', 'Walk', 'Workout', 'Running', 'Nap'];
 const ACTIVITY_REFRESH_SCOPES = ['dashboard', 'sleep', 'heart', 'wellness', 'trends'] as const;
 
 interface ManualActivityFormState {

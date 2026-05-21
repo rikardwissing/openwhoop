@@ -1596,6 +1596,7 @@ export function PannableHeartChart({
   overlayAccentColor = colors.primary,
   activityDraft = null,
   draftPreview = null,
+  lockActivityDraftEnd = false,
   hiddenMarkerId = null,
   anchorDayKey,
   axisTestID,
@@ -1624,6 +1625,7 @@ export function PannableHeartChart({
   overlayAccentColor?: string;
   activityDraft?: HeartActivityDraft | null;
   draftPreview?: HeartActivityDraft | null;
+  lockActivityDraftEnd?: boolean;
   hiddenMarkerId?: string | null;
   anchorDayKey?: string;
   axisTestID?: string;
@@ -3095,7 +3097,7 @@ export function PannableHeartChart({
   const applyActivityDraftGesture = useCallback(
     (mode: 'move' | 'resize-start' | 'resize-end', dx: number) => {
       const origin = draftGestureOriginRef.current;
-      if (!origin || pointSpacing <= 0) {
+      if (!origin || pointSpacing <= 0 || (lockActivityDraftEnd && mode === 'resize-end')) {
         return;
       }
 
@@ -3123,7 +3125,13 @@ export function PannableHeartChart({
       let nextStartMinuteOffset = origin.startMinuteOffset;
       let nextEndMinuteOffset = origin.endMinuteOffset;
 
-      if (mode === 'move') {
+      if (lockActivityDraftEnd && mode === 'move') {
+        nextStartMinuteOffset = clamp(
+          origin.startMinuteOffset + deltaMinutes,
+          0,
+          origin.endMinuteOffset - MIN_ACTIVITY_DRAFT_MINUTE_SPAN,
+        );
+      } else if (mode === 'move') {
         nextStartMinuteOffset = clamp(
           origin.startMinuteOffset + deltaMinutes,
           0,
@@ -3144,6 +3152,10 @@ export function PannableHeartChart({
         );
       }
 
+      if (lockActivityDraftEnd) {
+        nextEndMinuteOffset = origin.endMinuteOffset;
+      }
+
       if (
         nextStartMinuteOffset === origin.startMinuteOffset &&
         nextEndMinuteOffset === origin.endMinuteOffset
@@ -3157,7 +3169,7 @@ export function PannableHeartChart({
         startMinuteOffset: nextStartMinuteOffset,
       });
     },
-    [onActivityDraftChange, pointIntervalMinutes, pointSpacing, points.length, safeWindowPointCount],
+    [lockActivityDraftEnd, onActivityDraftChange, pointIntervalMinutes, pointSpacing, points.length, safeWindowPointCount],
   );
 
   const finalizeActivityDraftGesture = useCallback(() => {
@@ -3819,25 +3831,27 @@ export function PannableHeartChart({
                           ]}
                         />
                       </Animated.View>
-                      <Animated.View
-                        style={[
-                          styles.activityDraftHandle,
-                          animatedActivityDraftEndHandleStyle,
-                          {
-                            height: activityDraftVisual.handleHeight,
-                            top: activityDraftVisual.handleTop,
-                          },
-                        ]}
-                        testID={chartTestID ? `${chartTestID}-draft-end-handle` : undefined}
-                        {...activityDraftEndHandleResponder.panHandlers}>
-                        <View
-                          pointerEvents="none"
+                      {!lockActivityDraftEnd ? (
+                        <Animated.View
                           style={[
-                            styles.activityDraftHandleGrip,
-                            { backgroundColor: activityDraftAccentColor },
+                            styles.activityDraftHandle,
+                            animatedActivityDraftEndHandleStyle,
+                            {
+                              height: activityDraftVisual.handleHeight,
+                              top: activityDraftVisual.handleTop,
+                            },
                           ]}
-                        />
-                      </Animated.View>
+                          testID={chartTestID ? `${chartTestID}-draft-end-handle` : undefined}
+                          {...activityDraftEndHandleResponder.panHandlers}>
+                          <View
+                            pointerEvents="none"
+                            style={[
+                              styles.activityDraftHandleGrip,
+                              { backgroundColor: activityDraftAccentColor },
+                            ]}
+                          />
+                        </Animated.View>
+                      ) : null}
                     </Animated.View>
                   ) : null}
                 </View>

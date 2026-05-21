@@ -1,4 +1,6 @@
 import type {
+  ActiveActivity,
+  ActiveActivityFinishSummary,
   ActivityRescanResult,
   HealthRepository,
   ManualActivityKind,
@@ -460,11 +462,13 @@ interface MockActivityRecord {
   durationMinutes: number;
   strain: number | null;
   calories: number | null;
+  isInProgress?: boolean;
   source: ActivitySource;
   reviewState: ActivityReviewState;
 }
 
-const MANUAL_ACTIVITY_KINDS = new Set<ManualActivityKind>(['Activity', 'Walk', 'Workout', 'Nap']);
+const MANUAL_ACTIVITY_KINDS = new Set<ManualActivityKind>(['Activity', 'Walk', 'Workout', 'Running', 'Nap']);
+const ACTIVE_ACTIVITY_KINDS = new Set<ManualActivityKind>(['Activity', 'Walk', 'Workout', 'Running']);
 
 function toActivitySummary(activity: MockActivityRecord): ActivitySummary {
   return {
@@ -474,6 +478,7 @@ function toActivitySummary(activity: MockActivityRecord): ActivitySummary {
     durationMinutes: activity.durationMinutes,
     strain: activity.strain,
     calories: activity.calories,
+    isInProgress: activity.isInProgress,
     source: activity.source,
     reviewState: activity.reviewState,
   };
@@ -621,6 +626,7 @@ function buildMockActivityMarkerDetails(activity: MockActivityRecord): HeartIntr
   return {
     durationMinutes: activity.durationMinutes,
     confidence: null,
+    isInProgress: activity.isInProgress,
     source: activity.source,
     reviewState: activity.reviewState,
   };
@@ -648,8 +654,10 @@ function buildIntradayActivityMarkers(
       return {
         id: activity.id,
         kind: activity.title === 'Nap' ? 'nap' as const : 'activity' as const,
-        label: activity.title,
-        timeLabel: `${formatClockMinutes(activity.startMinutes)} - ${formatClockMinutes(activity.startMinutes + activity.durationMinutes)}`,
+        label: activity.isInProgress ? `${activity.title} in progress` : activity.title,
+        timeLabel: activity.isInProgress
+          ? `${formatClockMinutes(activity.startMinutes)} - now`
+          : `${formatClockMinutes(activity.startMinutes)} - ${formatClockMinutes(activity.startMinutes + activity.durationMinutes)}`,
         startFraction: fractionOfWindow(startTime, windowStart, windowEnd),
         endFraction: fractionOfWindow(endTime, windowStart, windowEnd),
         startTimeMs: startTime.getTime(),
@@ -673,6 +681,7 @@ export class MockHealthRepository implements HealthRepository {
   private alarmWakeMode: SleepPlan['alarmWakeMode'] = 'exact_time';
   private alarmOneOffAt: string | null = null;
   private manualActivityCount = 0;
+  private activeActivity: ActiveActivity | null = null;
   private activities: MockActivityRecord[] = activitySeedRecords.map((activity) => ({ ...activity }));
   private sleepSessions: MockSleepRecord[] = sessionSeeds.map((session) => ({
     ...session,
@@ -684,7 +693,21 @@ export class MockHealthRepository implements HealthRepository {
   constructor(private readonly options: { delayMs?: number } = {}) {}
 
   private getVisibleActivities() {
-    return [...this.activities]
+    const activeRecord = this.activeActivity
+      ? {
+          id: this.activeActivity.id,
+          title: this.activeActivity.activity,
+          startMinutes: this.activeActivity.start.getHours() * 60 + this.activeActivity.start.getMinutes(),
+          durationMinutes: Math.max(1, Math.round((Date.now() - this.activeActivity.start.getTime()) / 60000)),
+          strain: null,
+          calories: null,
+          isInProgress: true,
+          source: 'manual' as const,
+          reviewState: 'confirmed' as const,
+        }
+      : null;
+
+    return [...this.activities, ...(activeRecord ? [activeRecord] : [])]
       .filter((activity) => activity.reviewState !== 'dismissed')
       .sort((left, right) => left.startMinutes - right.startMinutes);
   }
@@ -814,6 +837,82 @@ export class MockHealthRepository implements HealthRepository {
     return {
       removedUnconfirmedActivities,
     };
+  }
+
+  async getActiveActivity(): Promise<ActiveActivity | null> {
+    await this.wait();
+    if (!this.activeActivity) {
+      return null;
+    }
+
+    return {
+      ...this.activeActivity,
+      elapsedMinutes: Math.max(0, Math.round((Date.now() - this.activeActivity.start.getTime()) / 60000)),
+    };
+  }
+
+  async startActiveActivity(activity: ManualActivityKind, start: Date): Promise<ActiveActivity> {
+    await this.wait();
+
+    if (!ACTIVE_ACTIVITY_KINDS.has(activity)) {
+      throw new Error(`Unsupported active activity kind: ${activity}`);
+    }
+
+    if (this.activeActivity) {
+      throw new Error('An activity is already in progress.');
+    }
+
+    this.activeActivity = {
+      id: 'active-1',
+      activity,
+      start,
+      elapsedMinutes: Math.max(0, Math.round((Date.now() - start.getTime()) / 60000)),
+    };
+
+    return this.activeActivity;
+  }
+
+  async finishActiveActivity(end: Date): Promise<ActiveActivityFinishSummary | null> {
+    await this.wait();
+
+    if (!this.activeActivity) {
+      return null;
+    }
+
+    const active = this.activeActivity;
+    this.activeActivity = null;
+    this.manualActivityCount += 1;
+
+    const durationMinutes = Math.max(1, Math.round((end.getTime() - active.start.getTime()) / 60000));
+    const manualActivity: MockActivityRecord = {
+      id: `manual-${this.manualActivityCount}`,
+      title: active.activity,
+      startMinutes: active.start.getHours() * 60 + active.start.getMinutes(),
+      durationMinutes,
+      strain: durationMinutes >= 20 ? 7.8 : null,
+      calories: durationMinutes >= 5 ? Math.round(durationMinutes * 9) : null,
+      source: 'manual',
+      reviewState: 'confirmed',
+    };
+
+    this.activities = [...this.activities, manualActivity];
+
+    return {
+      id: manualActivity.id,
+      activity: active.activity,
+      start: active.start,
+      end,
+      durationMinutes,
+      averageHr: 142,
+      maxHr: 168,
+      strain: manualActivity.strain,
+      calories: manualActivity.calories,
+    };
+  }
+
+  async cancelActiveActivity(): Promise<void> {
+    await this.wait();
+    this.activeActivity = null;
   }
 
   async createManualActivity(activity: ManualActivityKind, start: Date, end: Date): Promise<string> {

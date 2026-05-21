@@ -11,6 +11,7 @@ import type { TonightWidgetProps } from '@/widgets/TonightWidget';
 
 const LIVE_ACTIVITY_URL = 'btwearable://';
 const LIVE_ACTIVITY_REFRESH_INTERVAL_MS = 60_000;
+const WIDGET_TIMELINE_HOLD_MS = 24 * 60 * 60 * 1000;
 type TonightWidgetSnapshot = Pick<
   SleepHistoryData,
   'sleepPlan' | 'headlineLabel' | 'headlineScore' | 'completionStatus' | 'isInProgress' | 'sessions'
@@ -34,6 +35,11 @@ function clamp(value: number, min: number, max: number) {
 function warnSleepLiveActivityFailure(action: string, error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   console.warn(`[widgets] Failed to ${action} sleep live activity`, message);
+}
+
+function warnTonightWidgetFailure(action: string, error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  console.warn(`[widgets] Failed to ${action} tonight widget`, message);
 }
 
 function reloadAllWidgetSnapshots() {
@@ -86,11 +92,40 @@ function buildTonightWidgetProps(snapshot: TonightWidgetSnapshot, now = new Date
   };
 }
 
+function buildNativeWidgetProps(props: TonightWidgetProps): TonightWidgetProps {
+  return Object.fromEntries(
+    Object.entries(props).filter(([, value]) => value !== null && value !== undefined),
+  ) as TonightWidgetProps;
+}
+
 function buildTonightWidgetTimeline(snapshot: TonightWidgetSnapshot, now = new Date()) {
-  return [{
-    date: now,
-    props: buildTonightWidgetProps(snapshot, now),
-  }];
+  const props = buildNativeWidgetProps(buildTonightWidgetProps(snapshot, now));
+
+  return [
+    {
+      date: now,
+      props,
+    },
+    {
+      date: new Date(now.getTime() + WIDGET_TIMELINE_HOLD_MS),
+      props: { ...props },
+    },
+  ];
+}
+
+function updateTonightWidgetTimeline(timeline: ReturnType<typeof buildTonightWidgetTimeline>, fallbackProps: TonightWidgetProps) {
+  try {
+    TonightWidget.updateTimeline(timeline);
+    return;
+  } catch (error) {
+    warnTonightWidgetFailure('update timeline for', error);
+  }
+
+  try {
+    TonightWidget.updateSnapshot(buildNativeWidgetProps(fallbackProps));
+  } catch (error) {
+    warnTonightWidgetFailure('update snapshot for', error);
+  }
 }
 
 function getSleepLiveActivityInstances() {
@@ -242,10 +277,7 @@ async function buildAndPublishTonightWidget() {
   const timeline = snapshot ? buildTonightWidgetTimeline(snapshot) : null;
 
   if (timeline) {
-    try {
-      TonightWidget.updateTimeline(timeline);
-    } catch {}
-
+    updateTonightWidgetTimeline(timeline, props);
     reloadAllWidgetSnapshots();
   }
 
@@ -299,6 +331,10 @@ export async function updateTonightWidget(db: SQLiteDatabase) {
     return;
   }
 
-  await rememberDatabaseSnapshot(db);
-  await buildAndPublishTonightWidget().catch(() => {});
+  try {
+    await rememberDatabaseSnapshot(db);
+    await buildAndPublishTonightWidget();
+  } catch (error) {
+    warnTonightWidgetFailure('update', error);
+  }
 }

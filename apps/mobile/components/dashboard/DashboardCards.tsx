@@ -6,6 +6,7 @@ import {
   Modal,
   Pressable,
   StyleSheet,
+  Switch,
   Text,
   View,
 } from 'react-native';
@@ -33,7 +34,7 @@ import { GlassCard } from '@/components/ui/GlassCard';
 import { PulsingHeartIcon } from '@/components/ui/PulsingHeartIcon';
 import { StatChip } from '@/components/ui/StatChip';
 import { colors, sleepStageColors, typography } from '@/constants/theme';
-import type { ManualActivityKind } from '@/data/HealthRepository';
+import type { ActiveActivity, ManualActivityKind } from '@/data/HealthRepository';
 import { SleepStageBreakdownChip } from '../ui/SleepStageBreakdownChip';
 import type {
   ActivitySummary,
@@ -86,8 +87,8 @@ const SLEEP_STAGE_PANEL_STAGE_DELAY_MS = HEART_CARD_CHROME_STAGE_DELAY_MS * 3;
 const SLEEP_STAGE_CHIP_STAGE_DELAY_MS = SLEEP_STAGE_PANEL_STAGE_DELAY_MS + 20;
 const ACTIVITY_DETAIL_IDLE_PANEL_MAX_HEIGHT = 52;
 const ACTIVITY_DETAIL_MANAGE_PANEL_MAX_HEIGHT = 72;
-const ACTIVITY_DETAIL_DRAFT_PANEL_MAX_HEIGHT = 120;
-const ACTIVITY_DETAIL_DRAFT_ERROR_PANEL_MAX_HEIGHT = 148;
+const ACTIVITY_DETAIL_DRAFT_PANEL_MAX_HEIGHT = 188;
+const ACTIVITY_DETAIL_DRAFT_ERROR_PANEL_MAX_HEIGHT = 220;
 const ACTIVITY_DETAIL_MANAGE_ERROR_PANEL_MAX_HEIGHT = 100;
 const ACTIVITY_DETAIL_PANEL_STAGE_DELAY_MS = HEART_CARD_CHROME_STAGE_DELAY_MS * 3;
 const ACTIVITY_DETAIL_CHIP_STAGE_DELAY_MS = ACTIVITY_DETAIL_PANEL_STAGE_DELAY_MS + 20;
@@ -97,7 +98,8 @@ const HEART_CARD_ACCENT_TRANSITION_DURATION_MS = 240;
 const DEFAULT_HEART_CHART_POINT_INTERVAL_MINUTES = 5;
 const MIN_HEART_ACTIVITY_DRAFT_MINUTE_SPAN = 1;
 const DEFAULT_NEW_ACTIVITY_DURATION_MINUTES = 60;
-const REVIEW_ACTIVITY_OPTIONS: ManualActivityKind[] = ['Activity', 'Walk', 'Workout', 'Nap'];
+const REVIEW_ACTIVITY_OPTIONS: ManualActivityKind[] = ['Activity', 'Walk', 'Workout', 'Running', 'Nap'];
+const LIVE_ACTIVITY_OPTIONS: ManualActivityKind[] = ['Activity', 'Walk', 'Workout', 'Running'];
 const REVIEW_DRAFT_OPTIONS: HeartMarkerDraftKind[] = [...REVIEW_ACTIVITY_OPTIONS, 'Sleep'];
 const REVEAL_EASING = Easing.out(Easing.cubic);
 const SLEEP_STAGE_BREAKDOWN_ORDER: SleepStage[] = ['deep', 'light', 'rem', 'awake'];
@@ -109,6 +111,9 @@ function formatSleepStageBreakdownLabel(stage: SleepStage) {
 interface HeartActivityReviewActions {
   createManualActivity?: (activity: ManualActivityKind, start: Date, end: Date) => Promise<string>;
   createManualSleep?: (start: Date, end: Date) => Promise<string>;
+  startActiveActivity?: (activity: ManualActivityKind, start: Date) => Promise<ActiveActivity>;
+  stopActiveActivity?: () => Promise<void> | void;
+  cancelActiveActivity?: () => Promise<void>;
   updateActivity?: (activityId: string, activity: ManualActivityKind, start: Date, end: Date) => Promise<void>;
   updateSleep?: (sleepId: string, start: Date, end: Date) => Promise<void>;
   confirmActivity: (activityId: string) => Promise<void>;
@@ -569,6 +574,7 @@ function buildInitialHeartActivityDraft(
   viewportState: HeartChartViewportState,
   pointCount: number,
   pointIntervalMinutes = DEFAULT_HEART_CHART_POINT_INTERVAL_MINUTES,
+  options: { alignEndToViewportEnd?: boolean } = {},
 ): HeartActivityDraft {
   const safePointCount = Math.max(pointCount, 2);
   const visibleWindowStartMinuteOffset = viewportState.windowStart * pointIntervalMinutes;
@@ -591,6 +597,16 @@ function buildInitialHeartActivityDraft(
     visibleWindowStartMinuteOffset,
     Math.min(centeredStartMinuteOffset, visibleWindowEndMinuteOffset - spanMinutes),
   );
+
+  if (options.alignEndToViewportEnd) {
+    const liveEndMinuteOffset = visibleWindowEndMinuteOffset;
+
+    return {
+      kind,
+      endMinuteOffset: liveEndMinuteOffset,
+      startMinuteOffset: Math.max(0, liveEndMinuteOffset - MIN_HEART_ACTIVITY_DRAFT_MINUTE_SPAN),
+    };
+  }
 
   return {
     kind,
@@ -860,6 +876,8 @@ function buildFocusedHeartCardData(
 }
 
 export function HeartCard({
+  activeActivity,
+  activeActivityError,
   activityReviewActions,
   canLoadMore = false,
   chartTestID,
@@ -879,6 +897,8 @@ export function HeartCard({
   windowPointCount,
   pinchZoomSteps,
 }: {
+  activeActivity?: ActiveActivity | null;
+  activeActivityError?: string | null;
   activityReviewActions?: HeartActivityReviewActions;
   canLoadMore?: boolean;
   chartTestID: string;
@@ -917,7 +937,9 @@ export function HeartCard({
   const [pendingSavedMarkerFocusRequest, setPendingSavedMarkerFocusRequest] = useState<HeartCardFocusRequest | null>(null);
   const [pendingActivityActionKey, setPendingActivityActionKey] = useState<string | null>(null);
   const [activityActionError, setActivityActionError] = useState<string | null>(null);
+  const [draftLiveActivityEnabled, setDraftLiveActivityEnabled] = useState(false);
   const [relabelModalVisible, setRelabelModalVisible] = useState(false);
+  const [activeActivityNowMs, setActiveActivityNowMs] = useState(() => Date.now());
   const [focusedDetailState, setFocusedDetailState] = useState<{
     key: string | null;
     snapshot: FocusedHeartDetail | null;
@@ -936,6 +958,17 @@ export function HeartCard({
   const [isActivityDetailPanelMounted, setIsActivityDetailPanelMounted] = useState(false);
   const [activityDetailMeasuredHeight, setActivityDetailMeasuredHeight] = useState(0);
   const [renderedSleepStageChips, setRenderedSleepStageChips] = useState<HeartMetricChip[]>([]);
+
+  useEffect(() => {
+    if (!activeActivity) {
+      return undefined;
+    }
+
+    setActiveActivityNowMs(Date.now());
+    const interval = setInterval(() => setActiveActivityNowMs(Date.now()), 30_000);
+    return () => clearInterval(interval);
+  }, [activeActivity]);
+
   const focusedDetailRequestKeyRef = useRef<string | null>(null);
   const previousActivityDetailPanelVisibleRef = useRef(false);
   const sleepStagePanelUnmountTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1101,9 +1134,29 @@ export function HeartCard({
       pendingActivityActionKey !== 'draft:save',
   );
   const canCreateGraphActivity = Boolean(activityReviewActions?.createManualActivity && activityReviewActions?.createManualSleep) && !isDraftEditing;
+  const canStartActiveActivity = Boolean(activityReviewActions?.startActiveActivity) && !editingBaseMarker;
+  const canToggleDraftLiveActivity = Boolean(
+    canStartActiveActivity &&
+    isDraftEditing &&
+    !editingBaseMarker &&
+    !activeActivity,
+  );
+  const liveActivityDraftEnabled = Boolean(draftLiveActivityEnabled && canToggleDraftLiveActivity);
+  const activeStartDraftEditing = Boolean(
+    liveActivityDraftEnabled &&
+    isDraftEditing &&
+    !editingBaseMarker &&
+    activityDraft &&
+    isManualActivityKind(activityDraft.kind) &&
+    activityDraft.kind !== 'Nap',
+  );
+  const activeActivityElapsedMinutes = activeActivity
+    ? Math.max(0, Math.round((activeActivityNowMs - activeActivity.start.getTime()) / 60000))
+    : 0;
   const isAwaitingChartFocus = Boolean(
     chartFocusRequest?.markerId != null && chartFocusedMarker?.id !== chartFocusRequest.markerId,
   );
+  const showActiveActivityPanel = Boolean(activeActivity && !isDraftEditing && !isDraftNavigationPending && !isAwaitingChartFocus);
   const displayedWindowPointCount = chartFocusedDetailSnapshot
     ? chartSnapshot.series.length
     : resolvedWindowPointCount;
@@ -1113,6 +1166,7 @@ export function HeartCard({
   );
   const showIdleCreateGraphActivity =
     canCreateGraphActivity &&
+    !activeActivity &&
     displayedFocusedMarker === null &&
     !isDraftNavigationPending &&
     !isAwaitingChartFocus;
@@ -1126,11 +1180,15 @@ export function HeartCard({
     ? ['Sleep']
     : editingBaseMarker
       ? REVIEW_ACTIVITY_OPTIONS
+      : liveActivityDraftEnabled
+        ? LIVE_ACTIVITY_OPTIONS
       : REVIEW_DRAFT_OPTIONS;
   const sleepStagePanelVisible = isSleepFocused && sleepStageChips.length > 0;
   const activityDetailPanelVisible =
+    showActiveActivityPanel ||
     showIdleCreateGraphActivity ||
     isDraftEditing ||
+    Boolean(activeActivityError) ||
     ((isActivityFocused || isSleepFocused) && (
       activityDetailChips.length > 0 ||
       canManageFocusedActivity ||
@@ -1694,14 +1752,17 @@ export function HeartCard({
   }, [actionableFocusedMarker, activityReviewActions, clearActivityMarkerOverride]);
 
   const handleStartDraftActivity = useCallback(() => {
-    const nextViewportState = chartViewportState ?? {
+    const fallbackViewportState = {
       windowPointCount: resolvedWindowPointCount,
       windowStart: Math.max(cardData.series.length - resolvedWindowPointCount, 0),
     };
+    const nextViewportState = chartViewportState ?? fallbackViewportState;
 
     logHeartCardDebug('action.start-draft', {
       nextViewportState,
     });
+
+    setDraftLiveActivityEnabled(false);
 
     navigateHeartCard(
       {
@@ -1750,6 +1811,7 @@ export function HeartCard({
       marker: summarizeHeartCardMarker(actionableFocusedMarker),
     });
 
+    setDraftLiveActivityEnabled(false);
     navigateHeartCard(
       {
         kind: 'draft',
@@ -1789,6 +1851,42 @@ export function HeartCard({
     });
   }, []);
 
+  const handleDraftLiveActivityToggle = useCallback((enabled: boolean) => {
+    setActivityActionError(null);
+    setDraftLiveActivityEnabled(enabled);
+
+    if (!enabled) {
+      return;
+    }
+
+    const latestViewportState = {
+      windowPointCount: resolvedWindowPointCount,
+      windowStart: Math.max(cardData.series.length - resolvedWindowPointCount, 0),
+    };
+
+    setLatestJumpVersion((current) => current + 1);
+    setScreen((current) => {
+      if (current.kind !== 'draft' || current.editingMarkerId !== null) {
+        return current;
+      }
+
+      const kind = current.draft.kind === 'Sleep' || current.draft.kind === 'Nap'
+        ? 'Running'
+        : current.draft.kind;
+
+      return {
+        ...current,
+        draft: buildInitialHeartActivityDraft(
+          kind,
+          latestViewportState,
+          cardData.series.length,
+          basePointIntervalMinutes,
+          { alignEndToViewportEnd: true },
+        ),
+      };
+    });
+  }, [basePointIntervalMinutes, cardData.series.length, resolvedWindowPointCount]);
+
   const handleCancelDraftActivity = useCallback(() => {
     logHeartCardDebug('action.cancel-draft', {
       editingMarker: summarizeHeartCardMarker(editingBaseMarker),
@@ -1806,6 +1904,54 @@ export function HeartCard({
       },
     );
   }, [editingBaseMarker, navigateHeartCard, screen]);
+
+  const handleStartActiveDraftActivity = useCallback(async () => {
+    const draftToStart = activityDraft;
+    const reviewActions = activityReviewActions;
+
+    if (!liveActivityDraftEnabled || !draftToStart || !reviewActions?.startActiveActivity || !isManualActivityKind(draftToStart.kind)) {
+      return;
+    }
+
+    if (draftToStart.kind === 'Nap') {
+      setActivityActionError('Start a live activity as Activity, Walk, Workout, or Running.');
+      return;
+    }
+
+    const resolvedStart = resolveHeartPointDate(
+      cardData.series,
+      viewportKey,
+      draftToStart.startMinuteOffset,
+      basePointIntervalMinutes,
+    );
+    if (!resolvedStart) {
+      setActivityActionError('Unable to resolve the live activity start time from the chart.');
+      return;
+    }
+
+    const start = resolvedStart.getTime() > Date.now() ? new Date() : resolvedStart;
+
+    setActivityActionError(null);
+    setPendingActivityActionKey('draft:start-live');
+
+    try {
+      await reviewActions.startActiveActivity(draftToStart.kind, start);
+      setLatestJumpVersion((current) => current + 1);
+      navigateHeartCard({ kind: 'overview' }, { clearChartFocus: true, jumpToLatest: true });
+    } catch (error) {
+      setActivityActionError(error instanceof Error ? error.message : 'Unable to start this activity right now.');
+    } finally {
+      setPendingActivityActionKey(null);
+    }
+  }, [
+    activityDraft,
+    activityReviewActions,
+    basePointIntervalMinutes,
+    cardData.series,
+    liveActivityDraftEnabled,
+    navigateHeartCard,
+    viewportKey,
+  ]);
 
   const handleSaveDraftActivity = useCallback(async () => {
     const draftToSave = activityDraft;
@@ -1929,6 +2075,40 @@ export function HeartCard({
     navigateHeartCard,
     viewportKey,
   ]);
+
+  const handleStopActiveActivity = useCallback(async () => {
+    if (!activityReviewActions?.stopActiveActivity || !activeActivity) {
+      return;
+    }
+
+    setActivityActionError(null);
+    setPendingActivityActionKey('active:stop');
+
+    try {
+      await activityReviewActions.stopActiveActivity();
+    } catch (error) {
+      setActivityActionError(error instanceof Error ? error.message : 'Unable to stop this activity right now.');
+    } finally {
+      setPendingActivityActionKey(null);
+    }
+  }, [activeActivity, activityReviewActions]);
+
+  const handleCancelActiveActivity = useCallback(async () => {
+    if (!activityReviewActions?.cancelActiveActivity || !activeActivity) {
+      return;
+    }
+
+    setActivityActionError(null);
+    setPendingActivityActionKey('active:cancel');
+
+    try {
+      await activityReviewActions.cancelActiveActivity();
+    } catch (error) {
+      setActivityActionError(error instanceof Error ? error.message : 'Unable to cancel this activity right now.');
+    } finally {
+      setPendingActivityActionKey(null);
+    }
+  }, [activeActivity, activityReviewActions]);
 
   useEffect(() => {
     if (!readySavedMarkerFromDb || !pendingSavedMarkerFocusRequest) {
@@ -2408,6 +2588,7 @@ export function HeartCard({
         height={chartHeight}
         highlightedSleepStage={isSleepFocused ? selectedSleepStage : null}
         isLoadingMore={isLoadingMore}
+        lockActivityDraftEnd={activeStartDraftEditing}
         markers={chartMarkers}
         onActivityDraftChange={handleActivityDraftChange}
         jumpToLatestSignal={latestJumpVersion}
@@ -2489,6 +2670,41 @@ export function HeartCard({
                   ))}
                 </View>
               ) : null}
+              {showActiveActivityPanel && activeActivity ? (
+                <View>
+                  <View style={styles.activityDetailChipRow}>
+                    <StatChip accent={colors.heart} label="Live" value={activeActivity.activity} />
+                    <StatChip accent={colors.cyan} label="Elapsed" value={formatShortDuration(activeActivityElapsedMinutes)} />
+                    {liveHeartRateLabel ? (
+                      <StatChip accent={colors.alert} label="Latest HR" value={liveHeartRateLabel} />
+                    ) : null}
+                    <StatChip accent={colors.success} label="Started" value={formatClock(activeActivity.start)} />
+                  </View>
+                  {activeActivityError ? (
+                    <Text style={styles.reviewActionError}>{activeActivityError}</Text>
+                  ) : null}
+                  <View style={styles.reviewActionRow}>
+                    <ReviewActionButton
+                      accentColor={colors.alert}
+                      disabled={pendingActivityActionKey !== null}
+                      label={pendingActivityActionKey === 'active:stop' ? 'Stopping...' : 'Stop'}
+                      onPress={() => {
+                        void handleStopActiveActivity();
+                      }}
+                      testID={chartTestID ? `${chartTestID}-active-stop` : undefined}
+                    />
+                    <ReviewActionButton
+                      accentColor={colors.muted}
+                      disabled={pendingActivityActionKey !== null}
+                      label={pendingActivityActionKey === 'active:cancel' ? 'Cancelling...' : 'Cancel'}
+                      onPress={() => {
+                        void handleCancelActiveActivity();
+                      }}
+                      testID={chartTestID ? `${chartTestID}-active-cancel` : undefined}
+                    />
+                  </View>
+                </View>
+              ) : null}
               {showIdleCreateGraphActivity ? (
                 <View style={styles.reviewActionRow}>
                   <ReviewActionButton
@@ -2502,6 +2718,24 @@ export function HeartCard({
               ) : null}
               {isDraftEditing && activityDraft && !isAwaitingChartFocus ? (
                 <View>
+                  {canToggleDraftLiveActivity ? (
+                    <View style={styles.draftLiveActivityToggleRow}>
+                      <View style={styles.draftLiveActivityToggleText}>
+                        <Text style={styles.draftLiveActivityToggleLabel}>Live activity</Text>
+                        <Text style={styles.draftLiveActivityToggleCaption}>
+                          {liveActivityDraftEnabled ? 'In progress' : 'Completed'}
+                        </Text>
+                      </View>
+                      <Switch
+                        disabled={pendingActivityActionKey !== null}
+                        ios_backgroundColor={colors.surfaceStrong}
+                        onValueChange={handleDraftLiveActivityToggle}
+                        thumbColor={liveActivityDraftEnabled ? colors.heart : colors.subtle}
+                        trackColor={{ false: colors.borderStrong, true: `${colors.heart}55` }}
+                        value={liveActivityDraftEnabled}
+                      />
+                    </View>
+                  ) : null}
                   <View style={styles.draftTypeChipRow}>
                     {draftTypeOptions.map((option) => {
                       const accentColor = option === 'Sleep' ? colors.indigo : option === 'Nap' ? colors.aqua : colors.heart;
@@ -2548,15 +2782,28 @@ export function HeartCard({
                       onPress={handleCancelDraftActivity}
                       testID={chartTestID ? `${chartTestID}-draft-cancel` : undefined}
                     />
-                    <ReviewActionButton
-                      accentColor={colors.success}
-                      disabled={!isDraftEditing || pendingActivityActionKey !== null}
-                      label={pendingActivityActionKey === 'draft:save' ? 'Saving...' : 'Save'}
-                      onPress={() => {
-                        void handleSaveDraftActivity();
-                      }}
-                      testID={chartTestID ? `${chartTestID}-draft-save` : undefined}
-                    />
+                    {!liveActivityDraftEnabled ? (
+                      <ReviewActionButton
+                        accentColor={colors.success}
+                        disabled={!isDraftEditing || pendingActivityActionKey !== null}
+                        label={pendingActivityActionKey === 'draft:save' ? 'Saving...' : 'Save'}
+                        onPress={() => {
+                          void handleSaveDraftActivity();
+                        }}
+                        testID={chartTestID ? `${chartTestID}-draft-save` : undefined}
+                      />
+                    ) : null}
+                    {liveActivityDraftEnabled && isManualActivityKind(activityDraft.kind) && activityDraft.kind !== 'Nap' ? (
+                      <ReviewActionButton
+                        accentColor={colors.heart}
+                        disabled={!isDraftEditing || pendingActivityActionKey !== null || Boolean(activeActivity)}
+                        label={pendingActivityActionKey === 'draft:start-live' ? 'Starting...' : 'Start'}
+                        onPress={() => {
+                          void handleStartActiveDraftActivity();
+                        }}
+                        testID={chartTestID ? `${chartTestID}-draft-start-live` : undefined}
+                      />
+                    ) : null}
                   </View>
                 </View>
               ) : canManageFocusedActivity ? (
@@ -2944,7 +3191,9 @@ export function ActivityCard({
             <View style={styles.activityBody}>
               <Text style={styles.activityTitle}>{activity.title}</Text>
               <Text style={styles.activityMeta}>
-                {activity.timeLabel} · {activity.durationMinutes} min
+                {activity.isInProgress
+                  ? `${activity.timeLabel} · ${activity.durationMinutes} min · In progress`
+                  : `${activity.timeLabel} · ${activity.durationMinutes} min`}
               </Text>
             </View>
             <View style={styles.activityValues}>
@@ -3181,6 +3430,33 @@ const styles = StyleSheet.create({
   draftTypeChipText: {
     fontFamily: typography.bodySemiBold,
     fontSize: 12,
+  },
+  draftLiveActivityToggleRow: {
+    alignItems: 'center',
+    backgroundColor: colors.surfaceMuted,
+    borderColor: colors.border,
+    borderRadius: 16,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 12,
+    justifyContent: 'space-between',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  draftLiveActivityToggleText: {
+    flex: 1,
+    minWidth: 0,
+  },
+  draftLiveActivityToggleLabel: {
+    color: colors.text,
+    fontFamily: typography.bodySemiBold,
+    fontSize: 13,
+  },
+  draftLiveActivityToggleCaption: {
+    color: colors.muted,
+    fontFamily: typography.body,
+    fontSize: 11,
+    marginTop: 2,
   },
   reviewActionError: {
     color: colors.alert,

@@ -16,10 +16,29 @@ import type { AlarmSettingsInput } from '@/utils/sleepPlan';
 
 export type HealthDataScope = 'all' | 'sleep' | 'heart' | 'dashboard' | 'wellness' | 'trends' | 'derived';
 export type HealthRefreshScope = Exclude<HealthDataScope, 'all'> | 'all';
-export type ManualActivityKind = 'Activity' | 'Walk' | 'Workout' | 'Nap';
+export type ManualActivityKind = 'Activity' | 'Walk' | 'Workout' | 'Running' | 'Nap';
 
 export interface ActivityRescanResult {
   removedUnconfirmedActivities: number;
+}
+
+export interface ActiveActivity {
+  id: string;
+  activity: ManualActivityKind;
+  start: Date;
+  elapsedMinutes: number;
+}
+
+export interface ActiveActivityFinishSummary {
+  id: string;
+  activity: ManualActivityKind;
+  start: Date;
+  end: Date;
+  durationMinutes: number;
+  averageHr: number | null;
+  maxHr: number | null;
+  strain: number | null;
+  calories: number | null;
 }
 
 export interface HealthRepository {
@@ -35,6 +54,10 @@ export interface HealthRepository {
   getDerivedRefreshState(): Promise<DerivedRefreshState>;
   processPendingDerivedRefresh(): Promise<boolean>;
   rescanActivities(): Promise<ActivityRescanResult>;
+  getActiveActivity(): Promise<ActiveActivity | null>;
+  startActiveActivity(activity: ManualActivityKind, start: Date): Promise<ActiveActivity>;
+  finishActiveActivity(end: Date): Promise<ActiveActivityFinishSummary | null>;
+  cancelActiveActivity(): Promise<void>;
   createManualActivity(activity: ManualActivityKind, start: Date, end: Date): Promise<string>;
   createManualSleep(start: Date, end: Date): Promise<string>;
   updateActivity(activityId: string, activity: ManualActivityKind, start: Date, end: Date): Promise<void>;

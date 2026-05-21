@@ -13,6 +13,7 @@ import {
 import { ScreenShell } from '@/components/layout/ScreenShell';
 import { ErrorState, LoadingState } from '@/components/ui/ScreenState';
 import { colors, typography } from '@/constants/theme';
+import type { ManualActivityKind } from '@/data/HealthRepository';
 import { useHistoryOverview } from '@/hooks/useHealthData';
 import { useHealthRepository, useRefreshHealthData } from '@/providers/HealthDataProvider';
 import { logMobilePerf, logMobilePerfError } from '@/utils/mobilePerf';
@@ -141,7 +142,7 @@ export function HistoryScreen() {
     await repository.dismissActivity(activityId);
     refreshAfterActivityMutation();
   }, [refreshAfterActivityMutation, repository]);
-  const handleRelabelHeartActivity = useCallback(async (activityId: string, activity: 'Activity' | 'Walk' | 'Workout' | 'Nap') => {
+  const handleRelabelHeartActivity = useCallback(async (activityId: string, activity: ManualActivityKind) => {
     await repository.relabelActivity(activityId, activity);
     refreshAfterActivityMutation();
   }, [refreshAfterActivityMutation, repository]);

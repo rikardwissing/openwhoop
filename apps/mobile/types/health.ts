@@ -243,6 +243,7 @@ export interface ActivitySummary extends EstimatedValueMeta {
   strain: number | null;
   calories: number | null;
   confidence?: number | null;
+  isInProgress?: boolean;
   source?: ActivitySource;
   reviewState?: ActivityReviewState;
   strainLabel?: string;

@@ -1,6 +1,8 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 
 import type {
+  ActiveActivity,
+  ActiveActivityFinishSummary,
   ActivityRescanResult,
   HealthRepository,
   ManualActivityKind,
@@ -450,13 +452,22 @@ interface ActivityRow {
   review_state: string | null;
 }
 
+interface ActiveActivityRow {
+  id: number;
+  activity: string;
+  start: string;
+  created_at: string;
+  updated_at: string;
+}
+
 interface ActivityRecord {
   id: string;
   periodId: string;
   start: Date;
   end: Date;
-  activity: 'Activity' | 'Walk' | 'Workout' | 'Nap';
+  activity: ManualActivityKind;
   confidence: number | null;
+  isInProgress?: boolean;
   source: ActivitySource;
   reviewState: ActivityReviewState;
 }
@@ -714,7 +725,8 @@ const aggregateAccessLocks = new WeakMap<object, Promise<void>>();
 const HEART_METRIC_UPDATE_BATCH_SIZE = 200;
 const SLEEP_CYCLE_SELECT_COLUMNS = 'id, sleep_id, start, end, min_bpm, max_bpm, avg_bpm, min_hrv, max_hrv, avg_hrv, avg_skin_temp, score, completion_status';
 const ACTIVITY_SELECT_COLUMNS = 'id, period_id, start, end, activity, confidence, source, review_state';
-const MANUAL_ACTIVITY_KINDS = new Set<ManualActivityKind>(['Activity', 'Walk', 'Workout', 'Nap']);
+const MANUAL_ACTIVITY_KINDS = new Set<ManualActivityKind>(['Activity', 'Walk', 'Workout', 'Running', 'Nap']);
+const ACTIVE_ACTIVITY_KINDS = new Set<ManualActivityKind>(['Activity', 'Walk', 'Workout', 'Running']);
 const PERSONALIZABLE_ACTIVITY_NAMES = ['Activity', 'Walk', 'Workout'] as const;
 const ACTIVITY_PERSONALIZATION_MIN_REVIEWED_SAMPLES = 2;
 const ACTIVITY_PERSONALIZATION_MAX_DURATION_REDUCTION_MINUTES = 4;
@@ -939,10 +951,47 @@ function toActivityRecord(row: ActivityRow): ActivityRecord {
           ? 'Walk'
           : row.activity === 'Workout'
             ? 'Workout'
-            : 'Activity',
+            : row.activity === 'Running'
+              ? 'Running'
+              : 'Activity',
         confidence,
         source,
         reviewState,
+  };
+}
+
+function toActiveActivity(row: ActiveActivityRow, now = new Date()): ActiveActivity {
+  const start = parseSqliteDateTime(row.start);
+  const activity =
+    row.activity === 'Nap'
+      ? 'Nap'
+      : row.activity === 'Walk'
+        ? 'Walk'
+        : row.activity === 'Workout'
+          ? 'Workout'
+          : row.activity === 'Running'
+            ? 'Running'
+            : 'Activity';
+
+  return {
+    id: `active-${row.id}`,
+    activity,
+    start,
+    elapsedMinutes: Math.max(0, Math.round((now.getTime() - start.getTime()) / 60000)),
+  };
+}
+
+function activeActivityToRecord(activity: ActiveActivity, end = new Date()): ActivityRecord {
+  return {
+    id: activity.id,
+    periodId: dateKey(end),
+    start: activity.start,
+    end,
+    activity: activity.activity,
+    confidence: null,
+    isInProgress: true,
+    source: 'manual',
+    reviewState: 'confirmed',
   };
 }
 
@@ -3009,16 +3058,23 @@ async function loadActivitiesOverlappingRange(db: SQLiteDatabase, start: Date, e
   const startSql = formatSqliteDateTime(start);
   const endSql = formatSqliteDateTime(end);
 
-  return queryActivities(
-    db,
-    `
-      SELECT ${ACTIVITY_SELECT_COLUMNS}
-      FROM activities
-      WHERE start <= ? AND end >= ? AND review_state <> 'dismissed'
-      ORDER BY start ASC
-    `,
-    [endSql, startSql],
-  );
+  const [activities, activeActivity] = await Promise.all([
+    queryActivities(
+      db,
+      `
+        SELECT ${ACTIVITY_SELECT_COLUMNS}
+        FROM activities
+        WHERE start <= ? AND end >= ? AND review_state <> 'dismissed'
+        ORDER BY start ASC
+      `,
+      [endSql, startSql],
+    ),
+    loadActiveActivityRecordOverlappingRange(db, start, end),
+  ]);
+
+  return activeActivity
+    ? [...activities, activeActivity].sort((left, right) => left.start.getTime() - right.start.getTime())
+    : activities;
 }
 
 async function loadReviewedActivityOverlapsRange(db: SQLiteDatabase, start: Date, end: Date) {
@@ -3634,16 +3690,17 @@ async function buildDashboardSupplement(options: {
       return {
         id: activity.id,
         title: activity.activity,
-        timeLabel: formatClock(activity.start),
+        timeLabel: activity.isInProgress ? `${formatClock(activity.start)} - now` : formatClock(activity.start),
         durationMinutes,
         strain: calculateStrainFromBucketRows(rows, options.maxHr, options.restingHr, durationMinutes),
         calories: estimateCaloriesFromBucketRows(rows, options.maxHr, options.restingHr, durationMinutes),
         isEstimated: true,
+        isInProgress: activity.isInProgress,
         confidence: activity.confidence,
         source: activity.source,
         reviewState: activity.reviewState,
-        strainLabel: 'Estimated strain',
-        caloriesLabel: 'Estimated calories',
+        strainLabel: activity.isInProgress ? 'Live strain estimate' : 'Estimated strain',
+        caloriesLabel: activity.isInProgress ? 'Live calories estimate' : 'Estimated calories',
       };
     });
 
@@ -3893,6 +3950,7 @@ function buildHeartIntradayActivityDetails(activity: ActivityRecord): HeartIntra
   return {
     durationMinutes: Math.max(1, Math.round(exactMinutesBetween(activity.start, activity.end))),
     confidence: activity.confidence,
+    isInProgress: activity.isInProgress,
     source: activity.source,
     reviewState: activity.reviewState,
   };
@@ -3939,8 +3997,10 @@ function buildHeartIntradayMarkers(
     return [{
       id: activity.id,
       kind: activity.activity === 'Nap' ? 'nap' : 'activity',
-      label: activity.activity,
-      timeLabel: `${formatClock(range.start)} - ${formatClock(range.end)}`,
+      label: activity.isInProgress ? `${activity.activity} in progress` : activity.activity,
+      timeLabel: activity.isInProgress
+        ? `${formatClock(range.start)} - now`
+        : `${formatClock(range.start)} - ${formatClock(range.end)}`,
       startFraction: range.startFraction,
       endFraction: range.endFraction,
       startTimeMs: range.start.getTime(),
@@ -4298,6 +4358,57 @@ async function querySleepCycles(db: SQLiteDatabase, sql: string, args: Array<str
 
 async function queryActivities(db: SQLiteDatabase, sql: string, args: Array<string | number> = []) {
   return (await db.getAllAsync<ActivityRow>(sql, ...args)).map(toActivityRecord);
+}
+
+async function loadActiveActivity(db: SQLiteDatabase, now = new Date()) {
+  const row = await db.getFirstAsync<ActiveActivityRow>(
+    `
+      SELECT id, activity, start, created_at, updated_at
+      FROM active_activities
+      WHERE id = 1
+      LIMIT 1
+    `,
+  );
+
+  return row ? toActiveActivity(row, now) : null;
+}
+
+async function loadActiveActivityRecordOverlappingRange(db: SQLiteDatabase, start: Date, end: Date) {
+  const active = await loadActiveActivity(db);
+  if (!active) {
+    return null;
+  }
+
+  const activeEnd = new Date(Math.max(end.getTime(), Date.now()));
+  if (active.start.getTime() > end.getTime() || activeEnd.getTime() < start.getTime()) {
+    return null;
+  }
+
+  return activeActivityToRecord(active, activeEnd);
+}
+
+async function loadActiveActivityFinishMetrics(
+  db: SQLiteDatabase,
+  start: Date,
+  end: Date,
+): Promise<Pick<ActiveActivityFinishSummary, 'averageHr' | 'maxHr' | 'strain' | 'calories'>> {
+  const durationMinutes = Math.max(1, Math.round((end.getTime() - start.getTime()) / 60000));
+  const heartRows = await queryHeartMetricRowsBetween(db, start, end);
+  const bpms = heartRows
+    .map((row) => sanitizeRecordedBpm(row.bpm))
+    .filter((value): value is number => value !== null);
+  const averageHr = bpms.length > 0 ? Math.round(mean(bpms)) : null;
+  const maxHr = sustainedPeakBpm(bpms);
+  const restingHr = Math.max(45, Math.min(90, Math.round((bpms.length > 0 ? Math.min(...bpms) : 60))));
+  const personalizedMaxHr = personalizeMaxHr(bpms, restingHr);
+  const bucketRows = await loadHeartBucketRowsBetweenRange(db, start, end);
+
+  return {
+    averageHr,
+    maxHr,
+    strain: calculateStrainFromBucketRows(bucketRows, personalizedMaxHr, restingHr, durationMinutes),
+    calories: estimateCaloriesFromBucketRows(bucketRows, personalizedMaxHr, restingHr, durationMinutes),
+  };
 }
 
 async function loadHeartMetricRowsForDay(db: SQLiteDatabase, dayKey: string) {
@@ -5577,18 +5688,26 @@ async function loadLatestHeartTimeForDay(db: SQLiteDatabase, dayKey: string) {
 async function loadActivitiesForDay(db: SQLiteDatabase, dayKey: string, limit: number) {
   const dayStartSql = formatSqliteDateTime(startOfDayFromDayKey(dayKey));
   const nextDaySql = formatSqliteDateTime(nextDayFromDayKey(dayKey));
+  const dayStart = startOfDayFromDayKey(dayKey);
+  const dayEnd = nextDayFromDayKey(dayKey);
 
-  return queryActivities(
-    db,
-    `
-      SELECT ${ACTIVITY_SELECT_COLUMNS}
-      FROM activities
-      WHERE start >= ? AND start < ? AND activity <> 'Nap' AND review_state <> 'dismissed'
-      ORDER BY start DESC
-      LIMIT ?
-    `,
-    [dayStartSql, nextDaySql, limit],
-  );
+  const [activities, activeActivity] = await Promise.all([
+    queryActivities(
+      db,
+      `
+        SELECT ${ACTIVITY_SELECT_COLUMNS}
+        FROM activities
+        WHERE start >= ? AND start < ? AND activity <> 'Nap' AND review_state <> 'dismissed'
+        ORDER BY start DESC
+        LIMIT ?
+      `,
+      [dayStartSql, nextDaySql, limit],
+    ),
+    loadActiveActivityRecordOverlappingRange(db, dayStart, dayEnd),
+  ]);
+
+  const rows = activeActivity ? [activeActivity, ...activities] : activities;
+  return rows.slice(0, limit);
 }
 
 async function loadHeartBucketRowsBetweenRange(
@@ -7748,6 +7867,110 @@ export class SQLiteHealthRepository implements HealthRepository {
       return {
         removedUnconfirmedActivities,
       };
+    });
+  }
+
+  async getActiveActivity(): Promise<ActiveActivity | null> {
+    await this.waitForRepositoryMutations();
+    return loadActiveActivity(this.db);
+  }
+
+  async startActiveActivity(activity: ManualActivityKind, start: Date): Promise<ActiveActivity> {
+    if (!ACTIVE_ACTIVITY_KINDS.has(activity)) {
+      throw new Error('Start a live activity as Activity, Walk, Workout, or Running.');
+    }
+
+    if (start.getTime() > Date.now() + 60_000) {
+      throw new Error('Active activity start cannot be in the future.');
+    }
+
+    return this.runRepositoryMutation(async () => {
+      const current = await loadActiveActivity(this.db);
+      if (current) {
+        throw new Error('An activity is already in progress.');
+      }
+
+      const nowSql = formatSqliteDateTime(new Date());
+      await this.db.runAsync(
+        `
+          INSERT INTO active_activities (id, activity, start, created_at, updated_at)
+          VALUES (1, ?, ?, ?, ?)
+        `,
+        activity,
+        formatSqliteDateTime(start),
+        nowSql,
+        nowSql,
+      );
+
+      const active = await loadActiveActivity(this.db);
+      if (!active) {
+        throw new Error('Unable to start this activity right now.');
+      }
+
+      return active;
+    });
+  }
+
+  async finishActiveActivity(end: Date): Promise<ActiveActivityFinishSummary | null> {
+    return this.runRepositoryMutation(async () => {
+      const active = await loadActiveActivity(this.db, end);
+      if (!active) {
+        return null;
+      }
+
+      const resolvedEnd = end.getTime() > active.start.getTime()
+        ? end
+        : new Date(active.start.getTime() + 1000);
+      const startSql = formatSqliteDateTime(active.start);
+      const endSql = formatSqliteDateTime(resolvedEnd);
+
+      await this.db.runAsync(
+        `
+          INSERT INTO activities (period_id, start, end, activity, synced, source, review_state)
+          VALUES (?, ?, ?, ?, 0, 'manual', 'confirmed')
+          ON CONFLICT(start) DO UPDATE SET
+            period_id = excluded.period_id,
+            end = excluded.end,
+            activity = excluded.activity,
+            synced = 0,
+            source = 'manual',
+            review_state = 'confirmed'
+        `,
+        dateKey(resolvedEnd),
+        startSql,
+        endSql,
+        active.activity,
+      );
+
+      const row = await this.db.getFirstAsync<{ id: number }>(
+        `
+          SELECT id
+          FROM activities
+          WHERE start = ?
+          LIMIT 1
+        `,
+        startSql,
+      );
+
+      await this.db.runAsync('DELETE FROM active_activities WHERE id = 1');
+      await rebuildActivityDetectorPersonalization(this.db);
+
+      const metrics = await loadActiveActivityFinishMetrics(this.db, active.start, resolvedEnd);
+
+      return {
+        id: row ? `manual-${row.id}` : `manual-${startSql}`,
+        activity: active.activity,
+        start: active.start,
+        end: resolvedEnd,
+        durationMinutes: Math.max(1, Math.round((resolvedEnd.getTime() - active.start.getTime()) / 60000)),
+        ...metrics,
+      };
+    });
+  }
+
+  async cancelActiveActivity(): Promise<void> {
+    await this.runRepositoryMutation(async () => {
+      await this.db.runAsync('DELETE FROM active_activities WHERE id = 1');
     });
   }
 
