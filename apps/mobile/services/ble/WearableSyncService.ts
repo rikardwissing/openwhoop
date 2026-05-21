@@ -6,6 +6,7 @@ import {
   refreshHeartAggregatesForRange,
   resolveNextWearableAlarmDateFromDatabase,
 } from '@/data/sqlite/SQLiteHealthRepository';
+import { isDatabaseLockedError } from '@/db/resilientDatabase';
 import {
   acquireBackgroundSyncLock,
   recordBackgroundRunResult,
@@ -990,7 +991,23 @@ export class WearableSyncService {
     }).catch(() => {});
 
     const lockOwner = `${source}:${Date.now()}`;
-    const lockAcquired = await acquireBackgroundSyncLock(this.db, lockOwner);
+    let shouldReleaseDatabaseLock = false;
+    let lockAcquired = true;
+
+    try {
+      lockAcquired = await acquireBackgroundSyncLock(this.db, lockOwner);
+      shouldReleaseDatabaseLock = lockAcquired;
+    } catch (error) {
+      if (!isDatabaseLockedError(error)) {
+        throw error;
+      }
+
+      console.warn(
+        '[wearable-sync] Continuing without SQLite sync lock because the database was busy',
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+
     if (!lockAcquired) {
       const completedAt = formatSqliteDateTime(new Date());
       await recordBackgroundRunResult(this.db, {
@@ -1694,16 +1711,18 @@ export class WearableSyncService {
 
       await connectionLease?.release({ disconnectIfIdle: !options?.requireExistingConnection });
 
-      await releaseBackgroundSyncLock(this.db, lockOwner).catch((error) => {
-        console.warn(
-          '[wearable-sync] Failed to release background sync lock',
-          JSON.stringify({
-            owner: lockOwner,
-            source,
-            error: error instanceof Error ? error.message : String(error),
-          }),
-        );
-      });
+      if (shouldReleaseDatabaseLock) {
+        await releaseBackgroundSyncLock(this.db, lockOwner).catch((error) => {
+          console.warn(
+            '[wearable-sync] Failed to release background sync lock',
+            JSON.stringify({
+              owner: lockOwner,
+              source,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          );
+        });
+      }
     }
   }
 

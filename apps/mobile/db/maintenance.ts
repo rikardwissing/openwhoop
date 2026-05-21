@@ -330,14 +330,12 @@ async function backfillHeartRateSensorColumns(
     return 0;
   }
 
-  await db.execAsync('BEGIN IMMEDIATE;');
-
-  try {
+  await db.withExclusiveTransactionAsync(async (tx) => {
     for (let index = 0; index < rows.length; index += 1) {
       const row = rows[index]!;
       const migrated = parseSensorDataBackfillRow(row.id, row.sensor_data);
 
-      await db.runAsync(
+      await tx.runAsync(
         `
           UPDATE heart_rate
           SET
@@ -377,15 +375,7 @@ async function backfillHeartRateSensorColumns(
 
       options?.onProgress?.(index + 1, rows.length);
     }
-
-    await db.execAsync('COMMIT;');
-  } catch (error) {
-    try {
-      await db.execAsync('ROLLBACK;');
-    } catch {}
-
-    throw error;
-  }
+  });
 
   return rows.length;
 }

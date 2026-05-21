@@ -273,6 +273,7 @@ private struct UnstrapIntentEventRecord: Encodable {
 @available(iOS 16.0, *)
 private struct UnstrapIntentStore {
   private let databaseName = "btwearable.db"
+  private let databaseBusyTimeoutMs: Int32 = 10_000
 
   func latestEvent(kind: UnstrapIntentEventKind, includeHandled: Bool) throws -> String {
     let records = try queryEvents(
@@ -554,7 +555,7 @@ private struct UnstrapIntentStore {
       ])
     }
 
-    sqlite3_busy_timeout(database, 1000)
+    sqlite3_busy_timeout(database, databaseBusyTimeoutMs)
     defer {
       sqlite3_close(database)
     }

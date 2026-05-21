@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
-import { useSQLiteContext } from 'expo-sqlite';
 
+import { useAppDatabase } from '@/providers/AppDatabaseProvider';
 import { updateTonightWidget } from '@/services/widgets/tonightWidget';
 import type { SleepHistoryData } from '@/types/health';
 
@@ -69,7 +69,7 @@ function widgetSyncKey({
 }
 
 export function TonightWidgetPlanSync(props: TonightWidgetSyncData) {
-  const db = useSQLiteContext();
+  const db = useAppDatabase();
   const syncKey = widgetSyncKey(props);
 
   useEffect(() => {

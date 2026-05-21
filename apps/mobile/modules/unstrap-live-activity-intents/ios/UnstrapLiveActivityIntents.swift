@@ -190,6 +190,7 @@ private enum UnstrapNotificationPayload {
 
 private struct UnstrapLiveActivityEventStore {
   private let databaseName = "btwearable.db"
+  private let databaseBusyTimeoutMs: Int32 = 10_000
 
   func latestPropsJSON() -> String? {
     withDatabase { database in
@@ -234,7 +235,7 @@ private struct UnstrapLiveActivityEventStore {
       return nil
     }
 
-    sqlite3_busy_timeout(database, 1000)
+    sqlite3_busy_timeout(database, databaseBusyTimeoutMs)
     defer {
       sqlite3_close(database)
     }

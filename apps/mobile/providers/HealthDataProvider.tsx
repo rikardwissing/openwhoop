@@ -1,8 +1,8 @@
 import { createContext, useCallback, useContext, useState, type ReactNode } from 'react';
-import { useSQLiteContext } from 'expo-sqlite';
 
 import type { HealthRefreshScope, HealthRepository } from '@/data/HealthRepository';
 import { SQLiteHealthRepository } from '@/data/sqlite/SQLiteHealthRepository';
+import { useAppDatabase } from '@/providers/AppDatabaseProvider';
 
 interface HealthVersionState {
   dashboard: number;
@@ -98,7 +98,7 @@ function HealthRepositoryProvider({
 }
 
 function SQLiteRepositoryProvider({ children }: { children: ReactNode }) {
-  const db = useSQLiteContext();
+  const db = useAppDatabase();
   const [repository] = useState<HealthRepository>(() => new SQLiteHealthRepository(db));
 
   return (

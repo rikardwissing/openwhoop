@@ -4,6 +4,7 @@ const SYNC_RECENT_START_COOLDOWN_MS = 2 * 60 * 1000;
 const SYNC_SUCCESS_COOLDOWN_MS = 10 * 60 * 1000;
 const LAST_STARTED_KEY = '@unstrap/wearable-sync/last-started';
 const LAST_SUCCESS_KEY = '@unstrap/wearable-sync/last-success';
+let syncStartReservationQueue = Promise.resolve();
 
 export type SyncCooldownSkipReason = 'sync-started-cooldown' | 'sync-success-cooldown';
 
@@ -51,4 +52,21 @@ export async function recordSyncCooldownStarted(nowMs = Date.now()) {
 
 export async function recordSyncCooldownSuccess(nowMs = Date.now()) {
   await writeTimestamp(LAST_SUCCESS_KEY, nowMs);
+}
+
+export async function reserveSyncCooldownStart(nowMs = Date.now()): Promise<SyncCooldownSkip | null> {
+  const reservation = syncStartReservationQueue
+    .catch(() => {})
+    .then(async () => {
+      const skip = await resolveSyncCooldown(nowMs);
+      if (skip) {
+        return skip;
+      }
+
+      await recordSyncCooldownStarted(nowMs);
+      return null;
+    });
+
+  syncStartReservationQueue = reservation.then(() => undefined, () => undefined);
+  return reservation;
 }

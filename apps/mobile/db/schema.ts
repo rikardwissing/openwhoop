@@ -124,36 +124,37 @@ export async function rewriteHeartRateTable(
   await db.execAsync('PRAGMA foreign_keys = OFF;');
 
   try {
-    await db.execAsync(`
-      BEGIN IMMEDIATE;
-      DROP TABLE IF EXISTS heart_rate_next;
-    `);
-    options?.onProgress?.({
-      phase: 'creating_replacement_table',
-      completedUnits: 1,
-      totalUnits: REWRITE_HEART_RATE_TABLE_PROGRESS_UNITS,
+    await db.withExclusiveTransactionAsync(async (tx) => {
+      await tx.execAsync('DROP TABLE IF EXISTS heart_rate_next;');
+
+      options?.onProgress?.({
+        phase: 'creating_replacement_table',
+        completedUnits: 1,
+        totalUnits: REWRITE_HEART_RATE_TABLE_PROGRESS_UNITS,
+      });
+      await tx.execAsync(buildCreateHeartRateTableSql('heart_rate_next'));
+
+      options?.onProgress?.({
+        phase: 'copying_rows',
+        completedUnits: 2,
+        totalUnits: REWRITE_HEART_RATE_TABLE_PROGRESS_UNITS,
+      });
+      await tx.execAsync(`
+        INSERT INTO heart_rate_next (${HEART_RATE_TABLE_SELECT_COLUMNS})
+        SELECT ${HEART_RATE_TABLE_SELECT_COLUMNS}
+        FROM heart_rate;
+      `);
+
+      options?.onProgress?.({
+        phase: 'swapping_tables',
+        completedUnits: 3,
+        totalUnits: REWRITE_HEART_RATE_TABLE_PROGRESS_UNITS,
+      });
+      await tx.execAsync(`
+        DROP TABLE heart_rate;
+        ALTER TABLE heart_rate_next RENAME TO heart_rate;
+      `);
     });
-    await db.execAsync(buildCreateHeartRateTableSql('heart_rate_next'));
-    options?.onProgress?.({
-      phase: 'copying_rows',
-      completedUnits: 2,
-      totalUnits: REWRITE_HEART_RATE_TABLE_PROGRESS_UNITS,
-    });
-    await db.execAsync(`
-      INSERT INTO heart_rate_next (${HEART_RATE_TABLE_SELECT_COLUMNS})
-      SELECT ${HEART_RATE_TABLE_SELECT_COLUMNS}
-      FROM heart_rate;
-    `);
-    options?.onProgress?.({
-      phase: 'swapping_tables',
-      completedUnits: 3,
-      totalUnits: REWRITE_HEART_RATE_TABLE_PROGRESS_UNITS,
-    });
-    await db.execAsync(`
-      DROP TABLE heart_rate;
-      ALTER TABLE heart_rate_next RENAME TO heart_rate;
-      COMMIT;
-    `);
     options?.onProgress?.({
       phase: 'complete',
       completedUnits: REWRITE_HEART_RATE_TABLE_PROGRESS_UNITS,
@@ -161,7 +162,7 @@ export async function rewriteHeartRateTable(
     });
   } catch (error) {
     try {
-      await db.execAsync('ROLLBACK; DROP TABLE IF EXISTS heart_rate_next;');
+      await db.execAsync('DROP TABLE IF EXISTS heart_rate_next;');
     } catch {}
 
     throw error;

@@ -24,9 +24,8 @@ import {
 } from '@/services/notifications/missingDeviceDataReminders';
 import { updateTonightWidget } from '@/services/widgets/tonightWidget';
 import {
-  recordSyncCooldownStarted,
   recordSyncCooldownSuccess,
-  resolveSyncCooldown,
+  reserveSyncCooldownStart,
   type SyncCooldownSkipReason,
 } from '@/services/background/syncCooldown';
 
@@ -201,12 +200,10 @@ async function executeBackgroundDeviceSyncAsync(options: {
   );
   await ensureBackgroundDeviceSyncNotificationChannelAsync();
 
-  const cooldownSkip = await resolveSyncCooldown(runStartedAtMs);
+  const cooldownSkip = await reserveSyncCooldownStart(runStartedAtMs);
   if (cooldownSkip) {
     return buildSkippedRunResult(cooldownSkip.reason, notificationPermissionGranted);
   }
-
-  await recordSyncCooldownStarted(runStartedAtMs);
 
   try {
     db = options.db ?? await openAppDatabaseAsync();

@@ -19,6 +19,7 @@ import {
   type StartupMigrationInspection,
   type StartupMigrationProgress,
 } from '@/db/maintenance';
+import { createResilientDatabase } from '@/db/resilientDatabase';
 import { APP_DATABASE_NAME, initializeDatabase } from '@/db/schema';
 
 const AppDatabaseContext = createContext<SQLiteDatabase | null>(null);
@@ -28,6 +29,10 @@ interface AppDatabaseControlsValue {
 }
 
 const AppDatabaseControlsContext = createContext<AppDatabaseControlsValue | null>(null);
+
+async function initializeResilientAppDatabase(db: SQLiteDatabase) {
+  await initializeDatabase(createResilientDatabase(db));
+}
 
 function AppDatabaseStatusScreen({
   actionLabel,
@@ -282,7 +287,8 @@ function AppDatabaseBridge({
   onDatabaseChange: (db: SQLiteDatabase | null) => void;
   onDatabaseReady: (db: SQLiteDatabase) => void;
 }) {
-  const db = useSQLiteContext();
+  const rawDb = useSQLiteContext();
+  const db = useMemo(() => createResilientDatabase(rawDb), [rawDb]);
 
   useEffect(() => {
     onDatabaseChange(db);
@@ -392,8 +398,8 @@ export function AppDatabaseProvider({ children }: { children: ReactNode }) {
         <SQLiteProvider
           key={providerRevision}
           databaseName={APP_DATABASE_NAME}
-          options={{ useNewConnection: true }}
-          onInit={initializeDatabase}>
+          options={{ useNewConnection: false }}
+          onInit={initializeResilientAppDatabase}>
           <AppDatabaseBridge onDatabaseChange={handleDatabaseChange} onDatabaseReady={handleDatabaseReady}>
             {children}
           </AppDatabaseBridge>
@@ -405,6 +411,16 @@ export function AppDatabaseProvider({ children }: { children: ReactNode }) {
 
 export function useOptionalAppDatabase() {
   return useContext(AppDatabaseContext);
+}
+
+export function useAppDatabase() {
+  const db = useOptionalAppDatabase();
+
+  if (!db) {
+    throw new Error('App database is not available.');
+  }
+
+  return db;
 }
 
 export function useOptionalAppDatabaseControls() {

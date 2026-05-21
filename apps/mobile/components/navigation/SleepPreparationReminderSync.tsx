@@ -1,13 +1,13 @@
 import { useEffect, useState } from 'react';
 import { AppState } from 'react-native';
-import { useSQLiteContext } from 'expo-sqlite';
 
+import { useAppDatabase } from '@/providers/AppDatabaseProvider';
 import { useHealthDataVersion, useHealthRepository } from '@/providers/HealthDataProvider';
 import { syncSleepPreparationReminder } from '@/services/notifications/sleepPreparationReminder';
 import { updateTonightWidget } from '@/services/widgets/tonightWidget';
 
 export function SleepPreparationReminderSync() {
-  const db = useSQLiteContext();
+  const db = useAppDatabase();
   const repository = useHealthRepository();
   const version = useHealthDataVersion('sleep');
   const [resumeTick, setResumeTick] = useState(0);

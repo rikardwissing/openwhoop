@@ -9,12 +9,11 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { useSQLiteContext } from 'expo-sqlite';
 import { AppState, type AppStateStatus } from 'react-native';
 
 import { openAppDatabaseAsync } from '@/db/appDatabase';
 import { useHealthRepository, useRefreshHealthData } from '@/providers/HealthDataProvider';
-import { useAppDatabaseControls } from '@/providers/AppDatabaseProvider';
+import { useAppDatabase, useAppDatabaseControls } from '@/providers/AppDatabaseProvider';
 import {
   registerBackgroundDeviceSyncTaskAsync,
   runBackgroundDeviceSyncWithServiceAsync,
@@ -281,7 +280,7 @@ export function WearableSyncContextProvider({
 }
 
 export function WearableSyncProvider({ children }: { children: ReactNode }) {
-  const db = useSQLiteContext();
+  const db = useAppDatabase();
   const healthRepository = useHealthRepository();
   const refreshHealthData = useRefreshHealthData();
   const { loadSeededData: loadBundledAppDatabase } = useAppDatabaseControls();

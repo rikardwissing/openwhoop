@@ -6,11 +6,12 @@ import {
 } from 'expo-sqlite';
 
 import { APP_DATABASE_NAME, initializeDatabase } from '@/db/schema';
+import { createResilientDatabase } from '@/db/resilientDatabase';
 
 const seededDatabaseAsset = require('../assets/databases/btwearable.db');
 
 export async function openAppDatabaseAsync(): Promise<SQLiteDatabase> {
-  const db = await openDatabaseAsync(APP_DATABASE_NAME, { useNewConnection: true });
+  const db = createResilientDatabase(await openDatabaseAsync(APP_DATABASE_NAME, { useNewConnection: true }));
   await initializeDatabase(db);
   return db;
 }
