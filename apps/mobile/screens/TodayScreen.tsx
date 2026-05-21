@@ -147,6 +147,7 @@ export function TodayScreen() {
     setActiveActivity(nextActiveActivity);
     setActiveActivityVersion((current) => current + 1);
     refreshAfterActivityMutation();
+    router.replace('/activity-in-progress' as never);
 
     void startOrUpdateActivityLiveActivity(nextActiveActivity, {
       liveHeartRate: showLiveHeartRate ? deviceState.liveHeartRate : null,
@@ -157,6 +158,7 @@ export function TodayScreen() {
     deviceState.liveHeartRate,
     refreshAfterActivityMutation,
     repository,
+    router,
     showLiveHeartRate,
   ]);
   const handleRefreshToday = useCallback(async () => {

@@ -946,6 +946,7 @@ export function HeartCard({
   const [pendingActivityActionKey, setPendingActivityActionKey] = useState<string | null>(null);
   const [activityActionError, setActivityActionError] = useState<string | null>(null);
   const [draftLiveActivityEnabled, setDraftLiveActivityEnabled] = useState(false);
+  const [isLiveStartTransitioning, setIsLiveStartTransitioning] = useState(false);
   const [relabelModalVisible, setRelabelModalVisible] = useState(false);
   const [focusedDetailState, setFocusedDetailState] = useState<{
     key: string | null;
@@ -1147,7 +1148,10 @@ export function HeartCard({
     !editingBaseMarker &&
     !activeActivity,
   );
-  const liveActivityDraftEnabled = Boolean(draftLiveActivityMode && canToggleDraftLiveActivity);
+  const liveActivityDraftEnabled = Boolean(
+    (draftLiveActivityMode && canToggleDraftLiveActivity) ||
+    (isLiveStartTransitioning && isDraftEditing),
+  );
   const isAwaitingChartFocus = Boolean(
     chartFocusRequest?.markerId != null && chartFocusedMarker?.id !== chartFocusRequest.markerId,
   );
@@ -1903,12 +1907,14 @@ export function HeartCard({
 
     setActivityActionError(null);
     setPendingActivityActionKey('draft:start-live');
+    setIsLiveStartTransitioning(true);
 
     try {
       await reviewActions.startActiveActivity(draftToStart.kind, new Date());
       setLatestJumpVersion((current) => current + 1);
       navigateHeartCard({ kind: 'overview' }, { clearChartFocus: true, jumpToLatest: true });
     } catch (error) {
+      setIsLiveStartTransitioning(false);
       setActivityActionError(error instanceof Error ? error.message : 'Unable to start this activity right now.');
     } finally {
       setPendingActivityActionKey(null);
@@ -2065,6 +2071,12 @@ export function HeartCard({
   }, [navigateHeartCard, pendingSavedMarkerFocusRequest, readySavedMarkerFromDb]);
 
   useEffect(() => {
+    if (screen.kind !== 'draft' && isLiveStartTransitioning) {
+      setIsLiveStartTransitioning(false);
+    }
+  }, [isLiveStartTransitioning, screen.kind]);
+
+  useEffect(() => {
     const shouldShowIdleActivityPanelAfterReset = Boolean(activityReviewActions?.createManualActivity && activityReviewActions?.createManualSleep);
 
     clearFocusedDetail();
@@ -2086,6 +2098,7 @@ export function HeartCard({
     setPendingSavedMarkerFocusRequest(null);
     setPendingActivityActionKey(null);
     setActivityActionError(null);
+    setIsLiveStartTransitioning(false);
     setRelabelModalVisible(false);
     cardHeaderTransitionProgress.value = 1;
     cardMetricsTransitionProgress.value = 1;

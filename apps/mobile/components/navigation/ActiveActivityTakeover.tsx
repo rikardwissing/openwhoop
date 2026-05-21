@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { usePathname, useRouter } from 'expo-router';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -42,8 +42,25 @@ export function ActiveActivityTakeover() {
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [pendingAction, setPendingAction] = useState<'stop' | 'cancel' | null>(null);
   const [activityError, setActivityError] = useState<string | null>(null);
+  const requestedExitRef = useRef(false);
   const activeActivityState = useGraphQLActiveActivity(heartVersion + localActiveVersion);
   const isStoppingRoute = pathname === '/activity-stop';
+
+  useEffect(() => {
+    if (activeActivityState.status !== 'ready' || activeActivityState.data || pathname !== '/activity-in-progress') {
+      if (pathname !== '/activity-in-progress') {
+        requestedExitRef.current = false;
+      }
+      return;
+    }
+
+    if (requestedExitRef.current) {
+      return;
+    }
+
+    requestedExitRef.current = true;
+    router.replace('/' as never);
+  }, [activeActivityState.data, activeActivityState.status, pathname, router]);
 
   useEffect(() => {
     if (activeActivityState.status === 'ready') {
@@ -119,11 +136,12 @@ export function ActiveActivityTakeover() {
       setActiveActivity(null);
       setLocalActiveVersion((current) => current + 1);
       refreshHealthData(ACTIVE_ACTIVITY_REFRESH_SCOPES);
+      router.replace('/' as never);
     } catch (error) {
       setActivityError(error instanceof Error ? error.message : 'Unable to cancel this activity right now.');
       setPendingAction(null);
     }
-  }, [activeActivity, pendingAction, refreshHealthData, repository]);
+  }, [activeActivity, pendingAction, refreshHealthData, repository, router]);
 
   if (!activeActivity || isStoppingRoute) {
     return null;

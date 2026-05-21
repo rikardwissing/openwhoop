@@ -3,7 +3,7 @@ import { Manrope_500Medium, Manrope_600SemiBold, Manrope_700Bold } from '@expo-g
 import { SpaceGrotesk_500Medium, SpaceGrotesk_700Bold } from '@expo-google-fonts/space-grotesk';
 import { useFonts } from 'expo-font';
 import * as Notifications from 'expo-notifications';
-import { Stack, useRouter } from 'expo-router';
+import { Stack, usePathname, useRouter } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { useEffect, useRef } from 'react';
 import { StyleSheet } from 'react-native';
@@ -11,11 +11,11 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { StatusBar } from 'expo-status-bar';
 
 import { SleepPreparationReminderSync } from '@/components/navigation/SleepPreparationReminderSync';
-import { ActiveActivityTakeover } from '@/components/navigation/ActiveActivityTakeover';
 import { WearableProgressOverlay } from '@/components/ui/WearableProgressOverlay';
 import { navTheme } from '@/constants/theme';
+import { useGraphQLActiveActivity } from '@/hooks/useGraphQLActiveActivity';
 import { AppDatabaseProvider } from '@/providers/AppDatabaseProvider';
-import { HealthDataProvider } from '@/providers/HealthDataProvider';
+import { HealthDataProvider, useHealthDataVersion } from '@/providers/HealthDataProvider';
 import { WearableSyncProvider, useWearableSyncState } from '@/providers/WearableSyncProvider';
 import { routeFromNotificationData } from '@/services/notifications/notificationRouting';
 
@@ -26,6 +26,8 @@ export {
 export const unstable_settings = {
   initialRouteName: '(tabs)',
 };
+
+const ACTIVITY_ROUTE_PATHS = new Set(['/activity-in-progress', '/activity-stop']);
 
 SplashScreen.preventAutoHideAsync();
 
@@ -65,19 +67,84 @@ function RootLayoutNav() {
               <NotificationRouteSync />
               <StatusBar style="light" />
               <SleepPreparationReminderSync />
-              <Stack>
-                <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-                <Stack.Screen name="activity-stop" options={{ headerShown: false }} />
-                <Stack.Screen name="live-events" options={{ headerShown: false }} />
-                <Stack.Screen name="+not-found" options={{ title: 'Not Found' }} />
-              </Stack>
+              <RootStack />
               <WearableProgressOverlay />
-              <ActiveActivityTakeover />
             </WearableSyncProvider>
           </HealthDataProvider>
         </AppDatabaseProvider>
       </ThemeProvider>
     </GestureHandlerRootView>
+  );
+}
+
+function RootStack() {
+  const heartVersion = useHealthDataVersion('heart');
+  const activeActivityState = useGraphQLActiveActivity(heartVersion);
+  const pathname = usePathname();
+  const router = useRouter();
+  const requestedActiveIdRef = useRef<string | null>(null);
+  const requestedExitRef = useRef(false);
+
+  const activeId = activeActivityState.status === 'ready' ? activeActivityState.data?.id ?? null : null;
+  const isActivityRoute = ACTIVITY_ROUTE_PATHS.has(pathname);
+  const allowActivityRoutes = Boolean(activeId) || pathname === '/activity-stop';
+  const allowRegularRoutes = !activeId;
+
+  useEffect(() => {
+    if (!activeId) {
+      requestedActiveIdRef.current = null;
+      return;
+    }
+
+    requestedExitRef.current = false;
+
+    if (isActivityRoute) {
+      requestedActiveIdRef.current = activeId;
+      return;
+    }
+
+    if (requestedActiveIdRef.current === activeId) {
+      return;
+    }
+
+    requestedActiveIdRef.current = activeId;
+    router.replace('/activity-in-progress' as never);
+  }, [activeId, isActivityRoute, router]);
+
+  useEffect(() => {
+    if (activeActivityState.status !== 'ready' || activeId || pathname !== '/activity-in-progress') {
+      if (pathname !== '/activity-in-progress') {
+        requestedExitRef.current = false;
+      }
+      return;
+    }
+
+    if (requestedExitRef.current) {
+      return;
+    }
+
+    requestedExitRef.current = true;
+    router.replace('/' as never);
+  }, [activeActivityState.status, activeId, pathname, router]);
+
+  return (
+    <Stack>
+      <Stack.Protected guard={allowActivityRoutes}>
+        <Stack.Screen
+          name="(activity)"
+          options={{
+            animation: 'fade',
+            headerShown: false,
+          }}
+        />
+      </Stack.Protected>
+
+      <Stack.Protected guard={allowRegularRoutes}>
+        <Stack.Screen name="(tabs)" options={{ headerShown: false, animation: 'fade', }} />
+        <Stack.Screen name="live-events" options={{ headerShown: false }} />
+        <Stack.Screen name="+not-found" options={{ title: 'Not Found' }} />
+      </Stack.Protected>
+    </Stack>
   );
 }
 
