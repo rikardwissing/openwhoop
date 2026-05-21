@@ -11,8 +11,6 @@ import {
 } from '@expo/ui/swift-ui/modifiers';
 import { createLiveActivity } from 'expo-widgets';
 
-import { getActivityIconSemanticFromLabel } from '../utils/activityIconSemantics';
-
 export interface ActivityLiveActivityProps {
   activityId?: string;
   activityName?: string;
@@ -49,8 +47,37 @@ const ActivityLiveActivityComponent = (rawProps: ActivityLiveActivityProps) => {
     return `${Math.round(liveHeartRate)} bpm`;
   }
 
+  function activityIconSemantic() {
+    const normalized = activityName.trim().toLowerCase();
+
+    if (normalized.includes('nap')) {
+      return 'nap';
+    }
+
+    if (normalized.includes('run') || normalized.includes('jog') || normalized.includes('sprint')) {
+      return 'running';
+    }
+
+    if (normalized.includes('walk') || normalized.includes('stroll') || normalized.includes('hike')) {
+      return 'walk';
+    }
+
+    if (
+      normalized.includes('workout') ||
+      normalized.includes('mobility') ||
+      normalized.includes('strength') ||
+      normalized.includes('lift') ||
+      normalized.includes('training') ||
+      normalized.includes('gym')
+    ) {
+      return 'workout';
+    }
+
+    return 'activity';
+  }
+
   function activityIconName() {
-    switch (getActivityIconSemanticFromLabel(activityName)) {
+    switch (activityIconSemantic()) {
       case 'running':
         return 'figure.run';
       case 'walk':
