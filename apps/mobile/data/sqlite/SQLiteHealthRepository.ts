@@ -8,6 +8,15 @@ import type {
   ManualActivityKind,
 } from '@/data/HealthRepository';
 import {
+  expirePastOneOffSleepAlarmViaMutation,
+  insertLocalActiveActivity,
+  loadLocalActivitySourceById,
+  markOneOffSleepAlarmExecutedViaMutation,
+  updateLocalActivityById,
+  upsertLocalManualActivityByStart,
+  upsertLocalSleepPreferences,
+} from '@/data/graphql/localSqliteMutations';
+import {
   ACTIVITY_DETECTOR_DAYPARTS,
   DEFAULT_ACTIVITY_DETECTOR_THRESHOLDS,
   detectActivityArtifacts,
@@ -1862,39 +1871,17 @@ async function loadSleepPreferences(db: SQLiteDatabase, sleeps: SleepCycleRecord
 }
 
 async function persistSleepPreferences(db: SQLiteDatabase, preferences: SleepPreferences) {
-  await db.runAsync(
-    `
-      INSERT INTO sleep_preferences (
-        id,
-        target_wake_minutes,
-        alarm_enabled,
-        alarm_minutes,
-        alarm_schedule_kind,
-        alarm_weekday_mask,
-        alarm_wake_mode,
-        alarm_one_off_at,
-        updated_at
-      )
-      VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        target_wake_minutes = excluded.target_wake_minutes,
-        alarm_enabled = excluded.alarm_enabled,
-        alarm_minutes = excluded.alarm_minutes,
-        alarm_schedule_kind = excluded.alarm_schedule_kind,
-        alarm_weekday_mask = excluded.alarm_weekday_mask,
-        alarm_wake_mode = excluded.alarm_wake_mode,
-        alarm_one_off_at = excluded.alarm_one_off_at,
-        updated_at = excluded.updated_at
-    `,
-    preferences.targetWakeMinutes,
-    preferences.alarmEnabled ? 1 : 0,
-    preferences.targetWakeMinutes,
-    preferences.alarmScheduleKind,
-    preferences.alarmWeekdayMask,
-    preferences.alarmWakeMode,
-    preferences.alarmOneOffAt,
-    formatSqliteDateTime(new Date()),
-  );
+  await upsertLocalSleepPreferences(db, {
+    id: 1,
+    target_wake_minutes: preferences.targetWakeMinutes,
+    alarm_enabled: preferences.alarmEnabled ? 1 : 0,
+    alarm_minutes: preferences.targetWakeMinutes,
+    alarm_schedule_kind: preferences.alarmScheduleKind,
+    alarm_weekday_mask: preferences.alarmWeekdayMask,
+    alarm_wake_mode: preferences.alarmWakeMode,
+    alarm_one_off_at: preferences.alarmOneOffAt,
+    updated_at: formatSqliteDateTime(new Date()),
+  });
 }
 
 export function buildSleepPlan(
@@ -5535,39 +5522,14 @@ export async function expirePastOneOffSleepAlarmFromDatabase(
   db: SQLiteDatabase,
   now = new Date(),
 ) {
-  await db.runAsync(
-    `
-      UPDATE sleep_preferences
-      SET alarm_enabled = 0,
-          alarm_one_off_at = NULL,
-          updated_at = ?
-      WHERE id = 1
-        AND alarm_enabled = 1
-        AND alarm_schedule_kind = 'one_off'
-        AND alarm_one_off_at IS NOT NULL
-        AND alarm_one_off_at <= ?
-    `,
-    formatSqliteDateTime(now),
-    formatSqliteDateTime(now),
-  );
+  await expirePastOneOffSleepAlarmViaMutation(db, formatSqliteDateTime(now));
 }
 
 export async function markOneOffSleepAlarmExecutedFromDatabase(
   db: SQLiteDatabase,
   executedAt = new Date(),
 ) {
-  await db.runAsync(
-    `
-      UPDATE sleep_preferences
-      SET alarm_enabled = 0,
-          alarm_one_off_at = NULL,
-          updated_at = ?
-      WHERE id = 1
-        AND alarm_enabled = 1
-        AND alarm_schedule_kind = 'one_off'
-    `,
-    formatSqliteDateTime(executedAt),
-  );
+  await markOneOffSleepAlarmExecutedViaMutation(db, formatSqliteDateTime(executedAt));
 }
 
 async function loadDashboardDayKeys(db: SQLiteDatabase, limit: number) {
@@ -7736,16 +7698,13 @@ export class SQLiteHealthRepository implements HealthRepository {
       }
 
       const nowSql = formatSqliteDateTime(new Date());
-      await this.db.runAsync(
-        `
-          INSERT INTO active_activities (id, activity, start, created_at, updated_at)
-          VALUES (1, ?, ?, ?, ?)
-        `,
+      await insertLocalActiveActivity(this.db, {
+        id: 1,
         activity,
-        formatSqliteDateTime(start),
-        nowSql,
-        nowSql,
-      );
+        start: formatSqliteDateTime(start),
+        created_at: nowSql,
+        updated_at: nowSql,
+      });
 
       const active = await loadActiveActivity(this.db);
       if (!active) {
@@ -7769,33 +7728,15 @@ export class SQLiteHealthRepository implements HealthRepository {
       const startSql = formatSqliteDateTime(active.start);
       const endSql = formatSqliteDateTime(resolvedEnd);
 
-      await this.db.runAsync(
-        `
-          INSERT INTO activities (period_id, start, end, activity, synced, source, review_state)
-          VALUES (?, ?, ?, ?, 0, 'manual', 'confirmed')
-          ON CONFLICT(start) DO UPDATE SET
-            period_id = excluded.period_id,
-            end = excluded.end,
-            activity = excluded.activity,
-            synced = 0,
-            source = 'manual',
-            review_state = 'confirmed'
-        `,
-        dateKey(resolvedEnd),
-        startSql,
-        endSql,
-        active.activity,
-      );
-
-      const row = await this.db.getFirstAsync<{ id: number }>(
-        `
-          SELECT id
-          FROM activities
-          WHERE start = ?
-          LIMIT 1
-        `,
-        startSql,
-      );
+      const activityDatabaseId = await upsertLocalManualActivityByStart(this.db, {
+        period_id: dateKey(resolvedEnd),
+        start: startSql,
+        end: endSql,
+        activity: active.activity,
+        synced: 0,
+        source: 'manual',
+        review_state: 'confirmed',
+      });
 
       await this.db.runAsync('DELETE FROM active_activities WHERE id = 1');
       await rebuildActivityDetectorPersonalization(this.db);
@@ -7803,7 +7744,7 @@ export class SQLiteHealthRepository implements HealthRepository {
       const metrics = await loadActiveActivityFinishMetrics(this.db, active.start, resolvedEnd);
 
       return {
-        id: row ? `manual-${row.id}` : `manual-${startSql}`,
+        id: activityDatabaseId ? `manual-${activityDatabaseId}` : `manual-${startSql}`,
         activity: active.activity,
         start: active.start,
         end: resolvedEnd,
@@ -7832,37 +7773,19 @@ export class SQLiteHealthRepository implements HealthRepository {
       const startSql = formatSqliteDateTime(start);
       const endSql = formatSqliteDateTime(end);
 
-      await this.db.runAsync(
-        `
-          INSERT INTO activities (period_id, start, end, activity, synced, source, review_state)
-          VALUES (?, ?, ?, ?, 0, 'manual', 'confirmed')
-          ON CONFLICT(start) DO UPDATE SET
-            period_id = excluded.period_id,
-            end = excluded.end,
-            activity = excluded.activity,
-            synced = 0,
-            source = 'manual',
-            review_state = 'confirmed'
-        `,
-        dateKey(end),
-        startSql,
-        endSql,
+      const activityDatabaseId = await upsertLocalManualActivityByStart(this.db, {
+        period_id: dateKey(end),
+        start: startSql,
+        end: endSql,
         activity,
-      );
-
-      const row = await this.db.getFirstAsync<{ id: number }>(
-        `
-          SELECT id
-          FROM activities
-          WHERE start = ?
-          LIMIT 1
-        `,
-        startSql,
-      );
+        synced: 0,
+        source: 'manual',
+        review_state: 'confirmed',
+      });
 
       await rebuildActivityDetectorPersonalization(this.db);
 
-      return row ? `manual-${row.id}` : `manual-${startSql}`;
+      return activityDatabaseId ? `manual-${activityDatabaseId}` : `manual-${startSql}`;
     });
   }
 
@@ -7949,18 +7872,15 @@ export class SQLiteHealthRepository implements HealthRepository {
     }
 
     await this.runRepositoryMutation(async () => {
-      await this.db.runAsync(
-        `
-          UPDATE activities
-          SET period_id = ?, start = ?, end = ?, activity = ?, source = 'manual', review_state = 'confirmed', synced = 0
-          WHERE id = ?
-        `,
-        dateKey(end),
-        formatSqliteDateTime(start),
-        formatSqliteDateTime(end),
+      await updateLocalActivityById(this.db, databaseId, {
+        period_id: dateKey(end),
+        start: formatSqliteDateTime(start),
+        end: formatSqliteDateTime(end),
         activity,
-        databaseId,
-      );
+        source: 'manual',
+        review_state: 'confirmed',
+        synced: 0,
+      });
 
       await rebuildActivityDetectorPersonalization(this.db);
     });
@@ -8071,14 +7991,10 @@ export class SQLiteHealthRepository implements HealthRepository {
     }
 
     await this.runRepositoryMutation(async () => {
-      await this.db.runAsync(
-        `
-          UPDATE activities
-          SET review_state = 'confirmed', synced = 0
-          WHERE id = ?
-        `,
-        databaseId,
-      );
+      await updateLocalActivityById(this.db, databaseId, {
+        review_state: 'confirmed',
+        synced: 0,
+      });
 
       await rebuildActivityDetectorPersonalization(this.db);
     });
@@ -8091,14 +8007,10 @@ export class SQLiteHealthRepository implements HealthRepository {
     }
 
     await this.runRepositoryMutation(async () => {
-      await this.db.runAsync(
-        `
-          UPDATE activities
-          SET review_state = 'dismissed', synced = 0
-          WHERE id = ?
-        `,
-        databaseId,
-      );
+      await updateLocalActivityById(this.db, databaseId, {
+        review_state: 'dismissed',
+        synced: 0,
+      });
 
       await rebuildActivityDetectorPersonalization(this.db);
     });
@@ -8115,30 +8027,17 @@ export class SQLiteHealthRepository implements HealthRepository {
     }
 
     await this.runRepositoryMutation(async () => {
-      const row = await this.db.getFirstAsync<{ source: string | null }>(
-        `
-          SELECT source
-          FROM activities
-          WHERE id = ?
-          LIMIT 1
-        `,
-        databaseId,
-      );
+      const row = await loadLocalActivitySourceById(this.db, databaseId);
 
       if (!row) {
         throw new Error(`Activity not found: ${activityId}`);
       }
 
-      await this.db.runAsync(
-        `
-          UPDATE activities
-          SET activity = ?, review_state = ?, synced = 0
-          WHERE id = ?
-        `,
+      await updateLocalActivityById(this.db, databaseId, {
         activity,
-        row.source === 'manual' ? 'confirmed' : 'relabelled',
-        databaseId,
-      );
+        review_state: row.source === 'manual' ? 'confirmed' : 'relabelled',
+        synced: 0,
+      });
 
       await rebuildActivityDetectorPersonalization(this.db);
     });
