@@ -12,6 +12,10 @@ import {
   saveQuantitySample,
 } from '@kingstinct/react-native-healthkit';
 
+import {
+  deleteLocalAppleHealthExportState,
+  upsertLocalAppleHealthExportState,
+} from '@/data/graphql/localSqliteMutations';
 import { formatSqliteDateTime, parseSqliteDateTime } from '@/utils/dateTime';
 import { MAX_PLAUSIBLE_RECORDED_BPM, MIN_PLAUSIBLE_RECORDED_BPM } from '@/utils/heartRate';
 import {
@@ -62,7 +66,7 @@ const MAX_PLAUSIBLE_HRV_SDNN = 300;
 
 type AppleHealthExportMetric = 'sleep' | 'heartRate' | 'hrvSdnn' | 'oxygenSaturation' | 'respiratoryRate';
 
-type AppleHealthDb = Pick<SQLiteDatabase, 'execAsync' | 'getAllAsync' | 'getFirstAsync' | 'runAsync'>;
+type AppleHealthDb = SQLiteDatabase;
 
 interface AppleHealthExportStateRow {
   last_exported_at: string | null;
@@ -178,21 +182,16 @@ async function saveExportState(
   lastExportedAt: string,
   exportedCount: number,
 ) {
-  await db.runAsync(
-    `
-      INSERT INTO apple_health_export_state (metric_key, last_exported_at, exported_count, updated_at)
-      VALUES (?, ?, ?, ?)
-      ON CONFLICT(metric_key) DO UPDATE SET
-        last_exported_at = excluded.last_exported_at,
-        exported_count = excluded.exported_count,
-        updated_at = excluded.updated_at
-    `,
-    [metric, lastExportedAt, exportedCount, formatSqliteDateTime(new Date())],
-  );
+  await upsertLocalAppleHealthExportState(db, {
+    metric_key: metric,
+    last_exported_at: lastExportedAt,
+    exported_count: exportedCount,
+    updated_at: formatSqliteDateTime(new Date()),
+  });
 }
 
 async function deleteExportState(db: AppleHealthDb, metric: string) {
-  await db.runAsync('DELETE FROM apple_health_export_state WHERE metric_key = ?', [metric]);
+  await deleteLocalAppleHealthExportState(db, metric);
 }
 
 async function markMetricReexportMigration(

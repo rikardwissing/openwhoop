@@ -1,5 +1,9 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 
+import {
+  clearLocalBackgroundSyncState,
+  upsertLocalBackgroundSyncState,
+} from '@/data/graphql/localSqliteMutations';
 import { formatSqliteDateTime, parseSqliteDateTime } from '@/utils/dateTime';
 import type {
   BackgroundSyncResult,
@@ -30,7 +34,7 @@ interface BackgroundSyncStateRow {
   last_sync_import_summary_json: string | null;
 }
 
-type DatabaseLike = Pick<SQLiteDatabase, 'getFirstAsync' | 'runAsync' | 'execAsync'> & {
+type DatabaseLike = SQLiteDatabase & {
   withExclusiveTransactionAsync?: (task: (tx: SQLiteDatabase) => Promise<void>) => Promise<void>;
 };
 
@@ -164,7 +168,7 @@ async function loadBackgroundSyncStateRow(db: Pick<SQLiteDatabase, 'getFirstAsyn
 }
 
 async function persistBackgroundSyncStateRow(
-  db: Pick<SQLiteDatabase, 'getFirstAsync' | 'runAsync'>,
+  db: SQLiteDatabase,
   patch: Partial<BackgroundSyncStateRow>,
 ) {
   const current = await loadBackgroundSyncStateRow(db);
@@ -185,55 +189,22 @@ async function persistBackgroundSyncStateRow(
     ...patch,
   };
 
-  await db.runAsync(
-    `
-      INSERT INTO background_sync_state (
-        id,
-        paired_device_id,
-        last_run_started_at,
-        last_run_finished_at,
-        last_success_at,
-        last_source,
-        last_result,
-        last_error,
-        last_imported_readings,
-        notification_permission,
-        notification_baseline_at,
-        lock_owner,
-        lock_started_at,
-        last_sync_import_summary_json
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        paired_device_id = excluded.paired_device_id,
-        last_run_started_at = excluded.last_run_started_at,
-        last_run_finished_at = excluded.last_run_finished_at,
-        last_success_at = excluded.last_success_at,
-        last_source = excluded.last_source,
-        last_result = excluded.last_result,
-        last_error = excluded.last_error,
-        last_imported_readings = excluded.last_imported_readings,
-        notification_permission = excluded.notification_permission,
-        notification_baseline_at = excluded.notification_baseline_at,
-        lock_owner = excluded.lock_owner,
-        lock_started_at = excluded.lock_started_at,
-        last_sync_import_summary_json = excluded.last_sync_import_summary_json
-    `,
-    BACKGROUND_SYNC_ROW_ID,
-    next.paired_device_id,
-    next.last_run_started_at,
-    next.last_run_finished_at,
-    next.last_success_at,
-    next.last_source,
-    next.last_result,
-    next.last_error,
-    next.last_imported_readings,
-    next.notification_permission,
-    next.notification_baseline_at,
-    next.lock_owner,
-    next.lock_started_at,
-    next.last_sync_import_summary_json,
-  );
+  await upsertLocalBackgroundSyncState(db, {
+    id: BACKGROUND_SYNC_ROW_ID,
+    paired_device_id: next.paired_device_id,
+    last_run_started_at: next.last_run_started_at,
+    last_run_finished_at: next.last_run_finished_at,
+    last_success_at: next.last_success_at,
+    last_source: next.last_source,
+    last_result: next.last_result,
+    last_error: next.last_error,
+    last_imported_readings: next.last_imported_readings,
+    notification_permission: next.notification_permission ?? 'unknown',
+    notification_baseline_at: next.notification_baseline_at,
+    lock_owner: next.lock_owner,
+    lock_started_at: next.lock_started_at,
+    last_sync_import_summary_json: next.last_sync_import_summary_json,
+  });
 }
 
 export async function getBackgroundSyncState(db: Pick<SQLiteDatabase, 'getFirstAsync'>): Promise<BackgroundSyncState> {
@@ -259,7 +230,7 @@ export async function getBackgroundSyncState(db: Pick<SQLiteDatabase, 'getFirstA
 }
 
 export async function setBackgroundSyncPairedDevice(
-  db: Pick<SQLiteDatabase, 'getFirstAsync' | 'runAsync'>,
+  db: SQLiteDatabase,
   deviceId: string | null,
 ) {
   await persistBackgroundSyncStateRow(db, {
@@ -268,7 +239,7 @@ export async function setBackgroundSyncPairedDevice(
 }
 
 export async function updateNotificationPermissionState(
-  db: Pick<SQLiteDatabase, 'getFirstAsync' | 'runAsync'>,
+  db: SQLiteDatabase,
   permission: NotificationPermissionState,
   baselineAt: string | null,
 ) {
@@ -279,7 +250,7 @@ export async function updateNotificationPermissionState(
 }
 
 export async function recordBackgroundRunStart(
-  db: Pick<SQLiteDatabase, 'getFirstAsync' | 'runAsync'>,
+  db: SQLiteDatabase,
   params: {
     deviceId?: string | null;
     source: SyncSource;
@@ -301,7 +272,7 @@ export async function recordBackgroundRunStart(
 }
 
 export async function recordBackgroundRunResult(
-  db: Pick<SQLiteDatabase, 'getFirstAsync' | 'runAsync'>,
+  db: SQLiteDatabase,
   params: {
     deviceId?: string | null;
     source: SyncSource;
@@ -331,7 +302,7 @@ export async function recordBackgroundRunResult(
 }
 
 export async function recordSyncImportSummary(
-  db: Pick<SQLiteDatabase, 'getFirstAsync' | 'runAsync'>,
+  db: SQLiteDatabase,
   summary: SyncImportPerformanceSummary,
 ) {
   await persistBackgroundSyncStateRow(db, {
@@ -384,7 +355,7 @@ export async function acquireBackgroundSyncLock(
 }
 
 export async function releaseBackgroundSyncLock(
-  db: Pick<SQLiteDatabase, 'getFirstAsync' | 'runAsync'>,
+  db: SQLiteDatabase,
   owner: string,
 ) {
   const row = await loadBackgroundSyncStateRow(db);
@@ -398,9 +369,6 @@ export async function releaseBackgroundSyncLock(
   });
 }
 
-export async function clearBackgroundSyncState(db: Pick<SQLiteDatabase, 'execAsync'>) {
-  await db.execAsync(`
-    DELETE FROM delivered_notifications;
-    DELETE FROM background_sync_state;
-  `);
+export async function clearBackgroundSyncState(db: SQLiteDatabase) {
+  await clearLocalBackgroundSyncState(db);
 }

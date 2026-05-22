@@ -1,6 +1,11 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 import * as Notifications from 'expo-notifications';
 
+import {
+  deleteLocalDeliveredNotification,
+  deleteLocalDeliveredNotificationEntities,
+  reserveLocalDeliveredNotification,
+} from '@/data/graphql/localSqliteMutations';
 import { EventNumber } from '@/services/ble/constants';
 import type { DeviceEventPacket } from '@/services/ble/codec';
 import { formatSqliteDateTime } from '@/utils/dateTime';
@@ -81,18 +86,12 @@ async function reserveDeliveredNotification(
   kind: string,
   entityId: string,
 ) {
-  const result = await db.runAsync(
-    `
-      INSERT OR IGNORE INTO delivered_notifications (device_id, kind, entity_id, delivered_at)
-      VALUES (?, ?, ?, ?)
-    `,
-    deviceId,
+  return reserveLocalDeliveredNotification(db, {
+    device_id: deviceId,
     kind,
-    entityId,
-    formatSqliteDateTime(new Date()),
-  );
-
-  return !('changes' in result) || result.changes > 0;
+    entity_id: entityId,
+    delivered_at: formatSqliteDateTime(new Date()),
+  });
 }
 
 async function markDeliveredNotification(
@@ -110,17 +109,11 @@ async function forgetDeliveredNotification(
   kind: string,
   entityId: string,
 ) {
-  await db.runAsync(
-    `
-      DELETE FROM delivered_notifications
-      WHERE device_id = ?
-        AND kind = ?
-        AND entity_id = ?
-    `,
+  await deleteLocalDeliveredNotification(db, {
     deviceId,
     kind,
     entityId,
-  );
+  });
 }
 
 function notificationForWearableEvent(
@@ -195,19 +188,11 @@ async function resetLowBatteryNotificationsIfRecovered(
     return;
   }
 
-  await db.runAsync(
-    `
-      DELETE FROM delivered_notifications
-      WHERE device_id = ?
-        AND kind = ?
-        AND entity_id IN (?, ?, ?)
-    `,
+  await deleteLocalDeliveredNotificationEntities(db, {
     deviceId,
-    WEARABLE_BATTERY_NOTIFICATION_KIND,
-    BATTERY_THRESHOLDS[0].entityId,
-    BATTERY_THRESHOLDS[1].entityId,
-    BATTERY_THRESHOLDS[2].entityId,
-  );
+    kind: WEARABLE_BATTERY_NOTIFICATION_KIND,
+    entityIds: BATTERY_THRESHOLDS.map((threshold) => threshold.entityId),
+  });
 }
 
 async function markImpliedBatteryThresholdsDelivered(

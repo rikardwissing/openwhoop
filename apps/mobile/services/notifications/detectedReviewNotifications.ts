@@ -1,6 +1,7 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 import * as Notifications from 'expo-notifications';
 
+import { reserveLocalDeliveredNotification } from '@/data/graphql/localSqliteMutations';
 import { recordAppIntentEvent } from '@/services/appIntentEvents';
 import { formatClock, formatSqliteDateTime, minutesBetween, parseSqliteDateTime } from '@/utils/dateTime';
 
@@ -75,18 +76,12 @@ async function reserveDeliveredNotification(
   kind: string,
   entityId: string,
 ) {
-  const result = await db.runAsync(
-    `
-      INSERT OR IGNORE INTO delivered_notifications (device_id, kind, entity_id, delivered_at)
-      VALUES (?, ?, ?, ?)
-    `,
-    deviceId,
+  return reserveLocalDeliveredNotification(db, {
+    device_id: deviceId,
     kind,
-    entityId,
-    formatSqliteDateTime(new Date()),
-  );
-
-  return !('changes' in result) || result.changes > 0;
+    entity_id: entityId,
+    delivered_at: formatSqliteDateTime(new Date()),
+  });
 }
 
 function activityEntityId(row: ActivityReviewNotificationRow) {

@@ -41,6 +41,8 @@ Mutations are generated for SQLite tables only, not views.
 - `insert_<table_name>_one(object: Sqlite_<table_name>_insert_input!): Sqlite_<table_name>`
 - `update_<table_name>(where, _set): Sqlite_<table_name>_mutation_response!`
 - `update_<table_name>_by_pk(pk_columns, _set): Sqlite_<table_name>` for tables with primary key metadata
+- `delete_<table_name>(where): Sqlite_<table_name>_mutation_response!`
+- `delete_<table_name>_by_pk(...)` for tables with primary key metadata
 
 Mutation responses include `affected_rows` and `returning`. Returned rows are re-read after the write by primary key when possible, avoiding a dependency on SQLite `RETURNING` support.
 
@@ -61,3 +63,18 @@ mutation UpsertExample($object: Sqlite_example_insert_input!) {
 ```
 
 Use an empty `update_columns` array to ignore conflicts. Constraint enum names are generated as `<table>_pkey` for primary keys and `<table>_<column>_key` for unique indexes.
+
+Mutation operations run inside a SQLite transaction when the adapter exposes `withExclusiveTransactionAsync` or `withTransactionAsync`. This means a request with multiple root mutation fields commits together, or rolls back together if any generated resolver returns a GraphQL error. Query operations are not wrapped in transactions.
+
+```graphql
+mutation ClearLocalState {
+  delete_delivered_notifications(where: {}) {
+    affected_rows
+  }
+  delete_background_sync_state(where: {}) {
+    affected_rows
+  }
+}
+```
+
+Use one mutation document with multiple root fields when several writes must be atomic. Separate `client.mutate` calls are separate requests and therefore separate transactions.

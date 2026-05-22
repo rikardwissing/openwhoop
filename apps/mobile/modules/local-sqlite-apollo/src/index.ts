@@ -18,11 +18,14 @@ import {
   GraphQLObjectType,
   GraphQLSchema,
   GraphQLString,
+  Kind,
+  type DocumentNode,
   type GraphQLFieldConfigMap,
   type GraphQLInputFieldConfigMap,
   type GraphQLInputType,
   type GraphQLOutputType,
   type GraphQLScalarType,
+  type OperationDefinitionNode,
 } from 'graphql';
 
 const DEFAULT_QUERY_LIMIT = 100;
@@ -42,6 +45,8 @@ export interface LocalSQLiteDatabase {
   getAllAsync<T>(sql: string, ...params: LocalSQLiteBindValue[]): Promise<T[]>;
   getFirstAsync<T>(sql: string, ...params: LocalSQLiteBindValue[]): Promise<T | null | undefined>;
   runAsync(sql: string, ...params: LocalSQLiteBindValue[]): Promise<LocalSQLiteRunResult | void>;
+  withExclusiveTransactionAsync?(task: (tx: LocalSQLiteDatabase) => Promise<void>): Promise<void>;
+  withTransactionAsync?(task: () => Promise<void>): Promise<void>;
 }
 
 export interface CreateSQLiteApolloClientOptions {
@@ -156,10 +161,28 @@ type UpdateByPkArgs = {
   pk_columns: Record<string, unknown>;
 };
 
+type DeleteArgs = {
+  where: Record<string, unknown>;
+};
+
 type MutationResponse = {
   affected_rows: number;
   returning: unknown[];
 };
+
+interface SQLiteGraphQLContext {
+  db?: LocalSQLiteDatabase;
+}
+
+class GraphQLExecutionResultError extends Error {
+  constructor(readonly result: FetchResult) {
+    super('GraphQL execution returned errors.');
+  }
+}
+
+function resolveContextDatabase(fallbackDb: LocalSQLiteDatabase, context: unknown) {
+  return (context as SQLiteGraphQLContext | null | undefined)?.db ?? fallbackDb;
+}
 
 function resolveOptions(options: CreateSQLiteApolloClientOptions = {}): ResolvedOptions {
   const defaultLimit = Number.isFinite(options.defaultLimit)
@@ -884,6 +907,56 @@ async function updateTableRowByPk(
   return selectTableRowByPk(db, table, nextPkColumns);
 }
 
+async function deleteTableRows(
+  db: LocalSQLiteDatabase,
+  table: SqliteTableMetadata,
+  args: DeleteArgs,
+): Promise<MutationResponse> {
+  const selectParams: LocalSQLiteBindValue[] = [];
+  const selectWhereSql = buildWhereSql(table, args.where, selectParams);
+  const returning = await db.getAllAsync(
+    [
+      `SELECT * FROM ${quoteIdentifier(table.name)}`,
+      selectWhereSql ? ` WHERE ${selectWhereSql}` : '',
+    ].join(''),
+    ...selectParams,
+  );
+
+  const deleteParams: LocalSQLiteBindValue[] = [];
+  const deleteWhereSql = buildWhereSql(table, args.where, deleteParams);
+  const result = await db.runAsync(
+    [
+      `DELETE FROM ${quoteIdentifier(table.name)}`,
+      deleteWhereSql ? ` WHERE ${deleteWhereSql}` : '',
+    ].join(''),
+    ...deleteParams,
+  );
+
+  return {
+    affected_rows: affectedRowsFromRunResult(result, returning.length),
+    returning,
+  };
+}
+
+async function deleteTableRowByPk(
+  db: LocalSQLiteDatabase,
+  table: SqliteTableMetadata,
+  args: Record<string, unknown>,
+) {
+  const row = await selectTableRowByPk(db, table, args);
+  if (!row) {
+    return null;
+  }
+
+  const params: LocalSQLiteBindValue[] = [];
+  const result = await db.runAsync(
+    `DELETE FROM ${quoteIdentifier(table.name)} WHERE ${buildPrimaryKeyWhereSql(table, args, params)}`,
+    ...params,
+  );
+
+  return affectedRowsFromRunResult(result, 1) > 0 ? row : null;
+}
+
 export function buildSQLiteGraphQLSchema(
   db: LocalSQLiteDatabase,
   metadata: SqliteSchemaMetadata,
@@ -1140,7 +1213,8 @@ export function buildSQLiteGraphQLSchema(
         limit: { type: GraphQLInt },
         offset: { type: GraphQLInt },
       },
-      resolve: (_source, args) => selectTableRows(db, table, args as QueryArgs, options),
+      resolve: (_source, args, context) =>
+        selectTableRows(resolveContextDatabase(db, context), table, args as QueryArgs, options),
     };
 
     if (table.pkColumns.length > 0) {
@@ -1149,7 +1223,8 @@ export function buildSQLiteGraphQLSchema(
         args: Object.fromEntries(
           table.pkColumns.map((column) => [column.name, { type: new GraphQLNonNull(column.graphQLType) }]),
         ),
-        resolve: (_source, args) => selectTableRowByPk(db, table, args as Record<string, unknown>),
+        resolve: (_source, args, context) =>
+          selectTableRowByPk(resolveContextDatabase(db, context), table, args as Record<string, unknown>),
       };
     }
 
@@ -1165,9 +1240,14 @@ export function buildSQLiteGraphQLSchema(
         },
         ...(onConflictInputType(table) ? { on_conflict: { type: onConflictInputType(table)! } } : {}),
       },
-      resolve: (_source, args) => {
+      resolve: (_source, args, context) => {
         const insertArgs = args as InsertManyArgs;
-        return insertTableObjects(db, table, insertArgs.objects, insertArgs.on_conflict);
+        return insertTableObjects(
+          resolveContextDatabase(db, context),
+          table,
+          insertArgs.objects,
+          insertArgs.on_conflict,
+        );
       },
     };
 
@@ -1177,9 +1257,14 @@ export function buildSQLiteGraphQLSchema(
         object: { type: new GraphQLNonNull(insertInputType(table)) },
         ...(onConflictInputType(table) ? { on_conflict: { type: onConflictInputType(table)! } } : {}),
       },
-      resolve: async (_source, args) => {
+      resolve: async (_source, args, context) => {
         const insertArgs = args as InsertOneArgs;
-        const response = await insertTableObjects(db, table, [insertArgs.object], insertArgs.on_conflict);
+        const response = await insertTableObjects(
+          resolveContextDatabase(db, context),
+          table,
+          [insertArgs.object],
+          insertArgs.on_conflict,
+        );
         return response.returning[0] ?? null;
       },
     };
@@ -1190,7 +1275,8 @@ export function buildSQLiteGraphQLSchema(
         where: { type: new GraphQLNonNull(whereInputType(table)) },
         _set: { type: new GraphQLNonNull(setInputType(table)) },
       },
-      resolve: (_source, args) => updateTableRows(db, table, args as UpdateArgs),
+      resolve: (_source, args, context) =>
+        updateTableRows(resolveContextDatabase(db, context), table, args as UpdateArgs),
     };
 
     if (table.pkColumns.length > 0) {
@@ -1200,7 +1286,28 @@ export function buildSQLiteGraphQLSchema(
           pk_columns: { type: new GraphQLNonNull(primaryKeyInputType(table)) },
           _set: { type: new GraphQLNonNull(setInputType(table)) },
         },
-        resolve: (_source, args) => updateTableRowByPk(db, table, args as UpdateByPkArgs),
+        resolve: (_source, args, context) =>
+          updateTableRowByPk(resolveContextDatabase(db, context), table, args as UpdateByPkArgs),
+      };
+    }
+
+    mutationFields[`delete_${table.name}`] = {
+      type: new GraphQLNonNull(mutationResponseType(table)),
+      args: {
+        where: { type: new GraphQLNonNull(whereInputType(table)) },
+      },
+      resolve: (_source, args, context) =>
+        deleteTableRows(resolveContextDatabase(db, context), table, args as DeleteArgs),
+    };
+
+    if (table.pkColumns.length > 0) {
+      mutationFields[`delete_${table.name}_by_pk`] = {
+        type: objectType(table),
+        args: Object.fromEntries(
+          table.pkColumns.map((column) => [column.name, { type: new GraphQLNonNull(column.graphQLType) }]),
+        ),
+        resolve: (_source, args, context) =>
+          deleteTableRowByPk(resolveContextDatabase(db, context), table, args as Record<string, unknown>),
       };
     }
   }
@@ -1221,15 +1328,103 @@ export function buildSQLiteGraphQLSchema(
   });
 }
 
-export function createSQLiteGraphQLLink(schema: GraphQLSchema) {
+function findOperationDefinition(
+  document: DocumentNode,
+  operationName: string | undefined,
+): OperationDefinitionNode | null {
+  const operations = document.definitions.filter(
+    (definition): definition is OperationDefinitionNode => definition.kind === Kind.OPERATION_DEFINITION,
+  );
+
+  if (operationName) {
+    return operations.find((definition) => definition.name?.value === operationName) ?? null;
+  }
+
+  return operations.length === 1 ? operations[0]! : null;
+}
+
+function isMutationOperation(document: DocumentNode, operationName: string | undefined) {
+  return findOperationDefinition(document, operationName)?.operation === 'mutation';
+}
+
+async function executeSQLiteGraphQLOperation(
+  schema: GraphQLSchema,
+  db: LocalSQLiteDatabase,
+  operation: ApolloLink.Operation,
+): Promise<FetchResult> {
+  const result = await executeGraphQL({
+    schema,
+    document: operation.query,
+    operationName: operation.operationName,
+    variableValues: operation.variables,
+    contextValue: { db } satisfies SQLiteGraphQLContext,
+  });
+
+  return result;
+}
+
+function rollbackResult(result: FetchResult): FetchResult {
+  return {
+    ...result,
+    data: null,
+  };
+}
+
+async function executeMutationInTransaction(
+  schema: GraphQLSchema,
+  db: LocalSQLiteDatabase,
+  operation: ApolloLink.Operation,
+): Promise<FetchResult> {
+  let result: FetchResult | null = null;
+
+  try {
+    if (db.withExclusiveTransactionAsync) {
+      await db.withExclusiveTransactionAsync(async (tx) => {
+        result = await executeSQLiteGraphQLOperation(schema, tx, operation);
+        if (result.errors?.length) {
+          throw new GraphQLExecutionResultError(result);
+        }
+      });
+    } else if (db.withTransactionAsync) {
+      await db.withTransactionAsync(async () => {
+        result = await executeSQLiteGraphQLOperation(schema, db, operation);
+        if (result.errors?.length) {
+          throw new GraphQLExecutionResultError(result);
+        }
+      });
+    } else {
+      result = await executeSQLiteGraphQLOperation(schema, db, operation);
+    }
+  } catch (error) {
+    if (error instanceof GraphQLExecutionResultError) {
+      return rollbackResult(error.result);
+    }
+    throw error;
+  }
+
+  if (!result) {
+    throw new Error('SQLite transaction finished without a GraphQL result.');
+  }
+
+  return result;
+}
+
+async function executeSQLiteGraphQLLinkOperation(
+  schema: GraphQLSchema,
+  db: LocalSQLiteDatabase,
+  operation: ApolloLink.Operation,
+): Promise<FetchResult> {
+  if (isMutationOperation(operation.query, operation.operationName)) {
+    return executeMutationInTransaction(schema, db, operation);
+  }
+
+  return executeSQLiteGraphQLOperation(schema, db, operation);
+}
+
+export function createSQLiteGraphQLLink(schema: GraphQLSchema, db: LocalSQLiteDatabase) {
   return new ApolloLink((operation) =>
     new Observable<FetchResult>((observer) => {
-      Promise.resolve(executeGraphQL({
-        schema,
-        document: operation.query,
-        operationName: operation.operationName,
-        variableValues: operation.variables,
-      }))
+      executeSQLiteGraphQLLinkOperation(schema, db, operation)
         .then((result) => {
           observer.next(result);
           observer.complete();
@@ -1264,7 +1459,7 @@ export async function createSQLiteApolloClient(
     cache: new InMemoryCache({
       typePolicies: buildSQLiteTypePolicies(metadata),
     }),
-    link: createSQLiteGraphQLLink(schema),
+    link: createSQLiteGraphQLLink(schema, db),
   });
 }
 

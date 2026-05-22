@@ -8,6 +8,7 @@ import type {
   ManualActivityKind,
 } from '@/data/HealthRepository';
 import {
+  deleteLocalActiveActivityById,
   expirePastOneOffSleepAlarmViaMutation,
   insertLocalActiveActivity,
   loadLocalActivitySourceById,
@@ -7738,7 +7739,7 @@ export class SQLiteHealthRepository implements HealthRepository {
         review_state: 'confirmed',
       });
 
-      await this.db.runAsync('DELETE FROM active_activities WHERE id = 1');
+      await deleteLocalActiveActivityById(this.db, 1);
       await rebuildActivityDetectorPersonalization(this.db);
 
       const metrics = await loadActiveActivityFinishMetrics(this.db, active.start, resolvedEnd);
@@ -7756,7 +7757,7 @@ export class SQLiteHealthRepository implements HealthRepository {
 
   async cancelActiveActivity(): Promise<void> {
     await this.runRepositoryMutation(async () => {
-      await this.db.runAsync('DELETE FROM active_activities WHERE id = 1');
+      await deleteLocalActiveActivityById(this.db, 1);
     });
   }
 

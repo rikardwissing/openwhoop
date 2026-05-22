@@ -39,6 +39,45 @@ export interface LocalSleepPreferencesWrite {
   updated_at: string;
 }
 
+export interface LocalBackgroundSyncStateWrite {
+  id: number;
+  last_error: string | null;
+  last_imported_readings: number | null;
+  last_result: string | null;
+  last_run_finished_at: string | null;
+  last_run_started_at: string | null;
+  last_source: string | null;
+  last_success_at: string | null;
+  last_sync_import_summary_json: string | null;
+  lock_owner: string | null;
+  lock_started_at: string | null;
+  notification_baseline_at: string | null;
+  notification_permission: string;
+  paired_device_id: string | null;
+}
+
+export interface LocalDeliveredNotificationWrite {
+  delivered_at: string;
+  device_id: string;
+  entity_id: string;
+  kind: string;
+}
+
+export interface LocalAppIntentEventWrite {
+  created_at: string;
+  entity_id: string;
+  kind: string;
+  occurred_at: string;
+  payload_json: string;
+}
+
+export interface LocalAppleHealthExportStateWrite {
+  exported_count: number;
+  last_exported_at: string;
+  metric_key: string;
+  updated_at: string;
+}
+
 const ACTIVITY_SOURCE_BY_PK_QUERY = gql`
   query LocalMutationActivitySourceByPk($id: Int!) {
     activities_by_pk(id: $id) {
@@ -74,6 +113,14 @@ const UPSERT_ACTIVITY_BY_START_MUTATION = gql`
   }
 `;
 
+const DELETE_ACTIVE_ACTIVITY_BY_PK_MUTATION = gql`
+  mutation LocalMutationDeleteActiveActivityByPk($id: Int!) {
+    delete_active_activities_by_pk(id: $id) {
+      id
+    }
+  }
+`;
+
 const UPDATE_ACTIVITY_BY_PK_MUTATION = gql`
   mutation LocalMutationUpdateActivityByPk($id: Int!, $set: Sqlite_activities_set_input!) {
     update_activities_by_pk(pk_columns: { id: $id }, _set: $set) {
@@ -102,6 +149,127 @@ const UPSERT_SLEEP_PREFERENCES_MUTATION = gql`
       }
     ) {
       id
+    }
+  }
+`;
+
+const UPSERT_BACKGROUND_SYNC_STATE_MUTATION = gql`
+  mutation LocalMutationUpsertBackgroundSyncState($object: Sqlite_background_sync_state_insert_input!) {
+    insert_background_sync_state_one(
+      object: $object
+      on_conflict: {
+        constraint: background_sync_state_pkey
+        update_columns: [
+          paired_device_id
+          last_run_started_at
+          last_run_finished_at
+          last_success_at
+          last_source
+          last_result
+          last_error
+          last_imported_readings
+          notification_permission
+          notification_baseline_at
+          lock_owner
+          lock_started_at
+          last_sync_import_summary_json
+        ]
+      }
+    ) {
+      id
+    }
+  }
+`;
+
+const UPSERT_DELIVERED_NOTIFICATION_MUTATION = gql`
+  mutation LocalMutationUpsertDeliveredNotification($object: Sqlite_delivered_notifications_insert_input!) {
+    insert_delivered_notifications(
+      objects: [$object]
+      on_conflict: {
+        constraint: delivered_notifications_pkey
+        update_columns: []
+      }
+    ) {
+      affected_rows
+    }
+  }
+`;
+
+const DELETE_DELIVERED_NOTIFICATION_MUTATION = gql`
+  mutation LocalMutationDeleteDeliveredNotification($deviceId: String!, $kind: String!, $entityId: String!) {
+    delete_delivered_notifications(
+      where: {
+        device_id: { _eq: $deviceId }
+        kind: { _eq: $kind }
+        entity_id: { _eq: $entityId }
+      }
+    ) {
+      affected_rows
+    }
+  }
+`;
+
+const DELETE_DELIVERED_NOTIFICATION_ENTITIES_MUTATION = gql`
+  mutation LocalMutationDeleteDeliveredNotificationEntities(
+    $deviceId: String!
+    $kind: String!
+    $entityIds: [String]
+  ) {
+    delete_delivered_notifications(
+      where: {
+        device_id: { _eq: $deviceId }
+        kind: { _eq: $kind }
+        entity_id: { _in: $entityIds }
+      }
+    ) {
+      affected_rows
+    }
+  }
+`;
+
+const CLEAR_BACKGROUND_SYNC_STATE_MUTATION = gql`
+  mutation LocalMutationClearBackgroundSyncState {
+    delete_delivered_notifications(where: {}) {
+      affected_rows
+    }
+    delete_background_sync_state(where: {}) {
+      affected_rows
+    }
+  }
+`;
+
+const UPSERT_APP_INTENT_EVENT_MUTATION = gql`
+  mutation LocalMutationUpsertAppIntentEvent($object: Sqlite_app_intent_events_insert_input!) {
+    insert_app_intent_events_one(
+      object: $object
+      on_conflict: {
+        constraint: app_intent_events_kind_entity_id_key
+        update_columns: [occurred_at, payload_json]
+      }
+    ) {
+      id
+    }
+  }
+`;
+
+const UPSERT_APPLE_HEALTH_EXPORT_STATE_MUTATION = gql`
+  mutation LocalMutationUpsertAppleHealthExportState($object: Sqlite_apple_health_export_state_insert_input!) {
+    insert_apple_health_export_state_one(
+      object: $object
+      on_conflict: {
+        constraint: apple_health_export_state_pkey
+        update_columns: [last_exported_at, exported_count, updated_at]
+      }
+    ) {
+      metric_key
+    }
+  }
+`;
+
+const DELETE_APPLE_HEALTH_EXPORT_STATE_BY_PK_MUTATION = gql`
+  mutation LocalMutationDeleteAppleHealthExportStateByPk($metricKey: String!) {
+    delete_apple_health_export_state_by_pk(metric_key: $metricKey) {
+      metric_key
     }
   }
 `;
@@ -156,6 +324,14 @@ export async function insertLocalActiveActivity(
   return result.data?.insert_active_activities_one ?? null;
 }
 
+export async function deleteLocalActiveActivityById(db: SQLiteDatabase, id: number) {
+  const client = await getSQLiteApolloClient(db);
+  await client.mutate({
+    mutation: DELETE_ACTIVE_ACTIVITY_BY_PK_MUTATION,
+    variables: { id },
+  });
+}
+
 export async function upsertLocalManualActivityByStart(
   db: SQLiteDatabase,
   object: LocalActivityWrite,
@@ -208,6 +384,108 @@ export async function upsertLocalSleepPreferences(
   await client.mutate<{ insert_sleep_preferences_one: { id: number } | null }, { object: LocalSleepPreferencesWrite }>({
     mutation: UPSERT_SLEEP_PREFERENCES_MUTATION,
     variables: { object },
+  });
+}
+
+export async function upsertLocalBackgroundSyncState(
+  db: SQLiteDatabase,
+  object: LocalBackgroundSyncStateWrite,
+) {
+  const client = await getSQLiteApolloClient(db);
+  await client.mutate<
+    { insert_background_sync_state_one: { id: number } | null },
+    { object: LocalBackgroundSyncStateWrite }
+  >({
+    mutation: UPSERT_BACKGROUND_SYNC_STATE_MUTATION,
+    variables: { object },
+  });
+}
+
+export async function reserveLocalDeliveredNotification(
+  db: SQLiteDatabase,
+  object: LocalDeliveredNotificationWrite,
+) {
+  const client = await getSQLiteApolloClient(db);
+  const result = await client.mutate<
+    { insert_delivered_notifications: { affected_rows: number } },
+    { object: LocalDeliveredNotificationWrite }
+  >({
+    mutation: UPSERT_DELIVERED_NOTIFICATION_MUTATION,
+    variables: { object },
+  });
+
+  return (result.data?.insert_delivered_notifications.affected_rows ?? 0) > 0;
+}
+
+export async function deleteLocalDeliveredNotification(
+  db: SQLiteDatabase,
+  variables: {
+    deviceId: string;
+    entityId: string;
+    kind: string;
+  },
+) {
+  const client = await getSQLiteApolloClient(db);
+  await client.mutate({
+    mutation: DELETE_DELIVERED_NOTIFICATION_MUTATION,
+    variables,
+  });
+}
+
+export async function deleteLocalDeliveredNotificationEntities(
+  db: SQLiteDatabase,
+  variables: {
+    deviceId: string;
+    entityIds: string[];
+    kind: string;
+  },
+) {
+  if (variables.entityIds.length === 0) {
+    return;
+  }
+
+  const client = await getSQLiteApolloClient(db);
+  await client.mutate({
+    mutation: DELETE_DELIVERED_NOTIFICATION_ENTITIES_MUTATION,
+    variables,
+  });
+}
+
+export async function clearLocalBackgroundSyncState(db: SQLiteDatabase) {
+  const client = await getSQLiteApolloClient(db);
+  await client.mutate({ mutation: CLEAR_BACKGROUND_SYNC_STATE_MUTATION });
+}
+
+export async function upsertLocalAppIntentEvent(
+  db: SQLiteDatabase,
+  object: LocalAppIntentEventWrite,
+) {
+  const client = await getSQLiteApolloClient(db);
+  await client.mutate<{ insert_app_intent_events_one: { id: number } | null }, { object: LocalAppIntentEventWrite }>({
+    mutation: UPSERT_APP_INTENT_EVENT_MUTATION,
+    variables: { object },
+  });
+}
+
+export async function upsertLocalAppleHealthExportState(
+  db: SQLiteDatabase,
+  object: LocalAppleHealthExportStateWrite,
+) {
+  const client = await getSQLiteApolloClient(db);
+  await client.mutate<
+    { insert_apple_health_export_state_one: { metric_key: string } | null },
+    { object: LocalAppleHealthExportStateWrite }
+  >({
+    mutation: UPSERT_APPLE_HEALTH_EXPORT_STATE_MUTATION,
+    variables: { object },
+  });
+}
+
+export async function deleteLocalAppleHealthExportState(db: SQLiteDatabase, metricKey: string) {
+  const client = await getSQLiteApolloClient(db);
+  await client.mutate({
+    mutation: DELETE_APPLE_HEALTH_EXPORT_STATE_BY_PK_MUTATION,
+    variables: { metricKey },
   });
 }
 

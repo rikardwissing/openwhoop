@@ -1,5 +1,6 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 
+import { upsertLocalAppIntentEvent } from '@/data/graphql/localSqliteMutations';
 import { formatSqliteDateTime } from '@/utils/dateTime';
 
 export const APP_INTENT_EVENT_KINDS = [
@@ -51,24 +52,11 @@ export async function recordAppIntentEvent(
     ...(event.payload ?? {}),
   });
 
-  await db.runAsync(
-    `
-      INSERT INTO app_intent_events (
-        kind,
-        entity_id,
-        occurred_at,
-        payload_json,
-        created_at
-      )
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(kind, entity_id) DO UPDATE SET
-        occurred_at = excluded.occurred_at,
-        payload_json = excluded.payload_json
-    `,
-    event.kind,
-    event.entityId,
-    formatSqliteDateTime(occurredAt),
-    payload,
-    formatSqliteDateTime(new Date()),
-  );
+  await upsertLocalAppIntentEvent(db, {
+    kind: event.kind,
+    entity_id: event.entityId,
+    occurred_at: formatSqliteDateTime(occurredAt),
+    payload_json: payload,
+    created_at: formatSqliteDateTime(new Date()),
+  });
 }
