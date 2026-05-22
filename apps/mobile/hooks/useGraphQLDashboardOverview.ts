@@ -50,7 +50,7 @@ import type {
   TodayOverview,
   TrendPoint,
 } from '@/types/health';
-import { getSQLiteApolloClient } from '@/services/graphql/sqliteApolloClient';
+import { getSQLiteApolloClient } from '@/modules/local-sqlite-apollo/src';
 import {
   dateKey,
   formatAxisTime,

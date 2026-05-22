@@ -1,0 +1,16 @@
+{
+  "name": "@btwearable/local-sqlite-apollo",
+  "version": "0.1.0",
+  "description": "A read-only Apollo Client backed by a reflected local SQLite schema.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "peerDependencies": {
+    "@apollo/client": ">=4",
+    "graphql": ">=16"
+  }
+}

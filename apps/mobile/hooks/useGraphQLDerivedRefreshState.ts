@@ -5,7 +5,7 @@ import { useEffect, useState } from 'react';
 
 import type { DerivedRefreshState } from '@/types/health';
 import { useHealthDataVersion } from '@/providers/HealthDataProvider';
-import { getSQLiteApolloClient } from '@/services/graphql/sqliteApolloClient';
+import { getSQLiteApolloClient } from '@/modules/local-sqlite-apollo/src';
 
 const DERIVED_REFRESH_STATE_QUERY = gql`
   query DerivedRefreshState {

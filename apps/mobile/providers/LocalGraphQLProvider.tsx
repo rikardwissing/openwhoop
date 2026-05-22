@@ -2,7 +2,7 @@ import { ApolloProvider } from '@apollo/client/react';
 import type { SQLiteDatabase } from 'expo-sqlite';
 import { useEffect, useState, type ReactNode } from 'react';
 
-import { getSQLiteApolloClient } from '@/services/graphql/sqliteApolloClient';
+import { getSQLiteApolloClient } from '@/modules/local-sqlite-apollo/src';
 
 type LocalGraphQLClient = Awaited<ReturnType<typeof getSQLiteApolloClient>>;
 

@@ -4,7 +4,7 @@ import type { SQLiteDatabase } from 'expo-sqlite';
 import { useEffect, useState } from 'react';
 
 import type { ActiveActivity, ManualActivityKind } from '@/data/HealthRepository';
-import { getSQLiteApolloClient } from '@/services/graphql/sqliteApolloClient';
+import { getSQLiteApolloClient } from '@/modules/local-sqlite-apollo/src';
 import { parseSqliteDateTime } from '@/utils/dateTime';
 
 const ACTIVE_ACTIVITY_QUERY = gql`

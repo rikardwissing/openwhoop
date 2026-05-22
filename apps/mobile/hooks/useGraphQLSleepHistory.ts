@@ -18,7 +18,7 @@ import {
   type SleepPreferenceRow,
   type SleepStageRow,
 } from '@/data/sqlite/SQLiteHealthRepository';
-import { getSQLiteApolloClient } from '@/services/graphql/sqliteApolloClient';
+import { getSQLiteApolloClient } from '@/modules/local-sqlite-apollo/src';
 import type { HistoryRange, SleepHistoryData, SleepSession } from '@/types/health';
 import {
   dateKey,

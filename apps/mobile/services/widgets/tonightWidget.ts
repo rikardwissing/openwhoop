@@ -4,7 +4,7 @@ import { Platform } from 'react-native';
 import type { SQLiteDatabase } from 'expo-sqlite';
 
 import { fetchGraphQLSleepHistory } from '@/hooks/useGraphQLSleepHistory';
-import { getSQLiteApolloClient } from '@/services/graphql/sqliteApolloClient';
+import { getSQLiteApolloClient } from '@/modules/local-sqlite-apollo/src';
 import type { SleepHistoryData } from '@/types/health';
 import { resolveSleepPlanWindow, resolveTonightSurfaceState } from '@/utils/sleepPlan';
 import SleepLiveActivity from '@/widgets/SleepLiveActivity';

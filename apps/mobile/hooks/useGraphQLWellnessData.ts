@@ -23,7 +23,7 @@ import {
   type SleepCycleRow,
   type SleepStageRow,
 } from '@/data/sqlite/SQLiteHealthRepository';
-import { getSQLiteApolloClient } from '@/services/graphql/sqliteApolloClient';
+import { getSQLiteApolloClient } from '@/modules/local-sqlite-apollo/src';
 import type { ActivitySummary, HistoryRange, MetricSeries, WellnessData } from '@/types/health';
 import { dateKey, formatClock, formatSqliteDateTime, minutesBetween, parseSqliteDateTime } from '@/utils/dateTime';
 import { mean } from '@/utils/math';

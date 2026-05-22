@@ -20,7 +20,7 @@ import {
   type SleepCycleRow,
   type SleepStageRow,
 } from '@/data/sqlite/SQLiteHealthRepository';
-import { getSQLiteApolloClient } from '@/services/graphql/sqliteApolloClient';
+import { getSQLiteApolloClient } from '@/modules/local-sqlite-apollo/src';
 import type { HeartHistoryData, HistoryRange, TrendPoint } from '@/types/health';
 import { formatSqliteDateTime, parseSqliteDateTime } from '@/utils/dateTime';
 import { sanitizeRecordedBpm } from '@/utils/heartRate';

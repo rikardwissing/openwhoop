@@ -6,7 +6,6 @@ import {
   type FetchResult,
   type TypePolicies,
 } from '@apollo/client/core';
-import type { SQLiteBindValue, SQLiteDatabase } from 'expo-sqlite';
 import {
   execute as executeGraphQL,
   GraphQLBoolean,
@@ -28,8 +27,28 @@ import {
 
 const DEFAULT_QUERY_LIMIT = 100;
 const MAX_QUERY_LIMIT = 10_000;
+const DEFAULT_TYPE_NAME_PREFIX = 'Sqlite_';
 const GRAPHQL_NAME_PATTERN = /^[_A-Za-z][_0-9A-Za-z]*$/;
-const sqliteApolloClients = new WeakMap<SQLiteDatabase, Promise<ApolloClient>>();
+const sqliteApolloClients = new WeakMap<LocalSQLiteDatabase, Promise<ApolloClient>>();
+
+export type LocalSQLiteBindValue = string | number | null;
+
+export interface LocalSQLiteDatabase {
+  getAllAsync<T>(sql: string, ...params: LocalSQLiteBindValue[]): Promise<T[]>;
+  getFirstAsync<T>(sql: string, ...params: LocalSQLiteBindValue[]): Promise<T | null | undefined>;
+}
+
+export interface CreateSQLiteApolloClientOptions {
+  defaultLimit?: number;
+  maxLimit?: number;
+  typeNamePrefix?: string;
+}
+
+interface ResolvedOptions {
+  defaultLimit: number;
+  maxLimit: number;
+  typeNamePrefix: string;
+}
 
 interface PragmaTableListRow {
   schema: string;
@@ -45,14 +64,14 @@ interface PragmaTableInfoRow {
   hidden?: number;
 }
 
-interface PragmaIndexListRow {
+export interface PragmaIndexListRow {
   name: string;
   unique: number;
   origin: string;
   partial: number;
 }
 
-interface PragmaForeignKeyRow {
+export interface PragmaForeignKeyRow {
   id: number;
   seq: number;
   table: string;
@@ -62,7 +81,7 @@ interface PragmaForeignKeyRow {
   on_delete: string;
 }
 
-interface SqliteColumnMetadata {
+export interface SqliteColumnMetadata {
   graphQLType: GraphQLScalarType;
   name: string;
   notNull: boolean;
@@ -70,7 +89,7 @@ interface SqliteColumnMetadata {
   sqliteType: string;
 }
 
-interface SqliteTableMetadata {
+export interface SqliteTableMetadata {
   columns: SqliteColumnMetadata[];
   columnNames: Set<string>;
   foreignKeys: PragmaForeignKeyRow[];
@@ -81,7 +100,7 @@ interface SqliteTableMetadata {
   typeName: string;
 }
 
-interface SqliteSchemaMetadata {
+export interface SqliteSchemaMetadata {
   tables: SqliteTableMetadata[];
   tablesByName: Map<string, SqliteTableMetadata>;
 }
@@ -93,7 +112,22 @@ type QueryArgs = {
   where?: Record<string, unknown> | null;
 };
 
-function toSqliteBindValue(value: unknown): SQLiteBindValue {
+function resolveOptions(options: CreateSQLiteApolloClientOptions = {}): ResolvedOptions {
+  const defaultLimit = Number.isFinite(options.defaultLimit)
+    ? Math.max(0, Math.floor(options.defaultLimit!))
+    : DEFAULT_QUERY_LIMIT;
+  const maxLimit = Number.isFinite(options.maxLimit)
+    ? Math.max(0, Math.floor(options.maxLimit!))
+    : MAX_QUERY_LIMIT;
+
+  return {
+    defaultLimit: Math.min(defaultLimit, maxLimit),
+    maxLimit,
+    typeNamePrefix: options.typeNamePrefix ?? DEFAULT_TYPE_NAME_PREFIX,
+  };
+}
+
+function toSqliteBindValue(value: unknown): LocalSQLiteBindValue {
   if (typeof value === 'number' || typeof value === 'string' || value === null) {
     return value;
   }
@@ -140,11 +174,11 @@ function sqliteTypeToGraphQLScalar(type: string | null | undefined): GraphQLScal
   return GraphQLString;
 }
 
-function tableTypeName(tableName: string) {
-  return `Sqlite_${tableName}`;
+function tableTypeName(tableName: string, options: ResolvedOptions) {
+  return `${options.typeNamePrefix}${tableName}`;
 }
 
-async function loadSqliteTables(db: SQLiteDatabase): Promise<PragmaTableListRow[]> {
+async function loadSqliteTables(db: LocalSQLiteDatabase): Promise<PragmaTableListRow[]> {
   try {
     return await db.getAllAsync<PragmaTableListRow>('PRAGMA table_list');
   } catch {
@@ -165,7 +199,7 @@ async function loadSqliteTables(db: SQLiteDatabase): Promise<PragmaTableListRow[
   }
 }
 
-async function loadSqliteColumns(db: SQLiteDatabase, tableName: string): Promise<PragmaTableInfoRow[]> {
+async function loadSqliteColumns(db: LocalSQLiteDatabase, tableName: string): Promise<PragmaTableInfoRow[]> {
   try {
     return await db.getAllAsync<PragmaTableInfoRow>(`PRAGMA table_xinfo(${quoteSqlString(tableName)})`);
   } catch {
@@ -173,7 +207,11 @@ async function loadSqliteColumns(db: SQLiteDatabase, tableName: string): Promise
   }
 }
 
-async function introspectSqliteSchema(db: SQLiteDatabase): Promise<SqliteSchemaMetadata> {
+export async function introspectSqliteSchema(
+  db: LocalSQLiteDatabase,
+  rawOptions: CreateSQLiteApolloClientOptions = {},
+): Promise<SqliteSchemaMetadata> {
+  const options = resolveOptions(rawOptions);
   const tableRows = await loadSqliteTables(db);
   const tables: SqliteTableMetadata[] = [];
 
@@ -215,7 +253,7 @@ async function introspectSqliteSchema(db: SQLiteDatabase): Promise<SqliteSchemaM
       kind: tableRow.type,
       name: tableRow.name,
       pkColumns: columns.filter((column) => column.pkOrder > 0).sort((left, right) => left.pkOrder - right.pkOrder),
-      typeName: tableTypeName(tableRow.name),
+      typeName: tableTypeName(tableRow.name, options),
     });
   }
 
@@ -225,12 +263,12 @@ async function introspectSqliteSchema(db: SQLiteDatabase): Promise<SqliteSchemaM
   };
 }
 
-function clampLimit(value: number | null | undefined) {
+function clampLimit(value: number | null | undefined, options: ResolvedOptions) {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
-    return DEFAULT_QUERY_LIMIT;
+    return options.defaultLimit;
   }
 
-  return Math.max(0, Math.min(MAX_QUERY_LIMIT, Math.floor(value)));
+  return Math.max(0, Math.min(options.maxLimit, Math.floor(value)));
 }
 
 function clampOffset(value: number | null | undefined) {
@@ -245,7 +283,7 @@ function appendComparisonSql(
   columnSql: string,
   comparison: Record<string, unknown>,
   sqlParts: string[],
-  params: SQLiteBindValue[],
+  params: LocalSQLiteBindValue[],
 ) {
   for (const [operator, value] of Object.entries(comparison)) {
     switch (operator) {
@@ -305,7 +343,7 @@ function appendComparisonSql(
 function buildWhereSql(
   table: SqliteTableMetadata,
   where: Record<string, unknown> | null | undefined,
-  params: SQLiteBindValue[],
+  params: LocalSQLiteBindValue[],
 ): string | null {
   if (!where) {
     return null;
@@ -355,22 +393,31 @@ function buildOrderBySql(table: SqliteTableMetadata, orderBy: QueryArgs['order_b
   return clauses.length > 0 ? ` ORDER BY ${clauses.join(', ')}` : '';
 }
 
-async function selectTableRows(db: SQLiteDatabase, table: SqliteTableMetadata, args: QueryArgs) {
-  const params: SQLiteBindValue[] = [];
+async function selectTableRows(
+  db: LocalSQLiteDatabase,
+  table: SqliteTableMetadata,
+  args: QueryArgs,
+  options: ResolvedOptions,
+) {
+  const params: LocalSQLiteBindValue[] = [];
   const whereSql = buildWhereSql(table, args.where, params);
   const sql = [
     `SELECT * FROM ${quoteIdentifier(table.name)}`,
     whereSql ? ` WHERE ${whereSql}` : '',
     buildOrderBySql(table, args.order_by),
-    ` LIMIT ${clampLimit(args.limit)}`,
+    ` LIMIT ${clampLimit(args.limit, options)}`,
     ` OFFSET ${clampOffset(args.offset)}`,
   ].join('');
 
   return db.getAllAsync(sql, ...params);
 }
 
-async function selectTableRowByPk(db: SQLiteDatabase, table: SqliteTableMetadata, args: Record<string, unknown>) {
-  const params: SQLiteBindValue[] = [];
+async function selectTableRowByPk(
+  db: LocalSQLiteDatabase,
+  table: SqliteTableMetadata,
+  args: Record<string, unknown>,
+) {
+  const params: LocalSQLiteBindValue[] = [];
   const whereSql = table.pkColumns.map((column) => {
     params.push(toSqliteBindValue(args[column.name]));
     return `${quoteIdentifier(column.name)} = ?`;
@@ -379,7 +426,12 @@ async function selectTableRowByPk(db: SQLiteDatabase, table: SqliteTableMetadata
   return db.getFirstAsync(`SELECT * FROM ${quoteIdentifier(table.name)} WHERE ${whereSql} LIMIT 1`, ...params);
 }
 
-function buildSQLiteGraphQLSchema(db: SQLiteDatabase, metadata: SqliteSchemaMetadata) {
+export function buildSQLiteGraphQLSchema(
+  db: LocalSQLiteDatabase,
+  metadata: SqliteSchemaMetadata,
+  rawOptions: CreateSQLiteApolloClientOptions = {},
+) {
+  const options = resolveOptions(rawOptions);
   const orderByDirection = new GraphQLEnumType({
     name: 'order_by',
     values: {
@@ -490,7 +542,7 @@ function buildSQLiteGraphQLSchema(db: SQLiteDatabase, metadata: SqliteSchemaMeta
         limit: { type: GraphQLInt },
         offset: { type: GraphQLInt },
       },
-      resolve: (_source, args) => selectTableRows(db, table, args as QueryArgs),
+      resolve: (_source, args) => selectTableRows(db, table, args as QueryArgs, options),
     };
 
     if (table.pkColumns.length > 0) {
@@ -512,7 +564,7 @@ function buildSQLiteGraphQLSchema(db: SQLiteDatabase, metadata: SqliteSchemaMeta
   });
 }
 
-function createSQLiteGraphQLLink(schema: GraphQLSchema) {
+export function createSQLiteGraphQLLink(schema: GraphQLSchema) {
   return new ApolloLink((operation) =>
     new Observable<FetchResult>((observer) => {
       Promise.resolve(executeGraphQL({
@@ -532,7 +584,7 @@ function createSQLiteGraphQLLink(schema: GraphQLSchema) {
   );
 }
 
-function buildTypePolicies(metadata: SqliteSchemaMetadata): TypePolicies {
+export function buildSQLiteTypePolicies(metadata: SqliteSchemaMetadata): TypePolicies {
   const policies: TypePolicies = {};
 
   for (const table of metadata.tables) {
@@ -544,19 +596,29 @@ function buildTypePolicies(metadata: SqliteSchemaMetadata): TypePolicies {
   return policies;
 }
 
-export async function createSQLiteApolloClient(db: SQLiteDatabase): Promise<ApolloClient> {
-  const metadata = await introspectSqliteSchema(db);
-  const schema = buildSQLiteGraphQLSchema(db, metadata);
+export async function createSQLiteApolloClient(
+  db: LocalSQLiteDatabase,
+  options: CreateSQLiteApolloClientOptions = {},
+): Promise<ApolloClient> {
+  const metadata = await introspectSqliteSchema(db, options);
+  const schema = buildSQLiteGraphQLSchema(db, metadata, options);
 
   return new ApolloClient({
     cache: new InMemoryCache({
-      typePolicies: buildTypePolicies(metadata),
+      typePolicies: buildSQLiteTypePolicies(metadata),
     }),
     link: createSQLiteGraphQLLink(schema),
   });
 }
 
-export function getSQLiteApolloClient(db: SQLiteDatabase): Promise<ApolloClient> {
+export function getSQLiteApolloClient(
+  db: LocalSQLiteDatabase,
+  options?: CreateSQLiteApolloClientOptions,
+): Promise<ApolloClient> {
+  if (options) {
+    return createSQLiteApolloClient(db, options);
+  }
+
   const existing = sqliteApolloClients.get(db);
   if (existing) {
     return existing;
