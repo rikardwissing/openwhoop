@@ -43,3 +43,21 @@ Mutations are generated for SQLite tables only, not views.
 - `update_<table_name>_by_pk(pk_columns, _set): Sqlite_<table_name>` for tables with primary key metadata
 
 Mutation responses include `affected_rows` and `returning`. Returned rows are re-read after the write by primary key when possible, avoiding a dependency on SQLite `RETURNING` support.
+
+Insert mutations also support Hasura-style `on_conflict` for primary keys and non-partial unique indexes:
+
+```graphql
+mutation UpsertExample($object: Sqlite_example_insert_input!) {
+  insert_example_one(
+    object: $object
+    on_conflict: {
+      constraint: example_name_key
+      update_columns: [value, updated_at]
+    }
+  ) {
+    id
+  }
+}
+```
+
+Use an empty `update_columns` array to ignore conflicts. Constraint enum names are generated as `<table>_pkey` for primary keys and `<table>_<column>_key` for unique indexes.

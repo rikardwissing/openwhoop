@@ -4,10 +4,6 @@ import type { SQLiteDatabase } from 'expo-sqlite';
 import type { ManualActivityKind } from '@/data/HealthRepository';
 import { getSQLiteApolloClient } from '@/modules/local-sqlite-apollo/src';
 
-interface ActivityIdRow {
-  id: number;
-}
-
 interface ActivitySourceRow {
   id: number;
   source: string | null;
@@ -43,14 +39,6 @@ export interface LocalSleepPreferencesWrite {
   updated_at: string;
 }
 
-const ACTIVITY_BY_START_QUERY = gql`
-  query LocalMutationActivityByStart($start: String!) {
-    activities(where: { start: { _eq: $start } }, limit: 1) {
-      id
-    }
-  }
-`;
-
 const ACTIVITY_SOURCE_BY_PK_QUERY = gql`
   query LocalMutationActivitySourceByPk($id: Int!) {
     activities_by_pk(id: $id) {
@@ -72,9 +60,15 @@ const INSERT_ACTIVE_ACTIVITY_MUTATION = gql`
   }
 `;
 
-const INSERT_ACTIVITY_MUTATION = gql`
-  mutation LocalMutationInsertActivity($object: Sqlite_activities_insert_input!) {
-    insert_activities_one(object: $object) {
+const UPSERT_ACTIVITY_BY_START_MUTATION = gql`
+  mutation LocalMutationUpsertActivityByStart($object: Sqlite_activities_insert_input!) {
+    insert_activities_one(
+      object: $object
+      on_conflict: {
+        constraint: activities_start_key
+        update_columns: [period_id, end, activity, synced, source, review_state]
+      }
+    ) {
       id
     }
   }
@@ -89,17 +83,24 @@ const UPDATE_ACTIVITY_BY_PK_MUTATION = gql`
   }
 `;
 
-const UPDATE_SLEEP_PREFERENCES_BY_PK_MUTATION = gql`
-  mutation LocalMutationUpdateSleepPreferencesByPk($set: Sqlite_sleep_preferences_set_input!) {
-    update_sleep_preferences_by_pk(pk_columns: { id: 1 }, _set: $set) {
-      id
-    }
-  }
-`;
-
-const INSERT_SLEEP_PREFERENCES_MUTATION = gql`
-  mutation LocalMutationInsertSleepPreferences($object: Sqlite_sleep_preferences_insert_input!) {
-    insert_sleep_preferences_one(object: $object) {
+const UPSERT_SLEEP_PREFERENCES_MUTATION = gql`
+  mutation LocalMutationUpsertSleepPreferences($object: Sqlite_sleep_preferences_insert_input!) {
+    insert_sleep_preferences_one(
+      object: $object
+      on_conflict: {
+        constraint: sleep_preferences_pkey
+        update_columns: [
+          target_wake_minutes
+          alarm_enabled
+          alarm_minutes
+          alarm_schedule_kind
+          alarm_weekday_mask
+          alarm_wake_mode
+          alarm_one_off_at
+          updated_at
+        ]
+      }
+    ) {
       id
     }
   }
@@ -160,30 +161,8 @@ export async function upsertLocalManualActivityByStart(
   object: LocalActivityWrite,
 ) {
   const client = await getSQLiteApolloClient(db);
-  const existing = await client.query<{ activities: ActivityIdRow[] }, { start: string }>({
-    fetchPolicy: 'network-only',
-    query: ACTIVITY_BY_START_QUERY,
-    variables: { start: object.start },
-  });
-  const existingId = existing.data?.activities[0]?.id ?? null;
-
-  if (existingId !== null) {
-    const result = await client.mutate<
-      { update_activities_by_pk: ActivitySourceRow | null },
-      { id: number; set: LocalActivityWrite }
-    >({
-      mutation: UPDATE_ACTIVITY_BY_PK_MUTATION,
-      variables: {
-        id: existingId,
-        set: object,
-      },
-    });
-
-    return result.data?.update_activities_by_pk?.id ?? existingId;
-  }
-
-  const result = await client.mutate<{ insert_activities_one: ActivityIdRow | null }, { object: LocalActivityWrite }>({
-    mutation: INSERT_ACTIVITY_MUTATION,
+  const result = await client.mutate<{ insert_activities_one: { id: number } | null }, { object: LocalActivityWrite }>({
+    mutation: UPSERT_ACTIVITY_BY_START_MUTATION,
     variables: { object },
   });
 
@@ -226,22 +205,8 @@ export async function upsertLocalSleepPreferences(
   object: LocalSleepPreferencesWrite,
 ) {
   const client = await getSQLiteApolloClient(db);
-  const updateResult = await client.mutate<
-    { update_sleep_preferences_by_pk: { id: number } | null },
-    { set: LocalSleepPreferencesWrite }
-  >({
-    mutation: UPDATE_SLEEP_PREFERENCES_BY_PK_MUTATION,
-    variables: {
-      set: object,
-    },
-  });
-
-  if (updateResult.data?.update_sleep_preferences_by_pk) {
-    return;
-  }
-
   await client.mutate<{ insert_sleep_preferences_one: { id: number } | null }, { object: LocalSleepPreferencesWrite }>({
-    mutation: INSERT_SLEEP_PREFERENCES_MUTATION,
+    mutation: UPSERT_SLEEP_PREFERENCES_MUTATION,
     variables: { object },
   });
 }

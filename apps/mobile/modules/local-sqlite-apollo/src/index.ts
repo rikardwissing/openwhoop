@@ -77,6 +77,12 @@ export interface PragmaIndexListRow {
   partial: number;
 }
 
+export interface PragmaIndexInfoRow {
+  cid: number;
+  name: string | null;
+  seqno: number;
+}
+
 export interface PragmaForeignKeyRow {
   id: number;
   seq: number;
@@ -95,6 +101,11 @@ export interface SqliteColumnMetadata {
   sqliteType: string;
 }
 
+export interface SqliteUniqueConstraintMetadata {
+  columns: SqliteColumnMetadata[];
+  name: string;
+}
+
 export interface SqliteTableMetadata {
   columns: SqliteColumnMetadata[];
   columnNames: Set<string>;
@@ -104,6 +115,7 @@ export interface SqliteTableMetadata {
   name: string;
   pkColumns: SqliteColumnMetadata[];
   typeName: string;
+  uniqueConstraints: SqliteUniqueConstraintMetadata[];
 }
 
 export interface SqliteSchemaMetadata {
@@ -118,11 +130,19 @@ type QueryArgs = {
   where?: Record<string, unknown> | null;
 };
 
+type OnConflictArgs = {
+  constraint: string;
+  update_columns: string[];
+  where?: Record<string, unknown> | null;
+};
+
 type InsertOneArgs = {
+  on_conflict?: OnConflictArgs | null;
   object: Record<string, unknown>;
 };
 
 type InsertManyArgs = {
+  on_conflict?: OnConflictArgs | null;
   objects: Array<Record<string, unknown>>;
 };
 
@@ -236,6 +256,72 @@ async function loadSqliteColumns(db: LocalSQLiteDatabase, tableName: string): Pr
   }
 }
 
+async function loadSqliteIndexColumns(db: LocalSQLiteDatabase, indexName: string): Promise<PragmaIndexInfoRow[]> {
+  return db.getAllAsync<PragmaIndexInfoRow>(`PRAGMA index_info(${quoteSqlString(indexName)})`).catch(() => []);
+}
+
+function uniqueConstraintName(tableName: string, columns: readonly SqliteColumnMetadata[], suffix: 'pkey' | 'key') {
+  return suffix === 'pkey' ? `${tableName}_pkey` : `${tableName}_${columns.map((column) => column.name).join('_')}_key`;
+}
+
+async function buildUniqueConstraints(
+  db: LocalSQLiteDatabase,
+  tableName: string,
+  columns: readonly SqliteColumnMetadata[],
+  indexes: readonly PragmaIndexListRow[],
+) {
+  const columnsByName = new Map(columns.map((column) => [column.name, column]));
+  const pkColumns = columns.filter((column) => column.pkOrder > 0).sort((left, right) => left.pkOrder - right.pkOrder);
+  const constraints: SqliteUniqueConstraintMetadata[] = [];
+  const seenColumnSets = new Set<string>();
+  const seenNames = new Set<string>();
+
+  const addConstraint = (name: string, constraintColumns: SqliteColumnMetadata[]) => {
+    if (constraintColumns.length === 0 || !isGraphQLName(name)) {
+      return;
+    }
+
+    const columnKey = constraintColumns.map((column) => column.name).join('\0');
+    if (seenColumnSets.has(columnKey)) {
+      return;
+    }
+
+    let resolvedName = name;
+    let index = 2;
+    while (seenNames.has(resolvedName)) {
+      resolvedName = `${name}_${index}`;
+      index += 1;
+    }
+
+    constraints.push({
+      columns: constraintColumns,
+      name: resolvedName,
+    });
+    seenColumnSets.add(columnKey);
+    seenNames.add(resolvedName);
+  };
+
+  addConstraint(uniqueConstraintName(tableName, pkColumns, 'pkey'), pkColumns);
+
+  for (const index of indexes) {
+    if (index.unique !== 1 || index.partial === 1) {
+      continue;
+    }
+
+    const indexColumns = (await loadSqliteIndexColumns(db, index.name))
+      .sort((left, right) => left.seqno - right.seqno)
+      .map((row) => (row.name ? columnsByName.get(row.name) : undefined));
+
+    if (indexColumns.some((column) => !column)) {
+      continue;
+    }
+
+    addConstraint(uniqueConstraintName(tableName, indexColumns as SqliteColumnMetadata[], 'key'), indexColumns as SqliteColumnMetadata[]);
+  }
+
+  return constraints;
+}
+
 export async function introspectSqliteSchema(
   db: LocalSQLiteDatabase,
   rawOptions: CreateSQLiteApolloClientOptions = {},
@@ -273,6 +359,11 @@ export async function introspectSqliteSchema(
       db.getAllAsync<PragmaIndexListRow>(`PRAGMA index_list(${quoteSqlString(tableRow.name)})`).catch(() => []),
       db.getAllAsync<PragmaForeignKeyRow>(`PRAGMA foreign_key_list(${quoteSqlString(tableRow.name)})`).catch(() => []),
     ]);
+    const pkColumns = columns.filter((column) => column.pkOrder > 0).sort((left, right) => left.pkOrder - right.pkOrder);
+    const uniqueConstraints =
+      tableRow.type === 'table'
+        ? await buildUniqueConstraints(db, tableRow.name, columns, indexes)
+        : [];
 
     tables.push({
       columns,
@@ -281,8 +372,9 @@ export async function introspectSqliteSchema(
       indexes,
       kind: tableRow.type,
       name: tableRow.name,
-      pkColumns: columns.filter((column) => column.pkOrder > 0).sort((left, right) => left.pkOrder - right.pkOrder),
+      pkColumns,
       typeName: tableTypeName(tableRow.name, options),
+      uniqueConstraints,
     });
   }
 
@@ -496,14 +588,62 @@ function isIntegerColumn(column: SqliteColumnMetadata) {
   return column.sqliteType.toUpperCase().includes('INT');
 }
 
+function uniqueConstraintForOnConflict(table: SqliteTableMetadata, onConflict: OnConflictArgs | null | undefined) {
+  if (!onConflict) {
+    return null;
+  }
+
+  const constraint = table.uniqueConstraints.find((candidate) => candidate.name === onConflict.constraint);
+  if (!constraint) {
+    throw new Error(`Unknown constraint ${onConflict.constraint} for ${table.name}`);
+  }
+
+  return constraint;
+}
+
+async function selectTableRowByColumns(
+  db: LocalSQLiteDatabase,
+  table: SqliteTableMetadata,
+  columns: readonly SqliteColumnMetadata[],
+  values: Record<string, unknown>,
+) {
+  if (columns.length === 0 || columns.some((column) => values[column.name] === undefined)) {
+    return null;
+  }
+
+  const params: LocalSQLiteBindValue[] = [];
+  const whereSql = columns
+    .map((column) => {
+      const value = values[column.name];
+      if (value === null) {
+        return `${quoteIdentifier(column.name)} IS NULL`;
+      }
+
+      params.push(toSqliteBindValue(value));
+      return `${quoteIdentifier(column.name)} = ?`;
+    })
+    .join(' AND ');
+
+  return db.getFirstAsync(`SELECT * FROM ${quoteIdentifier(table.name)} WHERE ${whereSql} LIMIT 1`, ...params);
+}
+
 async function selectInsertedRow(
   db: LocalSQLiteDatabase,
   table: SqliteTableMetadata,
   object: Record<string, unknown>,
   result: LocalSQLiteRunResult | void,
+  onConflict: OnConflictArgs | null | undefined,
 ) {
   if (objectHasAllPrimaryKeyValues(table, object)) {
     const row = await selectTableRowByPk(db, table, object);
+    if (row) {
+      return row;
+    }
+  }
+
+  const conflictConstraint = uniqueConstraintForOnConflict(table, onConflict);
+  if (conflictConstraint) {
+    const row = await selectTableRowByColumns(db, table, conflictConstraint.columns, object);
     if (row) {
       return row;
     }
@@ -528,14 +668,43 @@ async function selectInsertedRow(
     .catch(() => null);
 }
 
+function buildOnConflictSql(
+  table: SqliteTableMetadata,
+  onConflict: OnConflictArgs | null | undefined,
+  params: LocalSQLiteBindValue[],
+) {
+  const constraint = uniqueConstraintForOnConflict(table, onConflict);
+  if (!constraint || !onConflict) {
+    return '';
+  }
+
+  const conflictColumnsSql = constraint.columns.map((column) => quoteIdentifier(column.name)).join(', ');
+  const updateColumns = onConflict.update_columns.filter((columnName) => table.columnNames.has(columnName));
+
+  if (updateColumns.length === 0) {
+    return ` ON CONFLICT (${conflictColumnsSql}) DO NOTHING`;
+  }
+
+  const assignments = updateColumns.map(
+    (columnName) => `${quoteIdentifier(columnName)} = excluded.${quoteIdentifier(columnName)}`,
+  );
+  const whereSql = buildWhereSql(table, onConflict.where, params);
+
+  return [
+    ` ON CONFLICT (${conflictColumnsSql}) DO UPDATE SET ${assignments.join(', ')}`,
+    whereSql ? ` WHERE ${whereSql}` : '',
+  ].join('');
+}
+
 async function insertTableObject(
   db: LocalSQLiteDatabase,
   table: SqliteTableMetadata,
   object: Record<string, unknown>,
+  onConflict?: OnConflictArgs | null,
 ) {
   const entries = columnValueEntries(table, object);
   const params = entries.map((entry) => entry[1]);
-  const sql =
+  const insertSql =
     entries.length > 0
       ? [
           `INSERT INTO ${quoteIdentifier(table.name)} (`,
@@ -545,12 +714,14 @@ async function insertTableObject(
           `)`,
         ].join('')
       : `INSERT INTO ${quoteIdentifier(table.name)} DEFAULT VALUES`;
+  const sql = `${insertSql}${buildOnConflictSql(table, onConflict, params)}`;
 
   const result = await db.runAsync(sql, ...params);
-  const row = await selectInsertedRow(db, table, object, result);
+  const affectedRows = affectedRowsFromRunResult(result, 1);
+  const row = affectedRows > 0 ? await selectInsertedRow(db, table, object, result, onConflict) : null;
 
   return {
-    affectedRows: affectedRowsFromRunResult(result, 1),
+    affectedRows,
     row,
   };
 }
@@ -559,12 +730,13 @@ async function insertTableObjects(
   db: LocalSQLiteDatabase,
   table: SqliteTableMetadata,
   objects: Array<Record<string, unknown>>,
+  onConflict?: OnConflictArgs | null,
 ): Promise<MutationResponse> {
   const returning: unknown[] = [];
   let affectedRows = 0;
 
   for (const object of objects) {
-    const result = await insertTableObject(db, table, object);
+    const result = await insertTableObject(db, table, object, onConflict);
     affectedRows += result.affectedRows;
 
     if (result.row) {
@@ -733,6 +905,9 @@ export function buildSQLiteGraphQLSchema(
   const setInputTypes = new Map<string, GraphQLInputObjectType>();
   const primaryKeyInputTypes = new Map<string, GraphQLInputObjectType>();
   const mutationResponseTypes = new Map<string, GraphQLObjectType>();
+  const constraintTypes = new Map<string, GraphQLEnumType>();
+  const updateColumnTypes = new Map<string, GraphQLEnumType>();
+  const onConflictTypes = new Map<string, GraphQLInputObjectType>();
 
   const comparisonType = (table: SqliteTableMetadata, column: SqliteColumnMetadata) => {
     const key = `${table.name}.${column.name}`;
@@ -892,6 +1067,67 @@ export function buildSQLiteGraphQLSchema(
     return type;
   };
 
+  const constraintEnumType = (table: SqliteTableMetadata): GraphQLEnumType | null => {
+    if (table.uniqueConstraints.length === 0) {
+      return null;
+    }
+
+    const existing = constraintTypes.get(table.name);
+    if (existing) {
+      return existing;
+    }
+
+    const type = new GraphQLEnumType({
+      name: `${table.typeName}_constraint`,
+      values: Object.fromEntries(
+        table.uniqueConstraints.map((constraint) => [constraint.name, { value: constraint.name }]),
+      ),
+    });
+
+    constraintTypes.set(table.name, type);
+    return type;
+  };
+
+  const updateColumnEnumType = (table: SqliteTableMetadata): GraphQLEnumType => {
+    const existing = updateColumnTypes.get(table.name);
+    if (existing) {
+      return existing;
+    }
+
+    const type = new GraphQLEnumType({
+      name: `${table.typeName}_update_column`,
+      values: Object.fromEntries(table.columns.map((column) => [column.name, { value: column.name }])),
+    });
+
+    updateColumnTypes.set(table.name, type);
+    return type;
+  };
+
+  const onConflictInputType = (table: SqliteTableMetadata): GraphQLInputObjectType | null => {
+    const constraintType = constraintEnumType(table);
+    if (!constraintType) {
+      return null;
+    }
+
+    const existing = onConflictTypes.get(table.name);
+    if (existing) {
+      return existing;
+    }
+
+    const updateColumnType = updateColumnEnumType(table);
+    const type = new GraphQLInputObjectType({
+      name: `${table.typeName}_on_conflict`,
+      fields: {
+        constraint: { type: new GraphQLNonNull(constraintType) },
+        update_columns: { type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(updateColumnType))) },
+        where: { type: whereInputType(table) },
+      },
+    });
+
+    onConflictTypes.set(table.name, type);
+    return type;
+  };
+
   const queryFields: GraphQLFieldConfigMap<unknown, unknown> = {};
   const mutationFields: GraphQLFieldConfigMap<unknown, unknown> = {};
 
@@ -927,17 +1163,23 @@ export function buildSQLiteGraphQLSchema(
         objects: {
           type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(insertInputType(table)))),
         },
+        ...(onConflictInputType(table) ? { on_conflict: { type: onConflictInputType(table)! } } : {}),
       },
-      resolve: (_source, args) => insertTableObjects(db, table, (args as InsertManyArgs).objects),
+      resolve: (_source, args) => {
+        const insertArgs = args as InsertManyArgs;
+        return insertTableObjects(db, table, insertArgs.objects, insertArgs.on_conflict);
+      },
     };
 
     mutationFields[`insert_${table.name}_one`] = {
       type: objectType(table),
       args: {
         object: { type: new GraphQLNonNull(insertInputType(table)) },
+        ...(onConflictInputType(table) ? { on_conflict: { type: onConflictInputType(table)! } } : {}),
       },
       resolve: async (_source, args) => {
-        const response = await insertTableObjects(db, table, [(args as InsertOneArgs).object]);
+        const insertArgs = args as InsertOneArgs;
+        const response = await insertTableObjects(db, table, [insertArgs.object], insertArgs.on_conflict);
         return response.returning[0] ?? null;
       },
     };
