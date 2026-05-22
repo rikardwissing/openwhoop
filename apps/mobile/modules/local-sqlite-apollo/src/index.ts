@@ -33,9 +33,15 @@ const sqliteApolloClients = new WeakMap<LocalSQLiteDatabase, Promise<ApolloClien
 
 export type LocalSQLiteBindValue = string | number | null;
 
+export interface LocalSQLiteRunResult {
+  changes?: number;
+  lastInsertRowId?: number;
+}
+
 export interface LocalSQLiteDatabase {
   getAllAsync<T>(sql: string, ...params: LocalSQLiteBindValue[]): Promise<T[]>;
   getFirstAsync<T>(sql: string, ...params: LocalSQLiteBindValue[]): Promise<T | null | undefined>;
+  runAsync(sql: string, ...params: LocalSQLiteBindValue[]): Promise<LocalSQLiteRunResult | void>;
 }
 
 export interface CreateSQLiteApolloClientOptions {
@@ -110,6 +116,29 @@ type QueryArgs = {
   offset?: number | null;
   order_by?: Array<Record<string, 'asc' | 'desc' | null> | null> | null;
   where?: Record<string, unknown> | null;
+};
+
+type InsertOneArgs = {
+  object: Record<string, unknown>;
+};
+
+type InsertManyArgs = {
+  objects: Array<Record<string, unknown>>;
+};
+
+type UpdateArgs = {
+  _set: Record<string, unknown>;
+  where: Record<string, unknown>;
+};
+
+type UpdateByPkArgs = {
+  _set: Record<string, unknown>;
+  pk_columns: Record<string, unknown>;
+};
+
+type MutationResponse = {
+  affected_rows: number;
+  returning: unknown[];
 };
 
 function resolveOptions(options: CreateSQLiteApolloClientOptions = {}): ResolvedOptions {
@@ -426,6 +455,263 @@ async function selectTableRowByPk(
   return db.getFirstAsync(`SELECT * FROM ${quoteIdentifier(table.name)} WHERE ${whereSql} LIMIT 1`, ...params);
 }
 
+function columnValueEntries(table: SqliteTableMetadata, values: Record<string, unknown> | null | undefined) {
+  if (!values) {
+    return [];
+  }
+
+  return table.columns.flatMap((column): Array<[SqliteColumnMetadata, LocalSQLiteBindValue]> => {
+    if (!Object.prototype.hasOwnProperty.call(values, column.name)) {
+      return [];
+    }
+
+    return [[column, toSqliteBindValue(values[column.name])]];
+  });
+}
+
+function affectedRowsFromRunResult(result: LocalSQLiteRunResult | void, fallback: number) {
+  if (result && typeof result.changes === 'number' && Number.isFinite(result.changes)) {
+    return Math.max(0, Math.floor(result.changes));
+  }
+
+  return fallback;
+}
+
+function lastInsertRowIdFromRunResult(result: LocalSQLiteRunResult | void) {
+  if (result && typeof result.lastInsertRowId === 'number' && Number.isFinite(result.lastInsertRowId)) {
+    return result.lastInsertRowId;
+  }
+
+  return null;
+}
+
+function objectHasAllPrimaryKeyValues(table: SqliteTableMetadata, values: Record<string, unknown>) {
+  return (
+    table.pkColumns.length > 0 &&
+    table.pkColumns.every((column) => values[column.name] !== undefined && values[column.name] !== null)
+  );
+}
+
+function isIntegerColumn(column: SqliteColumnMetadata) {
+  return column.sqliteType.toUpperCase().includes('INT');
+}
+
+async function selectInsertedRow(
+  db: LocalSQLiteDatabase,
+  table: SqliteTableMetadata,
+  object: Record<string, unknown>,
+  result: LocalSQLiteRunResult | void,
+) {
+  if (objectHasAllPrimaryKeyValues(table, object)) {
+    const row = await selectTableRowByPk(db, table, object);
+    if (row) {
+      return row;
+    }
+  }
+
+  const lastInsertRowId = lastInsertRowIdFromRunResult(result);
+  if (lastInsertRowId === null) {
+    return null;
+  }
+
+  if (table.pkColumns.length === 1 && isIntegerColumn(table.pkColumns[0]!)) {
+    const row = await selectTableRowByPk(db, table, {
+      [table.pkColumns[0]!.name]: lastInsertRowId,
+    });
+    if (row) {
+      return row;
+    }
+  }
+
+  return db
+    .getFirstAsync(`SELECT * FROM ${quoteIdentifier(table.name)} WHERE rowid = ? LIMIT 1`, lastInsertRowId)
+    .catch(() => null);
+}
+
+async function insertTableObject(
+  db: LocalSQLiteDatabase,
+  table: SqliteTableMetadata,
+  object: Record<string, unknown>,
+) {
+  const entries = columnValueEntries(table, object);
+  const params = entries.map((entry) => entry[1]);
+  const sql =
+    entries.length > 0
+      ? [
+          `INSERT INTO ${quoteIdentifier(table.name)} (`,
+          entries.map(([column]) => quoteIdentifier(column.name)).join(', '),
+          `) VALUES (`,
+          entries.map(() => '?').join(', '),
+          `)`,
+        ].join('')
+      : `INSERT INTO ${quoteIdentifier(table.name)} DEFAULT VALUES`;
+
+  const result = await db.runAsync(sql, ...params);
+  const row = await selectInsertedRow(db, table, object, result);
+
+  return {
+    affectedRows: affectedRowsFromRunResult(result, 1),
+    row,
+  };
+}
+
+async function insertTableObjects(
+  db: LocalSQLiteDatabase,
+  table: SqliteTableMetadata,
+  objects: Array<Record<string, unknown>>,
+): Promise<MutationResponse> {
+  const returning: unknown[] = [];
+  let affectedRows = 0;
+
+  for (const object of objects) {
+    const result = await insertTableObject(db, table, object);
+    affectedRows += result.affectedRows;
+
+    if (result.row) {
+      returning.push(result.row);
+    }
+  }
+
+  return {
+    affected_rows: affectedRows,
+    returning,
+  };
+}
+
+async function selectPrimaryKeyRowsForWhere(
+  db: LocalSQLiteDatabase,
+  table: SqliteTableMetadata,
+  where: Record<string, unknown> | null | undefined,
+) {
+  if (table.pkColumns.length === 0) {
+    return [];
+  }
+
+  const params: LocalSQLiteBindValue[] = [];
+  const whereSql = buildWhereSql(table, where, params);
+  const sql = [
+    `SELECT ${table.pkColumns.map((column) => quoteIdentifier(column.name)).join(', ')}`,
+    ` FROM ${quoteIdentifier(table.name)}`,
+    whereSql ? ` WHERE ${whereSql}` : '',
+  ].join('');
+
+  return db.getAllAsync<Record<string, unknown>>(sql, ...params);
+}
+
+async function selectRowsByPrimaryKeyRows(
+  db: LocalSQLiteDatabase,
+  table: SqliteTableMetadata,
+  primaryKeyRows: Array<Record<string, unknown>>,
+) {
+  const rows: unknown[] = [];
+
+  for (const primaryKeyRow of primaryKeyRows) {
+    const row = await selectTableRowByPk(db, table, primaryKeyRow);
+    if (row) {
+      rows.push(row);
+    }
+  }
+
+  return rows;
+}
+
+function buildUpdateSql(
+  table: SqliteTableMetadata,
+  values: Record<string, unknown>,
+  where: Record<string, unknown> | null | undefined,
+  params: LocalSQLiteBindValue[],
+) {
+  const entries = columnValueEntries(table, values);
+  if (entries.length === 0) {
+    throw new Error(`No columns supplied for update_${table.name}`);
+  }
+
+  const assignments = entries.map(([column, value]) => {
+    params.push(value);
+    return `${quoteIdentifier(column.name)} = ?`;
+  });
+  const whereParams: LocalSQLiteBindValue[] = [];
+  const whereSql = buildWhereSql(table, where, whereParams);
+  params.push(...whereParams);
+
+  return [
+    `UPDATE ${quoteIdentifier(table.name)} SET ${assignments.join(', ')}`,
+    whereSql ? ` WHERE ${whereSql}` : '',
+  ].join('');
+}
+
+function buildPrimaryKeyWhereSql(
+  table: SqliteTableMetadata,
+  values: Record<string, unknown>,
+  params: LocalSQLiteBindValue[],
+) {
+  return table.pkColumns
+    .map((column) => {
+      params.push(toSqliteBindValue(values[column.name]));
+      return `${quoteIdentifier(column.name)} = ?`;
+    })
+    .join(' AND ');
+}
+
+function buildUpdateByPkSql(
+  table: SqliteTableMetadata,
+  values: Record<string, unknown>,
+  primaryKeyValues: Record<string, unknown>,
+  params: LocalSQLiteBindValue[],
+) {
+  const entries = columnValueEntries(table, values);
+  if (entries.length === 0) {
+    throw new Error(`No columns supplied for update_${table.name}_by_pk`);
+  }
+
+  const assignments = entries.map(([column, value]) => {
+    params.push(value);
+    return `${quoteIdentifier(column.name)} = ?`;
+  });
+  const whereSql = buildPrimaryKeyWhereSql(table, primaryKeyValues, params);
+
+  return `UPDATE ${quoteIdentifier(table.name)} SET ${assignments.join(', ')} WHERE ${whereSql}`;
+}
+
+async function updateTableRows(
+  db: LocalSQLiteDatabase,
+  table: SqliteTableMetadata,
+  args: UpdateArgs,
+): Promise<MutationResponse> {
+  const primaryKeyRows = await selectPrimaryKeyRowsForWhere(db, table, args.where);
+  const params: LocalSQLiteBindValue[] = [];
+  const result = await db.runAsync(buildUpdateSql(table, args._set, args.where, params), ...params);
+  const returning = await selectRowsByPrimaryKeyRows(db, table, primaryKeyRows);
+
+  return {
+    affected_rows: affectedRowsFromRunResult(result, returning.length),
+    returning,
+  };
+}
+
+async function updateTableRowByPk(
+  db: LocalSQLiteDatabase,
+  table: SqliteTableMetadata,
+  args: UpdateByPkArgs,
+) {
+  const params: LocalSQLiteBindValue[] = [];
+  const result = await db.runAsync(buildUpdateByPkSql(table, args._set, args.pk_columns, params), ...params);
+  const affectedRows = affectedRowsFromRunResult(result, 0);
+
+  if (affectedRows === 0) {
+    return null;
+  }
+
+  const nextPkColumns = { ...args.pk_columns };
+  for (const column of table.pkColumns) {
+    if (Object.prototype.hasOwnProperty.call(args._set, column.name)) {
+      nextPkColumns[column.name] = args._set[column.name];
+    }
+  }
+
+  return selectTableRowByPk(db, table, nextPkColumns);
+}
+
 export function buildSQLiteGraphQLSchema(
   db: LocalSQLiteDatabase,
   metadata: SqliteSchemaMetadata,
@@ -443,6 +729,10 @@ export function buildSQLiteGraphQLSchema(
   const whereTypes = new Map<string, GraphQLInputObjectType>();
   const orderTypes = new Map<string, GraphQLInputObjectType>();
   const comparisonTypes = new Map<string, GraphQLInputObjectType>();
+  const insertInputTypes = new Map<string, GraphQLInputObjectType>();
+  const setInputTypes = new Map<string, GraphQLInputObjectType>();
+  const primaryKeyInputTypes = new Map<string, GraphQLInputObjectType>();
+  const mutationResponseTypes = new Map<string, GraphQLObjectType>();
 
   const comparisonType = (table: SqliteTableMetadata, column: SqliteColumnMetadata) => {
     const key = `${table.name}.${column.name}`;
@@ -531,7 +821,79 @@ export function buildSQLiteGraphQLSchema(
     return type;
   };
 
+  const insertInputType = (table: SqliteTableMetadata): GraphQLInputObjectType => {
+    const existing = insertInputTypes.get(table.name);
+    if (existing) {
+      return existing;
+    }
+
+    const type = new GraphQLInputObjectType({
+      name: `${table.typeName}_insert_input`,
+      fields: Object.fromEntries(
+        table.columns.map((column) => [column.name, { type: column.graphQLType as GraphQLInputType }]),
+      ),
+    });
+
+    insertInputTypes.set(table.name, type);
+    return type;
+  };
+
+  const setInputType = (table: SqliteTableMetadata): GraphQLInputObjectType => {
+    const existing = setInputTypes.get(table.name);
+    if (existing) {
+      return existing;
+    }
+
+    const type = new GraphQLInputObjectType({
+      name: `${table.typeName}_set_input`,
+      fields: Object.fromEntries(
+        table.columns.map((column) => [column.name, { type: column.graphQLType as GraphQLInputType }]),
+      ),
+    });
+
+    setInputTypes.set(table.name, type);
+    return type;
+  };
+
+  const primaryKeyInputType = (table: SqliteTableMetadata): GraphQLInputObjectType => {
+    const existing = primaryKeyInputTypes.get(table.name);
+    if (existing) {
+      return existing;
+    }
+
+    const type = new GraphQLInputObjectType({
+      name: `${table.typeName}_pk_columns_input`,
+      fields: Object.fromEntries(
+        table.pkColumns.map((column) => [column.name, { type: new GraphQLNonNull(column.graphQLType) }]),
+      ),
+    });
+
+    primaryKeyInputTypes.set(table.name, type);
+    return type;
+  };
+
+  const mutationResponseType = (table: SqliteTableMetadata): GraphQLObjectType => {
+    const existing = mutationResponseTypes.get(table.name);
+    if (existing) {
+      return existing;
+    }
+
+    const type = new GraphQLObjectType({
+      name: `${table.typeName}_mutation_response`,
+      fields: {
+        affected_rows: { type: new GraphQLNonNull(GraphQLInt) },
+        returning: {
+          type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(objectType(table)))),
+        },
+      },
+    });
+
+    mutationResponseTypes.set(table.name, type);
+    return type;
+  };
+
   const queryFields: GraphQLFieldConfigMap<unknown, unknown> = {};
+  const mutationFields: GraphQLFieldConfigMap<unknown, unknown> = {};
 
   for (const table of metadata.tables) {
     queryFields[table.name] = {
@@ -554,13 +916,66 @@ export function buildSQLiteGraphQLSchema(
         resolve: (_source, args) => selectTableRowByPk(db, table, args as Record<string, unknown>),
       };
     }
+
+    if (table.kind !== 'table') {
+      continue;
+    }
+
+    mutationFields[`insert_${table.name}`] = {
+      type: new GraphQLNonNull(mutationResponseType(table)),
+      args: {
+        objects: {
+          type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(insertInputType(table)))),
+        },
+      },
+      resolve: (_source, args) => insertTableObjects(db, table, (args as InsertManyArgs).objects),
+    };
+
+    mutationFields[`insert_${table.name}_one`] = {
+      type: objectType(table),
+      args: {
+        object: { type: new GraphQLNonNull(insertInputType(table)) },
+      },
+      resolve: async (_source, args) => {
+        const response = await insertTableObjects(db, table, [(args as InsertOneArgs).object]);
+        return response.returning[0] ?? null;
+      },
+    };
+
+    mutationFields[`update_${table.name}`] = {
+      type: new GraphQLNonNull(mutationResponseType(table)),
+      args: {
+        where: { type: new GraphQLNonNull(whereInputType(table)) },
+        _set: { type: new GraphQLNonNull(setInputType(table)) },
+      },
+      resolve: (_source, args) => updateTableRows(db, table, args as UpdateArgs),
+    };
+
+    if (table.pkColumns.length > 0) {
+      mutationFields[`update_${table.name}_by_pk`] = {
+        type: objectType(table),
+        args: {
+          pk_columns: { type: new GraphQLNonNull(primaryKeyInputType(table)) },
+          _set: { type: new GraphQLNonNull(setInputType(table)) },
+        },
+        resolve: (_source, args) => updateTableRowByPk(db, table, args as UpdateByPkArgs),
+      };
+    }
   }
+
+  const mutation = Object.keys(mutationFields).length
+    ? new GraphQLObjectType({
+        name: 'Mutation',
+        fields: mutationFields,
+      })
+    : undefined;
 
   return new GraphQLSchema({
     query: new GraphQLObjectType({
       name: 'Query',
       fields: queryFields,
     }),
+    mutation,
   });
 }
 
